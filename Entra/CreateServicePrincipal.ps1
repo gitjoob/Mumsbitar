@@ -238,7 +238,7 @@ Write-Host "`n╔═════════════════════
 Write-Host "║  STEP 1: Application Registration                            ║" -ForegroundColor Cyan
 Write-Host "╚══════════════════════════════════════════════════════════════╝" -ForegroundColor Cyan
 
-$appDisplayName = "sp-onevinn-prmfa"
+$appDisplayName = "sp-utility"
 $app = $null
 $existingSecret = $null
 $reuseSecret = $false
