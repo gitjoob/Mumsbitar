@@ -2,7 +2,7 @@
 .SYNOPSIS
 Creates an access review of the demo group's direct members.
 .DESCRIPTION
-Connect to Microsoft Graph first, for example with Connect-DemoOnevinn.
+Connect to Microsoft Graph first.
 Requires AccessReview.ReadWrite.All and an appropriate access review license.
 Group owners review access, with the configured user as fallback.
 Notifications are enabled. After three days, unanswered reviews default to Deny
