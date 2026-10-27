@@ -9,6 +9,9 @@ Optional completion-notification recipients are configured in
 $AdditionalNotificationRecipients; leave it empty to send no additional notifications.
 Notifications are enabled. After three days, unanswered reviews default to Deny
 and denied access is automatically removed.
+Groups synchronized from on-premises Active Directory cannot be changed by the
+access review. For those groups, decisions are only recorded and must be
+applied in Active Directory.
 Frequency defaults to OneTime; use Frequency to select Weekly, Monthly,
 Quarterly, SemiAnnual, or Annual recurrence. StartDate defaults to today.
 For recurring reviews, EndDate defaults to the end of the current month; provide
@@ -116,10 +119,15 @@ if ($Frequency -ne 'OneTime' -and $EndDate.Date -lt $StartDate.Date.AddDays(3)) 
 }
 
 try {
-	$group = Get-MgGroup -GroupId $GroupId -Property id, displayName
+	$group = Get-MgGroup -GroupId $GroupId -Property id, displayName, onPremisesSyncEnabled
 }
 catch {
 	throw "Unable to read group '$GroupId'. Check that the group exists and that the signed-in account can read it. $($_.Exception.Message)"
+}
+
+$isSyncedGroup = $group.OnPremisesSyncEnabled -eq $true
+if ($isSyncedGroup) {
+	Write-Warning "Group '$($group.displayName)' is synchronized from on-premises Active Directory. Decisions will be recorded but not applied; remove denied access in Active Directory."
 }
 
 $reviewDisplayName = if ($PSBoundParameters.ContainsKey('ReviewName')) {
@@ -135,7 +143,12 @@ if ([string]::IsNullOrWhiteSpace($reviewDisplayName)) {
 
 $params = @{
 	displayName = $reviewDisplayName
-	descriptionForAdmins = "Review direct membership of the group $($group.displayName)."
+	descriptionForAdmins = if ($isSyncedGroup) {
+		"Review direct membership of the group $($group.displayName). The group is synchronized from on-premises Active Directory; apply denied access in Active Directory."
+	}
+	else {
+		"Review direct membership of the group $($group.displayName)."
+	}
 	descriptionForReviewers = "Confirm whether each user still needs access to the group $($group.displayName)."
 	scope = @{
 		"@odata.type" = "#microsoft.graph.accessReviewQueryScope"
@@ -156,16 +169,19 @@ $params = @{
 		defaultDecisionEnabled = $true
 		defaultDecision = "Deny"
 		instanceDurationInDays = 3
-		autoApplyDecisionsEnabled = $true
+		autoApplyDecisionsEnabled = -not $isSyncedGroup
 		recommendationsEnabled = $true
 		recommendationLookBackDuration = "P30D"
 		decisionHistoriesForReviewersEnabled = $false
-		applyActions = @(
-			@{
-				"@odata.type" = "#microsoft.graph.removeAccessApplyAction"
-			}
-		)
 	}
+}
+
+if (-not $isSyncedGroup) {
+	$params.settings.applyActions = @(
+		@{
+			"@odata.type" = "#microsoft.graph.removeAccessApplyAction"
+		}
+	)
 }
 
 if ($additionalNotificationRecipients) {
@@ -192,9 +208,11 @@ if ($Frequency -ne 'OneTime') {
 }
 $params.settings.recurrence = $recurrence
 
+$decisionHandling = if ($isSyncedGroup) { 'recorded decisions only (group synchronized from on-premises)' } else { 'automatic removal of denied access' }
+
 if ($PSCmdlet.ShouldProcess(
 	"Group $($group.displayName) ($GroupId)",
-	"Create access review '$reviewDisplayName' with notifications and automatic removal of denied access"
+	"Create access review '$reviewDisplayName' with notifications and $decisionHandling"
 )) {
 	New-MgIdentityGovernanceAccessReviewDefinition -BodyParameter $params -ErrorAction Stop
 }

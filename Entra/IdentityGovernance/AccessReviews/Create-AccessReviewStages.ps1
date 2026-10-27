@@ -19,6 +19,9 @@ Application owners are configured in $ApplicationOwners. Optional completion
 notification recipients are configured in $AdditionalNotificationRecipients;
 leave it empty to send no additional notifications. Notifications are enabled.
 Unanswered reviews default to Deny and denied access is automatically removed.
+Groups synchronized from on-premises Active Directory cannot be changed by the
+access review. For those groups, decisions are only recorded and must be
+applied in Active Directory.
 Each stage lasts $StageDurationInDays days. Frequency defaults to OneTime; use
 Frequency to select Weekly, Monthly, Quarterly, SemiAnnual, or Annual recurrence.
 For recurring reviews, the series ends at EndDate, which defaults to the end of
@@ -150,11 +153,16 @@ $fallbackReviewers = @(
 )
 
 try {
-	$group = Get-MgGroup -GroupId $GroupId -Property id, displayName
+	$group = Get-MgGroup -GroupId $GroupId -Property id, displayName, onPremisesSyncEnabled
 	$memberCount = [int](Get-MgGroupTransitiveMemberCount -GroupId $GroupId -ConsistencyLevel eventual)
 }
 catch {
 	throw "Unable to read group '$GroupId' or its member count. Check that the group exists and that the signed-in account can read it. $($_.Exception.Message)"
+}
+
+$isSyncedGroup = $group.OnPremisesSyncEnabled -eq $true
+if ($isSyncedGroup) {
+	Write-Warning "Group '$($group.displayName)' is synchronized from on-premises Active Directory. Decisions will be recorded but not applied; remove denied access in Active Directory."
 }
 
 $stageCount = if ($memberCount -ge $StageThresholds[2]) { 3 }
@@ -210,7 +218,12 @@ if ($Frequency -ne 'OneTime' -and $EndDate.Date -lt $StartDate.Date.AddDays($tot
 
 $params = @{
 	displayName = $reviewDisplayName
-	descriptionForAdmins = "Review direct membership of the group $($group.displayName) ($stageCount stage(s), $memberCount transitive members)."
+	descriptionForAdmins = if ($isSyncedGroup) {
+		"Review direct membership of the group $($group.displayName) ($stageCount stage(s), $memberCount transitive members). The group is synchronized from on-premises Active Directory; apply denied access in Active Directory."
+	}
+	else {
+		"Review direct membership of the group $($group.displayName) ($stageCount stage(s), $memberCount transitive members)."
+	}
 	descriptionForReviewers = "Confirm whether each user still needs access to the group $($group.displayName)."
 	scope = @{
 		"@odata.type" = "#microsoft.graph.accessReviewQueryScope"
@@ -224,16 +237,19 @@ $params = @{
 		defaultDecisionEnabled = $true
 		defaultDecision = "Deny"
 		instanceDurationInDays = $totalDurationInDays
-		autoApplyDecisionsEnabled = $true
+		autoApplyDecisionsEnabled = -not $isSyncedGroup
 		recommendationsEnabled = $true
 		recommendationLookBackDuration = "P30D"
 		decisionHistoriesForReviewersEnabled = $stageCount -gt 1
-		applyActions = @(
-			@{
-				"@odata.type" = "#microsoft.graph.removeAccessApplyAction"
-			}
-		)
 	}
+}
+
+if (-not $isSyncedGroup) {
+	$params.settings.applyActions = @(
+		@{
+			"@odata.type" = "#microsoft.graph.removeAccessApplyAction"
+		}
+	)
 }
 
 if ($additionalNotificationRecipients) {
@@ -288,10 +304,11 @@ else {
 }
 
 $stageDescription = ($stages | ForEach-Object { $_.name }) -join ' -> '
+$decisionHandling = if ($isSyncedGroup) { 'recorded decisions only (group synchronized from on-premises)' } else { 'automatic removal of denied access' }
 
 if ($PSCmdlet.ShouldProcess(
 	"Group $($group.displayName) ($GroupId, $memberCount transitive members)",
-	"Create $stageCount-stage access review '$reviewDisplayName' ($stageDescription) with notifications and automatic removal of denied access"
+	"Create $stageCount-stage access review '$reviewDisplayName' ($stageDescription) with notifications and $decisionHandling"
 )) {
 	New-MgIdentityGovernanceAccessReviewDefinition -BodyParameter $params -ErrorAction Stop
 }
