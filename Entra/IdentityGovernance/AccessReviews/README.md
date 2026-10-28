@@ -23,8 +23,18 @@ For recurring reviews, `-EndDate` defaults to the end of the current month.
   is used when a primary reviewer is unavailable, and `$StageDurationInDays`
   sets the duration of each stage. The default thresholds and placeholder IDs
   are defined at the top of the script.
+- [Create-AccessReviewAppGroups.ps1](./Create-AccessReviewAppGroups.ps1) takes
+  `-ServicePrincipalId` instead of `-GroupId`. An access review of an
+  application can't use group owners as reviewers, and it doesn't remove users
+  who get access through a group. This script therefore creates one review per
+  group assigned to the enterprise application, and each group's owners review
+  their own group. Groups with more than `$ManagerStageThreshold` transitive
+  members (default 150) get line managers as a first stage. Groups without
+  owners go to `$FallbackReviewerUserId`. Groups that already have a review with
+  the same name (`AR <application> - <group>`) are skipped. The script returns a
+  summary row per group.
 
-In both scripts, `$AdditionalNotificationRecipients` optionally lists user or
+In all scripts, `$AdditionalNotificationRecipients` optionally lists user or
 group IDs for a completion notification; leave it empty to omit that
 notification. Unanswered reviews default to Deny, and denied access is
 automatically removed. Use `-WhatIf` to preview the operation.
@@ -32,11 +42,13 @@ automatically removed. Use `-WhatIf` to preview the operation.
 If the group is synchronized from on-premises Active Directory
 (`onPremisesSyncEnabled`), the access review cannot change its membership. The
 scripts detect this, disable automatic apply, and show a warning; decisions are
-only recorded and denied access must be removed in Active Directory.
+only recorded and denied access must be removed in Active Directory. The
+application script handles dynamic groups the same way.
 
-Both scripts require `-GroupId`. For example:
+The group scripts require `-GroupId`. For example:
 
 ```powershell
 .\Create-AccessReview.ps1 -GroupId '00000000-0000-0000-0000-000000000000' -WhatIf
 .\Create-AccessReviewStages.ps1 -GroupId '00000000-0000-0000-0000-000000000000' -Frequency Quarterly -WhatIf
+.\Create-AccessReviewAppGroups.ps1 -ServicePrincipalId '00000000-0000-0000-0000-000000000000' -WhatIf
 ```

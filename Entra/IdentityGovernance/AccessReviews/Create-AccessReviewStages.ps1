@@ -77,7 +77,7 @@ $AdditionalNotificationRecipients = @(
 # Reviewer used when primary reviewers (for example a line manager) are missing.
 $FallbackReviewerUserId = '00000000-0000-0000-0000-000000000000'
 
-$StageDurationInDays = 3
+$StageDurationInDays = 5
 
 # Decisions passed on from one stage to the next in multi-stage reviews.
 $DecisionsThatMoveToNextStage = @('Approve', 'NotReviewed')
