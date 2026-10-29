@@ -23,8 +23,9 @@ Optional completion notification recipients are configured in
 $AdditionalNotificationRecipients; leave it empty to send no additional
 notifications. Notifications are enabled. Unanswered reviews default to Deny and
 denied access is automatically removed. Groups synchronized from on-premises
-Active Directory and dynamic groups cannot be changed by the access review. For
-those groups, decisions are only recorded and must be applied at the source.
+Active Directory cannot be changed by the access review. For those groups,
+decisions are only recorded and must be applied in Active Directory. Groups with
+dynamic membership are skipped.
 
 Frequency defaults to OneTime; use Frequency to select Weekly, Monthly,
 Quarterly, SemiAnnual, or Annual recurrence. For recurring reviews, the series
@@ -184,7 +185,7 @@ foreach ($groupId in $groupIds) {
 		$stageCount = if ($memberCount -gt $SelfReviewStageThreshold) { 2 } else { 1 }
 		$isSyncedGroup = $group.OnPremisesSyncEnabled -eq $true
 		$isDynamicGroup = $group.GroupTypes -contains 'DynamicMembership'
-		$isReportOnly = $isSyncedGroup -or $isDynamicGroup
+		$isReportOnly = $isSyncedGroup
 
 		$result.Group = $group.DisplayName
 		$result.Members = $memberCount
@@ -192,6 +193,14 @@ foreach ($groupId in $groupIds) {
 		$result.Stages = $stageCount
 		$result.ReportOnly = $isReportOnly
 		$result.ReviewName = $reviewDisplayName
+
+		if ($isDynamicGroup) {
+			$result.Status = 'Skipped (dynamic group)'
+			Write-Warning "Group '$($group.DisplayName)' has dynamic membership and is skipped."
+			$results.Add([pscustomobject]$result)
+			[pscustomobject]$result
+			continue
+		}
 
 		if ($existingReviewNames -contains $reviewDisplayName) {
 			$result.Status = 'Skipped (review already exists)'
@@ -206,9 +215,6 @@ foreach ($groupId in $groupIds) {
 
 		$sourceNote = if ($isSyncedGroup) {
 			'The group is synchronized from on-premises Active Directory; apply denied access in Active Directory.'
-		}
-		elseif ($isDynamicGroup) {
-			'The group has dynamic membership; apply denied access by changing the membership rule or the user attributes.'
 		}
 
 		if ($sourceNote) {

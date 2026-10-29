@@ -43,7 +43,7 @@ If the group is synchronized from on-premises Active Directory
 (`onPremisesSyncEnabled`), the access review cannot change its membership. The
 scripts detect this, disable automatic apply, and show a warning; decisions are
 only recorded and denied access must be removed in Active Directory. The
-application script handles dynamic groups the same way.
+application script skips groups with dynamic membership.
 
 The group scripts require `-GroupId`. For example:
 
