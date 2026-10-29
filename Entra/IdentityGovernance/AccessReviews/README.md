@@ -3,7 +3,9 @@
 These scripts create an access review for a group's direct members. They default
 to a one-time review. Set `-Frequency` to `Weekly`, `Monthly`, `Quarterly`,
 `SemiAnnual`, or `Annual` for a recurring review. `-StartDate` defaults to today.
-For recurring reviews, `-EndDate` defaults to the end of the current month.
+For recurring reviews, `-EndDate` defaults to the end of the current month;
+it is ignored for one-time reviews, whose period is `-StartDate` plus the days
+of all stages (a warning is shown if you pass it).
 `-ReviewName` is optional; otherwise, the group name is used.
 
 ## Scripts
@@ -48,7 +50,10 @@ automatically removed. Use `-WhatIf` to preview the operation.
 If the group is synchronized from on-premises Active Directory
 (`onPremisesSyncEnabled`), the access review cannot change its membership. The
 scripts detect this, disable automatic apply, and show a warning; decisions are
-only recorded and denied access must be removed in Active Directory. The
+only recorded and denied access must be removed in Active Directory. Download
+the CSV report from the completed review, or retrieve the decisions through
+Microsoft Graph, and act on them in Active Directory. Synced groups have no
+owners in Microsoft Entra ID, so the fallback reviewer is used. The
 application script skips groups with dynamic membership and groups with
 no members and no owners.
 

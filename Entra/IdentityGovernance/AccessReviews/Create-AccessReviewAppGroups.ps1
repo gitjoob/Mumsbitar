@@ -31,7 +31,8 @@ dynamic membership, and groups with no members and no owners, are skipped.
 Frequency defaults to OneTime; use Frequency to select Weekly, Monthly,
 Quarterly, SemiAnnual, or Annual recurrence. For recurring reviews, the series
 ends at EndDate, which defaults to the end of the current month. StartDate
-defaults to today.
+defaults to today. EndDate is ignored for one-time reviews: their review period
+is StartDate plus the days of all stages.
 
 Each review is named '$ReviewNamePrefix <application> - <group>'. Groups that
 already have an access review with that name are skipped, so the script can be
@@ -63,7 +64,7 @@ $SelfReviewStageThreshold = 150
 
 # Optional extra text for the reviewer email (instructions, contact details or a link).
 # It is appended to the default reviewer text; the email supports up to 256 characters in total.
-$ReviewerMessage = ''
+$ReviewerMessage = 'Testmessage'
 
 # Optional recipients of the completed-review notification. Leave empty to disable it.
 $AdditionalNotificationRecipients = @(
@@ -129,7 +130,11 @@ $fallbackReviewers = @(
 	}
 )
 
-$recurrenceRangeEndDate = if ($Frequency -eq 'OneTime') { $StartDate } else { $EndDate }
+if ($Frequency -eq 'OneTime' -and $PSBoundParameters.ContainsKey('EndDate')) {
+	Write-Warning 'EndDate is ignored for one-time reviews. The review period is calculated from StartDate and the number of stages; use -Frequency for recurring reviews.'
+}
+
+$recurrenceRangeEndDate = $EndDate
 $recurrence = @{
 	range = @{
 		type = 'endDate'
@@ -255,6 +260,14 @@ foreach ($groupId in $groupIds) {
 			throw "descriptionForReviewers is $($descriptionForReviewers.Length) characters; reviewer emails support up to 256. Shorten ReviewerMessage."
 		}
 
+		$groupRecurrence = @{ range = $recurrence.range.Clone() }
+		if ($recurrence.pattern) {
+			$groupRecurrence.pattern = $recurrence.pattern
+		}
+		if ($Frequency -eq 'OneTime') {
+			$groupRecurrence.range.endDate = $StartDate.AddDays($totalDurationInDays).ToString('yyyy-MM-dd')
+		}
+
 		$params = @{
 			displayName = $reviewDisplayName
 			descriptionForAdmins = "Review direct membership of the group $($group.DisplayName), assigned to the application $($servicePrincipal.DisplayName) ($stageCount stage(s), $memberCount transitive members). $sourceNote".Trim()
@@ -275,7 +288,7 @@ foreach ($groupId in $groupIds) {
 				recommendationsEnabled = $true
 				recommendationLookBackDuration = 'P30D'
 				decisionHistoriesForReviewersEnabled = $stageCount -gt 1
-				recurrence = $recurrence
+				recurrence = $groupRecurrence
 			}
 		}
 

@@ -96,7 +96,7 @@ $requiredScope = 'AccessReview.ReadWrite.All','Application.Read.All'
 $context = Get-MgContext
 
 if (-not $context) {
-	throw 'Connect to Microsoft Graph first, for example with Connect-DemoOnevinn.'
+	throw 'Connect to Microsoft Graph first.'
 }
 
 if ($context.Scopes -notcontains $requiredScope) {
@@ -269,7 +269,11 @@ if ($additionalNotificationRecipients) {
 	$params.additionalNotificationRecipients = @($additionalNotificationRecipients)
 }
 
-$recurrenceRangeEndDate = if ($Frequency -eq 'OneTime') { $StartDate } else { $EndDate }
+if ($Frequency -eq 'OneTime' -and $PSBoundParameters.ContainsKey('EndDate')) {
+	Write-Warning 'EndDate is ignored for one-time reviews. The review period is calculated from StartDate and the number of stages; use -Frequency for recurring reviews.'
+}
+
+$recurrenceRangeEndDate = if ($Frequency -eq 'OneTime') { $StartDate.AddDays($totalDurationInDays) } else { $EndDate }
 $recurrence = @{
 	range = @{
 		type = 'endDate'
