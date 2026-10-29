@@ -35,6 +35,11 @@ For recurring reviews, `-EndDate` defaults to the end of the current month.
   script lists only the skipped or failed groups with the reason, and the number
   of reviews created (with `-WhatIf`, the number that would be created).
 
+In all scripts, `$ReviewerMessage` optionally adds your own text (for example
+contact details or a link) to the reviewer email. The email supports up to 256
+characters in total, including the default text; the script stops if it is too
+long. The rest of the email is fixed by Microsoft.
+
 In all scripts, `$AdditionalNotificationRecipients` optionally lists user or
 group IDs for a completion notification; leave it empty to omit that
 notification. Unanswered reviews default to Deny, and denied access is

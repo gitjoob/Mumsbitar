@@ -6,6 +6,7 @@ Connect to Microsoft Graph first.
 Requires AccessReview.ReadWrite.All and an appropriate access review license.
 Reviewers are configured in $ApplicationOwners, with $FallbackReviewerUserId as fallback.
 Optional completion-notification recipients are configured in
+$ReviewerMessage optionally adds text (for example contact details) to the reviewer email.
 $AdditionalNotificationRecipients; leave it empty to send no additional notifications.
 Notifications are enabled. After three days, unanswered reviews default to Deny
 and denied access is automatically removed.
@@ -46,6 +47,10 @@ $ApplicationOwners = @(
 	@{ Type = 'User'; Id = '00000000-0000-0000-0000-000000000000' }
 	# @{ Type = 'Group'; Id = '00000000-0000-0000-0000-000000000000' }
 )
+
+# Optional extra text for the reviewer email (instructions, contact details or a link).
+# It is appended to the default reviewer text; the email supports up to 256 characters in total.
+$ReviewerMessage = ''
 
 # Optional recipients of the completed-review notification. Leave empty to disable it.
 $AdditionalNotificationRecipients = @(
@@ -141,6 +146,14 @@ if ([string]::IsNullOrWhiteSpace($reviewDisplayName)) {
 	throw 'ReviewName must not be empty or whitespace.'
 }
 
+$descriptionForReviewers = "Confirm whether each user still needs access to the group $($group.displayName)."
+if ($ReviewerMessage.Trim()) {
+	$descriptionForReviewers = "$descriptionForReviewers $($ReviewerMessage.Trim())"
+}
+if ($ReviewerMessage.Trim() -and $descriptionForReviewers.Length -gt 256) {
+	throw "descriptionForReviewers is $($descriptionForReviewers.Length) characters; reviewer emails support up to 256. Shorten ReviewerMessage."
+}
+
 $params = @{
 	displayName = $reviewDisplayName
 	descriptionForAdmins = if ($isSyncedGroup) {
@@ -149,7 +162,7 @@ $params = @{
 	else {
 		"Review direct membership of the group $($group.displayName)."
 	}
-	descriptionForReviewers = "Confirm whether each user still needs access to the group $($group.displayName)."
+	descriptionForReviewers = $descriptionForReviewers
 	scope = @{
 		"@odata.type" = "#microsoft.graph.accessReviewQueryScope"
 		query = "/groups/$GroupId/members"

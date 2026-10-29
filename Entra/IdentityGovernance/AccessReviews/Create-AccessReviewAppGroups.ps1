@@ -20,6 +20,7 @@ $FallbackReviewerUserId reviews when a group has no owner.
 Each stage lasts $StageDurationInDays days.
 
 Optional completion notification recipients are configured in
+$ReviewerMessage optionally adds text (for example contact details) to the reviewer email.
 $AdditionalNotificationRecipients; leave it empty to send no additional
 notifications. Notifications are enabled. Unanswered reviews default to Deny and
 denied access is automatically removed. Groups synchronized from on-premises
@@ -59,6 +60,10 @@ $ReviewNamePrefix = 'AR'
 
 # Groups with more transitive members than this get a self-review stage before the group owners.
 $SelfReviewStageThreshold = 150
+
+# Optional extra text for the reviewer email (instructions, contact details or a link).
+# It is appended to the default reviewer text; the email supports up to 256 characters in total.
+$ReviewerMessage = ''
 
 # Optional recipients of the completed-review notification. Leave empty to disable it.
 $AdditionalNotificationRecipients = @(
@@ -242,10 +247,18 @@ foreach ($groupId in $groupIds) {
 			}
 		)
 
+		$descriptionForReviewers = "Confirm whether each user still needs access to the application $($servicePrincipal.DisplayName) through the group $($group.DisplayName)."
+		if ($ReviewerMessage.Trim()) {
+			$descriptionForReviewers = "$descriptionForReviewers $($ReviewerMessage.Trim())"
+		}
+		if ($ReviewerMessage.Trim() -and $descriptionForReviewers.Length -gt 256) {
+			throw "descriptionForReviewers is $($descriptionForReviewers.Length) characters; reviewer emails support up to 256. Shorten ReviewerMessage."
+		}
+
 		$params = @{
 			displayName = $reviewDisplayName
 			descriptionForAdmins = "Review direct membership of the group $($group.DisplayName), assigned to the application $($servicePrincipal.DisplayName) ($stageCount stage(s), $memberCount transitive members). $sourceNote".Trim()
-			descriptionForReviewers = "Confirm whether each user still needs access to the application $($servicePrincipal.DisplayName) through the group $($group.DisplayName)."
+			descriptionForReviewers = $descriptionForReviewers
 			scope = @{
 				"@odata.type" = '#microsoft.graph.accessReviewQueryScope'
 				query = "/groups/$groupId/members"
@@ -346,14 +359,7 @@ $notCreated = @($results | Where-Object { $_.Status -in 'Skipped', 'Failed' })
 if ($notCreated) {
 	''
 	'Skipped or failed groups:'
-	$notCreated | ForEach-Object {
-		[pscustomobject]@{
-			PSTypeName = 'AccessReviewNotCreated'
-			Group = $_.Group
-			Status = $_.Status
-			Reason = $_.Reason
-		}
-	}
+	$notCreated | Select-Object Group, Status, Reason | Format-Table -AutoSize -Wrap | Out-String -Width 200 -Stream | Where-Object { $_.Trim() }
 }
 
 ''
