@@ -31,10 +31,9 @@ For recurring reviews, `-EndDate` defaults to the end of the current month.
   their own group. Groups with more than `$SelfReviewStageThreshold` transitive
   members (default 150) get a self-review stage first. Groups without
   owners go to `$FallbackReviewerUserId`. Groups that already have a review with
-  the same name (`AR <application> - <group>`) are skipped. At the end, the script shows a table with a status and a
-  reason for every group (created, skipped, or failed) and a count per reason;
-  with `-WhatIf`, it shows the reviews that would be created. Use `-PassThru` to
-  also return the result objects.
+  the same name (`AR <application> - <group>`) are skipped. Each group gets a result with its status. At the end, the
+  script lists only the skipped or failed groups with the reason, and the number
+  of reviews created (with `-WhatIf`, the number that would be created).
 
 In all scripts, `$AdditionalNotificationRecipients` optionally lists user or
 group IDs for a completion notification; leave it empty to omit that

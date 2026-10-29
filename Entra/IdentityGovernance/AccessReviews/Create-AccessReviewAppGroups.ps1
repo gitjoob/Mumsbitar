@@ -34,10 +34,9 @@ defaults to today.
 
 Each review is named '$ReviewNamePrefix <application> - <group>'. Groups that
 already have an access review with that name are skipped, so the script can be
-run again. At the end, a table lists every group with its status and the reason
-it was skipped or failed, followed by a count per reason and the number of
-reviews created (or, with -WhatIf, that would be created). Use -PassThru to also
-return the result objects.
+run again. A result object is returned for each group. At the end, a table lists
+only the skipped or failed groups with the reason, followed by the number of
+reviews created (or, with -WhatIf, that would be created).
 .EXAMPLE
 .\Create-AccessReviewAppGroups.ps1 -ServicePrincipalId '00000000-0000-0000-0000-000000000000' -WhatIf
 .EXAMPLE
@@ -52,8 +51,7 @@ param(
 	[ValidateSet('OneTime', 'Weekly', 'Monthly', 'Quarterly', 'SemiAnnual', 'Annual')]
 	[string]$Frequency = 'OneTime',
 	[datetime]$StartDate = (Get-Date).Date,
-	[datetime]$EndDate = (Get-Date).Date.AddDays(1 - (Get-Date).Day).AddMonths(1).AddDays(-1),
-	[switch]$PassThru
+	[datetime]$EndDate = (Get-Date).Date.AddDays(1 - (Get-Date).Day).AddMonths(1).AddDays(-1)
 )
 
 # Prefix for the access review names.
@@ -333,30 +331,30 @@ foreach ($groupId in $groupIds) {
 		$result.Reason = "$step`: $($_.Exception.Message)"
 	}
 	finally {
-		$results.Add([pscustomobject]$result)
+		$resultObject = [pscustomobject]$result
+		$results.Add($resultObject)
+		$resultObject
 	}
 }
 
 $createdStatus = if ($WhatIfPreference) { 'Would be created' } else { 'Created' }
-
-Write-Host "`nAccess reviews for '$($servicePrincipal.DisplayName)'"
-$results | Format-Table Group, Members, Owners, Stages, Status, Reason -AutoSize -Wrap | Out-Host
-
-Write-Host 'Summary'
-$results | Group-Object Status, Reason | Sort-Object { $_.Group[0].Status }, Name |
-	ForEach-Object {
-		[pscustomobject]@{
-			Count = $_.Count
-			Status = $_.Group[0].Status
-			Reason = $_.Group[0].Reason
-		}
-	} | Format-Table -AutoSize -Wrap | Out-Host
-
 $createdCount = @($results | Where-Object { $_.Status -eq $createdStatus }).Count
 $skippedCount = @($results | Where-Object { $_.Status -eq 'Skipped' }).Count
 $failedCount = @($results | Where-Object { $_.Status -eq 'Failed' }).Count
-Write-Host "$($groupIds.Count) assigned group(s): $createdCount $($createdStatus.ToLower()), $skippedCount skipped, $failedCount failed."
 
-if ($PassThru) {
-	$results
+$notCreated = @($results | Where-Object { $_.Status -in 'Skipped', 'Failed' })
+if ($notCreated) {
+	''
+	'Skipped or failed groups:'
+	$notCreated | ForEach-Object {
+		[pscustomobject]@{
+			PSTypeName = 'AccessReviewNotCreated'
+			Group = $_.Group
+			Status = $_.Status
+			Reason = $_.Reason
+		}
+	}
 }
+
+''
+"$($groupIds.Count) assigned group(s): $createdCount $($createdStatus.ToLower()), $skippedCount skipped, $failedCount failed."
