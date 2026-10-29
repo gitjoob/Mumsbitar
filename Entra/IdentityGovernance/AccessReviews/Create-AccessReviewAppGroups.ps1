@@ -25,7 +25,7 @@ notifications. Notifications are enabled. Unanswered reviews default to Deny and
 denied access is automatically removed. Groups synchronized from on-premises
 Active Directory cannot be changed by the access review. For those groups,
 decisions are only recorded and must be applied in Active Directory. Groups with
-dynamic membership are skipped.
+dynamic membership, and groups with no members and no owners, are skipped.
 
 Frequency defaults to OneTime; use Frequency to select Weekly, Monthly,
 Quarterly, SemiAnnual, or Annual recurrence. For recurring reviews, the series
@@ -34,13 +34,16 @@ defaults to today.
 
 Each review is named '$ReviewNamePrefix <application> - <group>'. Groups that
 already have an access review with that name are skipped, so the script can be
-run again. A summary object is returned for each group, followed by a count of created (or, with -WhatIf, would-be-created) reviews.
+run again. At the end, a table lists every group with its status and the reason
+it was skipped or failed, followed by a count per reason and the number of
+reviews created (or, with -WhatIf, that would be created). Use -PassThru to also
+return the result objects.
 .EXAMPLE
 .\Create-AccessReviewAppGroups.ps1 -ServicePrincipalId '00000000-0000-0000-0000-000000000000' -WhatIf
 .EXAMPLE
 .\Create-AccessReviewAppGroups.ps1 -ServicePrincipalId '00000000-0000-0000-0000-000000000000'
 .EXAMPLE
-.\Create-AccessReviewAppGroups.ps1 -ServicePrincipalId '00000000-0000-0000-0000-000000000000' -Frequency Quarterly -StartDate '2026-11-02' -EndDate '2027-12-31' | Format-Table
+.\Create-AccessReviewAppGroups.ps1 -ServicePrincipalId '00000000-0000-0000-0000-000000000000' -Frequency Quarterly -StartDate '2026-11-02' -EndDate '2027-12-31'
 #>
 [CmdletBinding(SupportsShouldProcess)]
 param(
@@ -49,7 +52,8 @@ param(
 	[ValidateSet('OneTime', 'Weekly', 'Monthly', 'Quarterly', 'SemiAnnual', 'Annual')]
 	[string]$Frequency = 'OneTime',
 	[datetime]$StartDate = (Get-Date).Date,
-	[datetime]$EndDate = (Get-Date).Date.AddDays(1 - (Get-Date).Day).AddMonths(1).AddDays(-1)
+	[datetime]$EndDate = (Get-Date).Date.AddDays(1 - (Get-Date).Day).AddMonths(1).AddDays(-1),
+	[switch]$PassThru
 )
 
 # Prefix for the access review names.
@@ -173,7 +177,9 @@ foreach ($groupId in $groupIds) {
 		ReportOnly = $false
 		ReviewName = $null
 		Status = $null
+		Reason = $null
 	}
+	$step = 'Reading group'
 
 	try {
 		$group = Get-MgGroup -GroupId $groupId -Property id, displayName, onPremisesSyncEnabled, groupTypes
@@ -195,17 +201,20 @@ foreach ($groupId in $groupIds) {
 		$result.ReviewName = $reviewDisplayName
 
 		if ($isDynamicGroup) {
-			$result.Status = 'Skipped (dynamic group)'
-			Write-Warning "Group '$($group.DisplayName)' has dynamic membership and is skipped."
-			$results.Add([pscustomobject]$result)
-			[pscustomobject]$result
+			$result.Status = 'Skipped'
+			$result.Reason = 'Dynamic membership group'
+			continue
+		}
+
+		if ($memberCount -eq 0 -and $userOwnerCount -eq 0) {
+			$result.Status = 'Skipped'
+			$result.Reason = 'No members and no owners'
 			continue
 		}
 
 		if ($existingReviewNames -contains $reviewDisplayName) {
-			$result.Status = 'Skipped (review already exists)'
-			$results.Add([pscustomobject]$result)
-			[pscustomobject]$result
+			$result.Status = 'Skipped'
+			$result.Reason = 'Access review with the same name already exists'
 			continue
 		}
 
@@ -221,6 +230,7 @@ foreach ($groupId in $groupIds) {
 			Write-Warning "Group '$($group.DisplayName)': $sourceNote Decisions will be recorded but not applied."
 		}
 
+		$step = 'Validating schedule'
 		$totalDurationInDays = $stageCount * $StageDurationInDays
 
 		if ($Frequency -ne 'OneTime' -and $EndDate.Date -lt $StartDate.Date.AddDays($totalDurationInDays)) {
@@ -297,6 +307,8 @@ foreach ($groupId in $groupIds) {
 		$stageDescription = if ($stageCount -eq 1) { 'Group owners' } else { 'Self-review -> Group owners' }
 		$decisionHandling = if ($isReportOnly) { 'recorded decisions only' } else { 'automatic removal of denied access' }
 
+		$step = 'Creating access review'
+
 		if ($PSCmdlet.ShouldProcess(
 			"Group $($group.DisplayName) ($groupId, $memberCount transitive members)",
 			"Create $stageCount-stage access review '$reviewDisplayName' ($stageDescription) with notifications and $decisionHandling"
@@ -306,22 +318,45 @@ foreach ($groupId in $groupIds) {
 			$result.Status = 'Created'
 		}
 		else {
-			$result.Status = if ($WhatIfPreference) { 'Would be created (WhatIf)' } else { 'Not created' }
+			$result.Status = if ($WhatIfPreference) { 'Would be created' } else { 'Not created' }
+		}
+
+		if ($userOwnerCount -eq 0) {
+			$result.Reason = 'No user owners; fallback reviewer used'
+		}
+		elseif ($isSyncedGroup) {
+			$result.Reason = 'Synced from on-premises AD; decisions recorded only'
 		}
 	}
 	catch {
-		Write-Warning "Group '$($result.Group)': $($_.Exception.Message)"
-		$result.Status = "Failed: $($_.Exception.Message)"
+		$result.Status = 'Failed'
+		$result.Reason = "$step`: $($_.Exception.Message)"
 	}
-
-	$results.Add([pscustomobject]$result)
-	[pscustomobject]$result
+	finally {
+		$results.Add([pscustomobject]$result)
+	}
 }
 
-$createdCount = @($results | Where-Object { $_.Status -eq 'Created' }).Count
-$wouldCreateCount = @($results | Where-Object { $_.Status -eq 'Would be created (WhatIf)' }).Count
-$skippedCount = @($results | Where-Object { $_.Status -like 'Skipped*' }).Count
-$failedCount = @($results | Where-Object { $_.Status -like 'Failed*' }).Count
+$createdStatus = if ($WhatIfPreference) { 'Would be created' } else { 'Created' }
 
-$summary = if ($WhatIfPreference) { "$wouldCreateCount access review(s) would be created" } else { "$createdCount access review(s) created" }
-Write-Host "Summary for '$($servicePrincipal.DisplayName)': $($groupIds.Count) assigned group(s), $summary, $skippedCount skipped, $failedCount failed."
+Write-Host "`nAccess reviews for '$($servicePrincipal.DisplayName)'"
+$results | Format-Table Group, Members, Owners, Stages, Status, Reason -AutoSize -Wrap | Out-Host
+
+Write-Host 'Summary'
+$results | Group-Object Status, Reason | Sort-Object { $_.Group[0].Status }, Name |
+	ForEach-Object {
+		[pscustomobject]@{
+			Count = $_.Count
+			Status = $_.Group[0].Status
+			Reason = $_.Group[0].Reason
+		}
+	} | Format-Table -AutoSize -Wrap | Out-Host
+
+$createdCount = @($results | Where-Object { $_.Status -eq $createdStatus }).Count
+$skippedCount = @($results | Where-Object { $_.Status -eq 'Skipped' }).Count
+$failedCount = @($results | Where-Object { $_.Status -eq 'Failed' }).Count
+Write-Host "$($groupIds.Count) assigned group(s): $createdCount $($createdStatus.ToLower()), $skippedCount skipped, $failedCount failed."
+
+if ($PassThru) {
+	$results
+}

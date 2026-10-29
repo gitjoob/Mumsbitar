@@ -31,8 +31,10 @@ For recurring reviews, `-EndDate` defaults to the end of the current month.
   their own group. Groups with more than `$SelfReviewStageThreshold` transitive
   members (default 150) get a self-review stage first. Groups without
   owners go to `$FallbackReviewerUserId`. Groups that already have a review with
-  the same name (`AR <application> - <group>`) are skipped. The script returns a
-  summary row per group and a final count of created reviews (with `-WhatIf`, the number that would be created).
+  the same name (`AR <application> - <group>`) are skipped. At the end, the script shows a table with a status and a
+  reason for every group (created, skipped, or failed) and a count per reason;
+  with `-WhatIf`, it shows the reviews that would be created. Use `-PassThru` to
+  also return the result objects.
 
 In all scripts, `$AdditionalNotificationRecipients` optionally lists user or
 group IDs for a completion notification; leave it empty to omit that
@@ -43,7 +45,8 @@ If the group is synchronized from on-premises Active Directory
 (`onPremisesSyncEnabled`), the access review cannot change its membership. The
 scripts detect this, disable automatic apply, and show a warning; decisions are
 only recorded and denied access must be removed in Active Directory. The
-application script skips groups with dynamic membership.
+application script skips groups with dynamic membership and groups with
+no members and no owners.
 
 The group scripts require `-GroupId`. For example:
 
