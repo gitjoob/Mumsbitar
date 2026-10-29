@@ -28,11 +28,11 @@ For recurring reviews, `-EndDate` defaults to the end of the current month.
   application can't use group owners as reviewers, and it doesn't remove users
   who get access through a group. This script therefore creates one review per
   group assigned to the enterprise application, and each group's owners review
-  their own group. Groups with more than `$ManagerStageThreshold` transitive
-  members (default 150) get line managers as a first stage. Groups without
+  their own group. Groups with more than `$SelfReviewStageThreshold` transitive
+  members (default 150) get a self-review stage first. Groups without
   owners go to `$FallbackReviewerUserId`. Groups that already have a review with
   the same name (`AR <application> - <group>`) are skipped. The script returns a
-  summary row per group.
+  summary row per group and a final count of created reviews (with `-WhatIf`, the number that would be created).
 
 In all scripts, `$AdditionalNotificationRecipients` optionally lists user or
 group IDs for a completion notification; leave it empty to omit that

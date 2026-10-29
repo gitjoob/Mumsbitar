@@ -87,7 +87,7 @@ Import-Module Microsoft.Graph.Authentication
 Import-Module Microsoft.Graph.Groups
 Import-Module Microsoft.Graph.Identity.Governance
 
-$requiredScope = 'AccessReview.ReadWrite.All'
+$requiredScope = 'AccessReview.ReadWrite.All','Application.Read.All'
 $context = Get-MgContext
 
 if (-not $context) {

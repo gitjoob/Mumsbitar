@@ -14,9 +14,9 @@ denied. This script therefore reads every group assigned to the application
 members, so that the owners of each group review their own group.
 
 The number of transitive members in each group decides how many stages are used:
-  - Up to $ManagerStageThreshold: 1 stage  - group owners.
-  - More than $ManagerStageThreshold: 2 stages - line managers, then group owners.
-$FallbackReviewerUserId reviews when a group has no owner or a user has no manager.
+  - Up to $SelfReviewStageThreshold: 1 stage  - group owners.
+  - More than $SelfReviewStageThreshold: 2 stages - self-review, then group owners.
+$FallbackReviewerUserId reviews when a group has no owner.
 Each stage lasts $StageDurationInDays days.
 
 Optional completion notification recipients are configured in
@@ -33,7 +33,7 @@ defaults to today.
 
 Each review is named '$ReviewNamePrefix <application> - <group>'. Groups that
 already have an access review with that name are skipped, so the script can be
-run again. A summary object is returned for each group.
+run again. A summary object is returned for each group, followed by a count of created (or, with -WhatIf, would-be-created) reviews.
 .EXAMPLE
 .\Create-AccessReviewAppGroups.ps1 -ServicePrincipalId '00000000-0000-0000-0000-000000000000' -WhatIf
 .EXAMPLE
@@ -54,8 +54,8 @@ param(
 # Prefix for the access review names.
 $ReviewNamePrefix = 'AR'
 
-# Groups with more transitive members than this get a line manager stage before the group owners.
-$ManagerStageThreshold = 150
+# Groups with more transitive members than this get a self-review stage before the group owners.
+$SelfReviewStageThreshold = 150
 
 # Optional recipients of the completed-review notification. Leave empty to disable it.
 $AdditionalNotificationRecipients = @(
@@ -63,12 +63,12 @@ $AdditionalNotificationRecipients = @(
 	# @{ Type = 'Group'; Id = '00000000-0000-0000-0000-000000000000' }
 )
 
-# Reviewer used when a group has no owner or a user has no manager.
+# Reviewer used when a group has no owner.
 $FallbackReviewerUserId = '00000000-0000-0000-0000-000000000000'
 
 $StageDurationInDays = 5
 
-# Decisions passed on from the line manager stage to the group owner stage.
+# Decisions passed on from the self-review stage to the group owner stage.
 $DecisionsThatMoveToNextStage = @('Approve', 'NotReviewed')
 
 $ErrorActionPreference = 'Stop'
@@ -160,6 +160,8 @@ Write-Verbose "Application '$($servicePrincipal.DisplayName)' has $($groupIds.Co
 
 $existingReviewNames = @(Get-MgIdentityGovernanceAccessReviewDefinition -All -Property id, displayName | ForEach-Object { $_.DisplayName })
 
+$results = [System.Collections.Generic.List[object]]::new()
+
 foreach ($groupId in $groupIds) {
 	$result = [ordered]@{
 		Group = $groupId
@@ -179,7 +181,7 @@ foreach ($groupId in $groupIds) {
 			Where-Object { $_.AdditionalProperties['@odata.type'] -eq '#microsoft.graph.user' }).Count
 
 		$reviewDisplayName = "$ReviewNamePrefix $($servicePrincipal.DisplayName) - $($group.DisplayName)".Trim()
-		$stageCount = if ($memberCount -gt $ManagerStageThreshold) { 2 } else { 1 }
+		$stageCount = if ($memberCount -gt $SelfReviewStageThreshold) { 2 } else { 1 }
 		$isSyncedGroup = $group.OnPremisesSyncEnabled -eq $true
 		$isDynamicGroup = $group.GroupTypes -contains 'DynamicMembership'
 		$isReportOnly = $isSyncedGroup -or $isDynamicGroup
@@ -193,6 +195,7 @@ foreach ($groupId in $groupIds) {
 
 		if ($existingReviewNames -contains $reviewDisplayName) {
 			$result.Status = 'Skipped (review already exists)'
+			$results.Add([pscustomobject]$result)
 			[pscustomobject]$result
 			continue
 		}
@@ -271,14 +274,7 @@ foreach ($groupId in $groupIds) {
 					stageId = '1'
 					durationInDays = $StageDurationInDays
 					recommendationsEnabled = $true
-					reviewers = @(
-						@{
-							query = './manager'
-							queryType = 'MicrosoftGraph'
-							queryRoot = 'decisions'
-						}
-					)
-					fallbackReviewers = $fallbackReviewers
+					reviewers = @()
 					decisionsThatWillMoveToNextStage = $DecisionsThatMoveToNextStage
 				}
 				@{
@@ -292,7 +288,7 @@ foreach ($groupId in $groupIds) {
 			)
 		}
 
-		$stageDescription = if ($stageCount -eq 1) { 'Group owners' } else { 'Line managers -> Group owners' }
+		$stageDescription = if ($stageCount -eq 1) { 'Group owners' } else { 'Self-review -> Group owners' }
 		$decisionHandling = if ($isReportOnly) { 'recorded decisions only' } else { 'automatic removal of denied access' }
 
 		if ($PSCmdlet.ShouldProcess(
@@ -304,7 +300,7 @@ foreach ($groupId in $groupIds) {
 			$result.Status = 'Created'
 		}
 		else {
-			$result.Status = 'Not created (WhatIf)'
+			$result.Status = if ($WhatIfPreference) { 'Would be created (WhatIf)' } else { 'Not created' }
 		}
 	}
 	catch {
@@ -312,5 +308,14 @@ foreach ($groupId in $groupIds) {
 		$result.Status = "Failed: $($_.Exception.Message)"
 	}
 
+	$results.Add([pscustomobject]$result)
 	[pscustomobject]$result
 }
+
+$createdCount = @($results | Where-Object { $_.Status -eq 'Created' }).Count
+$wouldCreateCount = @($results | Where-Object { $_.Status -eq 'Would be created (WhatIf)' }).Count
+$skippedCount = @($results | Where-Object { $_.Status -like 'Skipped*' }).Count
+$failedCount = @($results | Where-Object { $_.Status -like 'Failed*' }).Count
+
+$summary = if ($WhatIfPreference) { "$wouldCreateCount access review(s) would be created" } else { "$createdCount access review(s) created" }
+Write-Host "Summary for '$($servicePrincipal.DisplayName)': $($groupIds.Count) assigned group(s), $summary, $skippedCount skipped, $failedCount failed."
