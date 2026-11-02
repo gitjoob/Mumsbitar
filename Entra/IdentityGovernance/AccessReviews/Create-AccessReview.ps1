@@ -18,7 +18,11 @@ Quarterly, SemiAnnual, or Annual recurrence. StartDate defaults to today.
 For recurring reviews, EndDate defaults to the end of the current month; provide
 a later date to allow subsequent occurrences. EndDate must allow at least three
 days for the review to complete.
-If ReviewName is omitted, the name is derived from the group's display name.
+CsvPath creates one review per row of a CSV file with a GroupId column and an
+optional ReviewName column. A table of skipped or failed groups and a summary
+are shown at the end. If ReviewName is omitted, the name is derived from the group's display name.
+.EXAMPLE
+.\Create-AccessReview.ps1 -CsvPath '.\groups.csv' -WhatIf
 .EXAMPLE
 .\Create-AccessReview.ps1 -GroupId '00000000-0000-0000-0000-000000000000' -WhatIf
 .EXAMPLE
@@ -28,12 +32,16 @@ If ReviewName is omitted, the name is derived from the group's display name.
 .EXAMPLE
 .\Create-AccessReview.ps1 -GroupId '00000000-0000-0000-0000-000000000000' -Frequency Quarterly -StartDate '2026-10-06' -EndDate '2027-10-31' -WhatIf
 #>
-[CmdletBinding(SupportsShouldProcess)]
+[CmdletBinding(SupportsShouldProcess, DefaultParameterSetName = 'Single')]
 param(
-	[Parameter(Mandatory)]
+	[Parameter(Mandatory, ParameterSetName = 'Single')]
 	[guid]$GroupId,
+	[Parameter(ParameterSetName = 'Single')]
 	[ValidateNotNullOrEmpty()]
 	[string]$ReviewName,
+	[Parameter(Mandatory, ParameterSetName = 'Csv')]
+	[ValidateNotNullOrEmpty()]
+	[string]$CsvPath,
 	[ValidateSet('OneTime', 'Weekly', 'Monthly', 'Quarterly', 'SemiAnnual', 'Annual')]
 	[string]$Frequency = 'OneTime',
 	[datetime]$StartDate = (Get-Date).Date,
@@ -123,113 +131,199 @@ if ($Frequency -ne 'OneTime' -and $EndDate.Date -lt $StartDate.Date.AddDays(3)) 
 	throw 'EndDate must allow at least three days for the review to complete.'
 }
 
-try {
-	$group = Get-MgGroup -GroupId $GroupId -Property id, displayName, onPremisesSyncEnabled
-}
-catch {
-	throw "Unable to read group '$GroupId'. Check that the group exists and that the signed-in account can read it. $($_.Exception.Message)"
-}
-
-$isSyncedGroup = $group.OnPremisesSyncEnabled -eq $true
-if ($isSyncedGroup) {
-	Write-Warning "Group '$($group.displayName)' is synchronized from on-premises Active Directory. Decisions will be recorded but not applied; remove denied access in Active Directory."
-}
-
-$reviewDisplayName = if ($PSBoundParameters.ContainsKey('ReviewName')) {
-	$ReviewName.Trim()
-}
-else {
-	"$ReviewNamePrefix $($group.displayName)".Trim()
-}
-
-if ([string]::IsNullOrWhiteSpace($reviewDisplayName)) {
-	throw 'ReviewName must not be empty or whitespace.'
-}
-
-$descriptionForReviewers = "Confirm whether each user still needs access to the group $($group.displayName)."
-if ($ReviewerMessage.Trim()) {
-	$descriptionForReviewers = "$descriptionForReviewers $($ReviewerMessage.Trim())"
-}
-if ($ReviewerMessage.Trim() -and $descriptionForReviewers.Length -gt 256) {
-	throw "descriptionForReviewers is $($descriptionForReviewers.Length) characters; reviewer emails support up to 256. Shorten ReviewerMessage."
-}
-
-$params = @{
-	displayName = $reviewDisplayName
-	descriptionForAdmins = if ($isSyncedGroup) {
-		"Review direct membership of the group $($group.displayName). The group is synchronized from on-premises Active Directory; apply denied access in Active Directory."
-	}
-	else {
-		"Review direct membership of the group $($group.displayName)."
-	}
-	descriptionForReviewers = $descriptionForReviewers
-	scope = @{
-		"@odata.type" = "#microsoft.graph.accessReviewQueryScope"
-		query = "/groups/$GroupId/members"
-		queryType = "MicrosoftGraph"
-	}
-	reviewers = @($applicationOwnerReviewers)
-	fallbackReviewers = @(
-		@{
-			query = "/users/$FallbackReviewerUserId"
-			queryType = "MicrosoftGraph"
-		}
-	)
-	settings = @{
-		mailNotificationsEnabled = $true
-		reminderNotificationsEnabled = $true
-		justificationRequiredOnApproval = $true
-		defaultDecisionEnabled = $true
-		defaultDecision = "Deny"
-		instanceDurationInDays = 3
-		autoApplyDecisionsEnabled = -not $isSyncedGroup
-		recommendationsEnabled = $true
-		recommendationLookBackDuration = "P30D"
-		decisionHistoriesForReviewersEnabled = $false
-	}
-}
-
-if (-not $isSyncedGroup) {
-	$params.settings.applyActions = @(
-		@{
-			"@odata.type" = "#microsoft.graph.removeAccessApplyAction"
-		}
-	)
-}
-
-if ($additionalNotificationRecipients) {
-	$params.additionalNotificationRecipients = @($additionalNotificationRecipients)
-}
-
 if ($Frequency -eq 'OneTime' -and $PSBoundParameters.ContainsKey('EndDate')) {
 	Write-Warning 'EndDate is ignored for one-time reviews. The review period is calculated from StartDate and the number of stages; use -Frequency for recurring reviews.'
 }
 
-$recurrenceRangeEndDate = if ($Frequency -eq 'OneTime') { $StartDate.AddDays($params.settings.instanceDurationInDays) } else { $EndDate }
-$recurrence = @{
-	range = @{
-		type = 'endDate'
-		startDate = $StartDate.ToString('yyyy-MM-dd')
-		endDate = $recurrenceRangeEndDate.ToString('yyyy-MM-dd')
+if ($PSCmdlet.ParameterSetName -eq 'Csv') {
+	if (-not (Test-Path -LiteralPath $CsvPath -PathType Leaf)) {
+		throw "CSV file '$CsvPath' was not found."
+	}
+
+	$targets = foreach ($row in @(Import-Csv -LiteralPath $CsvPath)) {
+		if (-not $row.PSObject.Properties['GroupId']) {
+			throw "The CSV file must contain a 'GroupId' column."
+		}
+
+		$rowGroupId = [guid]::Empty
+		if (-not [guid]::TryParse($row.GroupId.Trim(), [ref]$rowGroupId)) {
+			throw "CSV GroupId '$($row.GroupId)' is not a valid GUID."
+		}
+
+		[pscustomobject]@{
+			GroupId = $rowGroupId
+			ReviewName = if ($row.PSObject.Properties['ReviewName']) { $row.ReviewName.Trim() } else { $null }
+		}
+	}
+
+	$seenGroupIds = @{}
+	$targets = @($targets | Where-Object { -not $seenGroupIds.ContainsKey($_.GroupId) -and ($seenGroupIds[$_.GroupId] = $true) })
+	if ($targets.Count -eq 0) {
+		throw 'The CSV file contains no groups.'
 	}
 }
-
-if ($Frequency -ne 'OneTime') {
-	$recurrence.pattern = switch ($Frequency) {
-		'Weekly' { @{ type = 'weekly'; interval = 1 } }
-		'Monthly' { @{ type = 'absoluteMonthly'; interval = 1; dayOfMonth = $StartDate.Day } }
-		'Quarterly' { @{ type = 'absoluteMonthly'; interval = 3; dayOfMonth = $StartDate.Day } }
-		'SemiAnnual' { @{ type = 'absoluteMonthly'; interval = 6; dayOfMonth = $StartDate.Day } }
-		'Annual' { @{ type = 'absoluteMonthly'; interval = 12; dayOfMonth = $StartDate.Day } }
-	}
+else {
+	$targets = @([pscustomobject]@{
+		GroupId = $GroupId
+		ReviewName = if ($PSBoundParameters.ContainsKey('ReviewName')) { $ReviewName } else { $null }
+	})
 }
-$params.settings.recurrence = $recurrence
 
-$decisionHandling = if ($isSyncedGroup) { 'recorded decisions only (group synchronized from on-premises)' } else { 'automatic removal of denied access' }
+$results = [System.Collections.Generic.List[object]]::new()
 
-if ($PSCmdlet.ShouldProcess(
-	"Group $($group.displayName) ($GroupId)",
-	"Create access review '$reviewDisplayName' with notifications and $decisionHandling"
-)) {
-	New-MgIdentityGovernanceAccessReviewDefinition -BodyParameter $params -ErrorAction Stop
+foreach ($target in $targets) {
+	$GroupId = $target.GroupId
+	$result = [ordered]@{
+		Group = "$GroupId"
+		GroupId = "$GroupId"
+		ReviewName = $null
+		Status = $null
+		Reason = $null
+	}
+
+	try {
+		try {
+			$group = Get-MgGroup -GroupId $GroupId -Property id, displayName, onPremisesSyncEnabled
+		}
+		catch {
+			throw "Unable to read group '$GroupId'. Check that the group exists and that the signed-in account can read it. $($_.Exception.Message)"
+		}
+
+		$isSyncedGroup = $group.OnPremisesSyncEnabled -eq $true
+		$result.Group = $group.displayName
+		if ($isSyncedGroup) {
+			Write-Warning "Group '$($group.displayName)' is synchronized from on-premises Active Directory. Decisions will be recorded but not applied; remove denied access in Active Directory."
+		}
+
+		$reviewDisplayName = if ($target.ReviewName) {
+			$target.ReviewName.Trim()
+		}
+		else {
+			"$ReviewNamePrefix $($group.displayName)".Trim()
+		}
+
+		if ([string]::IsNullOrWhiteSpace($reviewDisplayName)) {
+			throw 'ReviewName must not be empty or whitespace.'
+		}
+
+		$descriptionForReviewers = "Confirm whether each user still needs access to the group $($group.displayName)."
+		if ($ReviewerMessage.Trim()) {
+			$descriptionForReviewers = "$descriptionForReviewers $($ReviewerMessage.Trim())"
+		}
+		if ($ReviewerMessage.Trim() -and $descriptionForReviewers.Length -gt 256) {
+			throw "descriptionForReviewers is $($descriptionForReviewers.Length) characters; reviewer emails support up to 256. Shorten ReviewerMessage."
+		}
+
+		$params = @{
+			displayName = $reviewDisplayName
+			descriptionForAdmins = if ($isSyncedGroup) {
+				"Review direct membership of the group $($group.displayName). The group is synchronized from on-premises Active Directory; apply denied access in Active Directory."
+			}
+			else {
+				"Review direct membership of the group $($group.displayName)."
+			}
+			descriptionForReviewers = $descriptionForReviewers
+			scope = @{
+				"@odata.type" = "#microsoft.graph.accessReviewQueryScope"
+				query = "/groups/$GroupId/members"
+				queryType = "MicrosoftGraph"
+			}
+			reviewers = @($applicationOwnerReviewers)
+			fallbackReviewers = @(
+				@{
+					query = "/users/$FallbackReviewerUserId"
+					queryType = "MicrosoftGraph"
+				}
+			)
+			settings = @{
+				mailNotificationsEnabled = $true
+				reminderNotificationsEnabled = $true
+				justificationRequiredOnApproval = $true
+				defaultDecisionEnabled = $true
+				defaultDecision = "Deny"
+				instanceDurationInDays = 3
+				autoApplyDecisionsEnabled = -not $isSyncedGroup
+				recommendationsEnabled = $true
+				recommendationLookBackDuration = "P30D"
+				decisionHistoriesForReviewersEnabled = $false
+			}
+		}
+
+		if (-not $isSyncedGroup) {
+			$params.settings.applyActions = @(
+				@{
+					"@odata.type" = "#microsoft.graph.removeAccessApplyAction"
+				}
+			)
+		}
+
+		if ($additionalNotificationRecipients) {
+			$params.additionalNotificationRecipients = @($additionalNotificationRecipients)
+		}
+
+		$recurrenceRangeEndDate = if ($Frequency -eq 'OneTime') { $StartDate.AddDays($params.settings.instanceDurationInDays) } else { $EndDate }
+		$recurrence = @{
+			range = @{
+				type = 'endDate'
+				startDate = $StartDate.ToString('yyyy-MM-dd')
+				endDate = $recurrenceRangeEndDate.ToString('yyyy-MM-dd')
+			}
+		}
+
+		if ($Frequency -ne 'OneTime') {
+			$recurrence.pattern = switch ($Frequency) {
+				'Weekly' { @{ type = 'weekly'; interval = 1 } }
+				'Monthly' { @{ type = 'absoluteMonthly'; interval = 1; dayOfMonth = $StartDate.Day } }
+				'Quarterly' { @{ type = 'absoluteMonthly'; interval = 3; dayOfMonth = $StartDate.Day } }
+				'SemiAnnual' { @{ type = 'absoluteMonthly'; interval = 6; dayOfMonth = $StartDate.Day } }
+				'Annual' { @{ type = 'absoluteMonthly'; interval = 12; dayOfMonth = $StartDate.Day } }
+			}
+		}
+		$params.settings.recurrence = $recurrence
+
+		$decisionHandling = if ($isSyncedGroup) { 'recorded decisions only (group synchronized from on-premises)' } else { 'automatic removal of denied access' }
+
+		if ($PSCmdlet.ShouldProcess(
+			"Group $($group.displayName) ($GroupId)",
+			"Create access review '$reviewDisplayName' with notifications and $decisionHandling"
+		)) {
+			$null = New-MgIdentityGovernanceAccessReviewDefinition -BodyParameter $params -ErrorAction Stop
+			$result.Status = 'Created'
+		}
+		else {
+			$result.Status = if ($WhatIfPreference) { 'Would be created' } else { 'Not created' }
+		}
+
+		$result.ReviewName = $reviewDisplayName
+		if ($isSyncedGroup) {
+			$result.Reason = 'Synced from on-premises AD; decisions recorded only'
+		}
+	}
+	catch {
+		if ($PSCmdlet.ParameterSetName -eq 'Single') {
+			throw
+		}
+
+		$result.Status = 'Failed'
+		$result.Reason = $_.Exception.Message
+	}
+
+	$resultObject = [pscustomobject]$result
+	$results.Add($resultObject)
+	$resultObject
+}
+
+if ($PSCmdlet.ParameterSetName -eq 'Csv') {
+	$createdStatus = if ($WhatIfPreference) { 'Would be created' } else { 'Created' }
+	$createdCount = @($results | Where-Object { $_.Status -eq $createdStatus }).Count
+	$failedCount = @($results | Where-Object { $_.Status -eq 'Failed' }).Count
+	$notCreated = @($results | Where-Object { $_.Status -eq 'Failed' })
+	if ($notCreated) {
+		''
+		'Failed groups:'
+		$notCreated | Select-Object Group, Status, Reason | Format-Table -AutoSize -Wrap | Out-String -Width 200 -Stream | Where-Object { $_.Trim() }
+	}
+
+	''
+	"$($results.Count) group(s): $createdCount $($createdStatus.ToLower()), $failedCount failed."
 }

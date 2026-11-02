@@ -57,9 +57,22 @@ owners in Microsoft Entra ID, so the fallback reviewer is used. The
 application script skips groups with dynamic membership and groups with
 no members and no owners.
 
-The group scripts require `-GroupId`. For example:
+`Create-AccessReview.ps1` and `Create-AccessReviewStages.ps1` also accept
+`-CsvPath` instead of `-GroupId` to create one review per group. The CSV needs
+a `GroupId` column and can have an optional `ReviewName` column; duplicate
+groups are processed once. A failure for one group doesn't stop the others;
+failed groups and a total are listed at the end.
+
+```csv
+GroupId,ReviewName
+00000000-0000-0000-0000-000000000000,
+00000000-0000-0000-0000-000000000000,Quarterly review of Finance
+```
+
+The group scripts require `-GroupId` or `-CsvPath`. For example:
 
 ```powershell
+.\Create-AccessReview.ps1 -CsvPath '.\groups.csv' -WhatIf
 .\Create-AccessReview.ps1 -GroupId '00000000-0000-0000-0000-000000000000' -WhatIf
 .\Create-AccessReviewStages.ps1 -GroupId '00000000-0000-0000-0000-000000000000' -Frequency Quarterly -WhatIf
 .\Create-AccessReviewAppGroups.ps1 -ServicePrincipalId '00000000-0000-0000-0000-000000000000' -WhatIf
