@@ -325,4 +325,34 @@ Describe 'Unified access review creation and local logging' {
 			Should -Throw '*Parameter set cannot be resolved*'
 		Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times 0 -Exactly
 	}
+
+	It 'detects <Kind> column delimiters with quoted headers and multiple owners' -TestCases @(
+		@{ Kind = 'comma'; Delimiter = ',' },
+		@{ Kind = 'semicolon'; Delimiter = ';' },
+		@{ Kind = 'tab'; Delimiter = "`t" }
+	) {
+		param($Kind, $Delimiter)
+		$csv = Join-Path $script:testScriptRoot 'delimited.csv'
+		$header = @('"GroupId"', '"AppOwnerIds"', '"ReviewName"') -join $Delimiter
+		$data = @($script:groupId, "`"$script:ownerId;$script:reviewId`"", '"Finance, reporting; review"') -join $Delimiter
+		"$header`n$data" | Set-Content -LiteralPath $csv -Encoding utf8BOM
+		$result = & $script:testScript -CsvPath $csv -AppOwnerIds @() -ReviewerType ResourceOwner -Confirm:$false
+		$result.Status | Should -Be 'Created'
+		$result.ReviewName | Should -Be 'Finance, reporting; review'
+		$script:fixture.Bodies[0].stageSettings[1].reviewers.query |
+			Should -Be @("/users/$script:ownerId", "/users/$script:reviewId")
+	}
+
+	It 'explains unsupported headers instead of claiming a valid delimiter was parsed' {
+		$csv = Join-Path $script:testScriptRoot 'invalid.csv'
+		"GroupId|AppOwnerIds`n$script:groupId|$script:ownerId" | Set-Content $csv
+		{ & $script:testScript -CsvPath $csv } | Should -Throw '*Supported column delimiters*Detected header: GroupId|AppOwnerIds*'
+		Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times 0 -Exactly
+	}
+
+	It 'rejects an empty CSV explicitly' {
+		$csv = Join-Path $script:testScriptRoot 'empty.csv'
+		Set-Content $csv ''
+		{ & $script:testScript -CsvPath $csv } | Should -Throw '*empty or has a blank header*'
+	}
 }

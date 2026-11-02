@@ -173,11 +173,23 @@ if ($PSCmdlet.ParameterSetName -eq 'Csv') {
 		throw "CSV file '$CsvPath' was not found."
 	}
 
-	$targets = foreach ($row in @(Import-Csv -LiteralPath $CsvPath)) {
-		if (-not $row.PSObject.Properties['GroupId']) {
-			throw "The CSV file must contain a 'GroupId' column."
+	$header = Get-Content -LiteralPath $CsvPath -TotalCount 1
+	if ([string]::IsNullOrWhiteSpace($header)) {
+		throw 'The CSV file is empty or has a blank header.'
+	}
+	$csvDelimiter = $null
+	foreach ($candidate in @(',', ';', "`t")) {
+		$probe = ConvertFrom-Csv -InputObject "$header`nheader-detection" -Delimiter $candidate
+		if ($probe.PSObject.Properties['GroupId']) {
+			$csvDelimiter = $candidate
+			break
 		}
+	}
+	if ($null -eq $csvDelimiter) {
+		throw "The CSV file must contain a 'GroupId' column. Supported column delimiters are comma, semicolon and tab. Detected header: $header"
+	}
 
+	$targets = foreach ($row in @(Import-Csv -LiteralPath $CsvPath -Delimiter $csvDelimiter)) {
 		$rowGroupId = [guid]::Empty
 		if (-not [guid]::TryParse($row.GroupId.Trim(), [ref]$rowGroupId)) {
 			throw "CSV GroupId '$($row.GroupId)' is not a valid GUID."
