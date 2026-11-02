@@ -54,16 +54,24 @@ GroupId,AppOwnerIds,ReviewName
 ```
 
 Comma, semicolon (common in Excel exports), and tab column delimiters are
-detected automatically from the header. With semicolon-delimited files, quote
-cells containing multiple owner IDs, for example:
+detected automatically from the header. Inside `AppOwnerIds`, separate multiple
+IDs with commas or semicolons. Quote the cell when its separator matches the
+CSV column delimiter. For example, comma-separated IDs in a comma-delimited file:
+
+```csv
+GroupId,AppOwnerIds
+11111111-1111-1111-1111-111111111111,"22222222-2222-2222-2222-222222222222,33333333-3333-3333-3333-333333333333"
+```
+
+Comma-separated IDs also work in a semicolon-delimited file:
 
 ```csv
 GroupId;AppOwnerIds
-11111111-1111-1111-1111-111111111111;"22222222-2222-2222-2222-222222222222;33333333-3333-3333-3333-333333333333"
+11111111-1111-1111-1111-111111111111;22222222-2222-2222-2222-222222222222,33333333-3333-3333-3333-333333333333
 ```
 
 Column order does not matter. Nonblank row owners replace parameter defaults;
-blank/missing cells use `-AppOwnerIds`. Multiple IDs use semicolons. Missing or
+blank/missing cells use `-AppOwnerIds`. Whitespace around IDs is ignored. Missing or
 malformed owners fail that row without creating its review; other rows continue.
 Owner IDs must identify users, not groups. Duplicate owner IDs are collapsed.
 The script does not prevalidate that each GUID identifies an existing user.

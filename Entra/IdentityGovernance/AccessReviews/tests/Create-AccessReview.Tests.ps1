@@ -343,6 +343,42 @@ Describe 'Unified access review creation and local logging' {
 			Should -Be @("/users/$script:ownerId", "/users/$script:reviewId")
 	}
 
+	It 'uses every comma-separated owner with <Kind> columns and <Type> reviewers' -TestCases @(
+		@{ Kind = 'comma'; Delimiter = ','; Type = 'ApplicationOwner' },
+		@{ Kind = 'comma'; Delimiter = ','; Type = 'LineManager' },
+		@{ Kind = 'comma'; Delimiter = ','; Type = 'ResourceOwner' },
+		@{ Kind = 'semicolon'; Delimiter = ';'; Type = 'ApplicationOwner' },
+		@{ Kind = 'semicolon'; Delimiter = ';'; Type = 'LineManager' },
+		@{ Kind = 'semicolon'; Delimiter = ';'; Type = 'ResourceOwner' },
+		@{ Kind = 'tab'; Delimiter = "`t"; Type = 'ApplicationOwner' },
+		@{ Kind = 'tab'; Delimiter = "`t"; Type = 'LineManager' },
+		@{ Kind = 'tab'; Delimiter = "`t"; Type = 'ResourceOwner' }
+	) {
+		param($Kind, $Delimiter, $Type)
+		$csv = Join-Path $script:testScriptRoot 'comma-owners.csv'
+		$header = @('GroupId', 'AppOwnerIds') -join $Delimiter
+		$owners = "$script:ownerId, $script:reviewId, $script:ownerId"
+		if ($Delimiter -eq ',') { $owners = "`"$owners`"" }
+		$data = @($script:groupId, $owners) -join $Delimiter
+		"$header`n$data" | Set-Content -LiteralPath $csv
+		$result = & $script:testScript -CsvPath $csv -AppOwnerIds @() -ReviewerType $Type -Confirm:$false
+		$result.Status | Should -Be 'Created'
+		$result.AppOwnerIds | Should -Be @($script:ownerId, $script:reviewId)
+		$body = $script:fixture.Bodies[0]
+		$reviewers = if ($Type -eq 'ApplicationOwner') { $body.reviewers } else { $body.stageSettings[-1].reviewers }
+		$reviewers.query | Should -Be @("/users/$script:ownerId", "/users/$script:reviewId")
+		(Get-LogEntries)[1].Result.AppOwnerIds | Should -Be @($script:ownerId, $script:reviewId)
+	}
+
+	It 'rejects malformed comma-separated owners without creating a partial review' {
+		$csv = Join-Path $script:testScriptRoot 'invalid-owners.csv'
+		"GroupId;AppOwnerIds`n$script:groupId;$script:ownerId,not-a-guid" | Set-Content -LiteralPath $csv
+		$result = & $script:testScript -CsvPath $csv -Confirm:$false
+		$result.Status | Should -Be 'Failed'
+		$result.Reason | Should -Match 'invalid user object GUID'
+		Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times 0 -Exactly
+	}
+
 	It 'explains unsupported headers instead of claiming a valid delimiter was parsed' {
 		$csv = Join-Path $script:testScriptRoot 'invalid.csv'
 		"GroupId|AppOwnerIds`n$script:groupId|$script:ownerId" | Set-Content $csv

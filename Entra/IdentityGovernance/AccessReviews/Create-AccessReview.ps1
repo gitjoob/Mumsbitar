@@ -16,8 +16,9 @@ sign-off, even for small groups. At 500 or more transitive members, an initial
 self-review stage is added to those two-stage reviews. ResourceOwner uses
 the group's user owners; groups without user owners use the fallback reviewer.
 AppOwnerIds supplies application-owner user object IDs. The optional CSV
-AppOwnerIds column overrides that parameter per row, using semicolon-separated
-user IDs. Blank cells use the parameter. Every group requires application owners.
+AppOwnerIds column overrides that parameter per row, using comma- or semicolon-separated
+user IDs. Quote the cell when its separator matches the CSV column delimiter.
+Blank cells use the parameter. Every group requires application owners.
 
 Each validated run appends its invocation syntax and per-group results to
 logs/Create-AccessReview.jsonl next to the script. This directory is
@@ -270,7 +271,7 @@ foreach ($target in $targets) {
 	try {
 		$targetOwnerIds = @($AppOwnerIds)
 		if (-not [string]::IsNullOrWhiteSpace($target.AppOwnerIds)) {
-			$targetOwnerIds = @(foreach ($value in $target.AppOwnerIds.Split(';')) {
+			$targetOwnerIds = @(foreach ($value in ($target.AppOwnerIds -split '[,;]')) {
 				$ownerId = [guid]::Empty
 				if (-not [guid]::TryParse($value.Trim(), [ref]$ownerId) -or $ownerId -eq [guid]::Empty) {
 					throw "CSV AppOwnerIds contains an invalid user object GUID: '$value'."
