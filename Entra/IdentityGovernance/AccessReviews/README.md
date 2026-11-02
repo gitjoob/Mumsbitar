@@ -1,144 +1,134 @@
-# Access review scripts
+# Access reviews
 
-These scripts create an access review for a group's direct members. They default
-to a one-time review. Set `-Frequency` to `Weekly`, `Monthly`, `Quarterly`,
-`SemiAnnual`, or `Annual` for a recurring review. `-StartDate` defaults to today.
-For recurring reviews, `-EndDate` defaults to the end of the current month;
-it is ignored for one-time reviews, whose period is `-StartDate` plus the days
-of all stages (a warning is shown if you pass it).
-`-ReviewName` is optional; otherwise, the group name is used.
+[Create-AccessReview.ps1](./Create-AccessReview.ps1) is the unified entry point
+for direct group-membership reviews. Keep
+[AccessReview.Logging.ps1](./AccessReview.Logging.ps1) beside it.
 
-## Reviewer selection and creation logs
+## Input modes
 
-All three scripts accept `-ReviewerType ResourceOwner` (group owners) or
-`-ReviewerType LineManager` (each reviewee's manager). Existing defaults and
-stage layouts are preserved:
+Choose exactly one:
 
-| Script | Default | What the selector changes |
-| --- | --- | --- |
-| `Create-AccessReview.ps1` | `ApplicationOwner` | Reviewers of the single stage. `ApplicationOwner` remains an additional supported value for the configured reviewers. |
-| `Create-AccessReviewStages.ps1` | `LineManager` | The stage before application owners in two-/three-stage reviews. Single-stage reviews still use application owners. |
-| `Create-AccessReviewAppGroups.ps1` | `ResourceOwner` | The final reviewer stage; an initial self-review stage is unchanged. |
+- `-GroupId`: one group, optionally with `-ReviewName`.
+- `-CsvPath`: one review per CSV row; duplicate group IDs are processed once.
+- `-ServicePrincipalId`: discover groups assigned to an enterprise application.
+  Multiple application-role assignments for a group are collapsed. Direct user
+  assignments are not reviewed. Names are `AR <application> - <group>`.
 
-Missing managers or group user owners use the configured fallback reviewer.
-Owner lookup errors fail explicitly. The application-group script retains its
-skip rules for dynamic groups, groups with no members and no user owners, and
-existing review names.
-
-Each script appends invocation syntax, timestamps, run ID, effective schedule,
-reviewer selection, per-group results and created review IDs to its own
-`logs/<script-name>.jsonl`. The whole `logs/` directory is gitignored.
-`-WhatIf` writes local preview logs, never Graph reviews. Logging errors stop
-the run; inspect created IDs before retrying. Single-group failures are logged
-before being rethrown, and skipped application groups are logged as well.
-Preflight validation failures happen before logging starts.
-
-Keep the shared [AccessReview.Logging.ps1](./AccessReview.Logging.ps1) beside
-all three scripts when copying them. It logs explicit invocation parameters,
-not the authentication command, credentials or tokens. Logs contain group and
-tenant metadata and must be kept private. The logged working directory is
-needed when replaying commands with relative CSV paths.
+Connect to Graph first. Requires `Microsoft.Graph.Authentication`,
+`Microsoft.Graph.Groups` and `Microsoft.Graph.Identity.Governance`;
+application discovery also requires `Microsoft.Graph.Applications`.
+Delegated sessions require `AccessReview.ReadWrite.All`, group read access
+(including owners and transitive counts), and `Application.Read.All` for
+application discovery. App-only authorization is enforced by Graph. Appropriate
+Entra licensing and active administrator/resource roles are required as well.
 
 ```powershell
+Connect-MgGraph -Scopes 'AccessReview.ReadWrite.All','Group.Read.All','Application.Read.All'
+
+.\Create-AccessReview.ps1 -GroupId '11111111-1111-1111-1111-111111111111' `
+    -AppOwnerIds '22222222-2222-2222-2222-222222222222' `
+    -ReviewerType ResourceOwner -WhatIf
+
 .\Create-AccessReview.ps1 -CsvPath '.\groups.csv' -ReviewerType ResourceOwner -WhatIf
-.\Create-AccessReviewAppGroups.ps1 -ServicePrincipalId '00000000-0000-0000-0000-000000000000' -ReviewerType LineManager -WhatIf
-Invoke-Pester -Path '.\tests'
+
+.\Create-AccessReview.ps1 -ServicePrincipalId '33333333-3333-3333-3333-333333333333' `
+    -AppOwnerIds '22222222-2222-2222-2222-222222222222' `
+    -ReviewerType LineManager -WhatIf
 ```
 
-## Scripts
+Replace example IDs with real object IDs. Remove `-WhatIf` after checking the
+preview; preview performs Graph reads but never creates reviews.
 
-- [Create-AccessReview.ps1](./Create-AccessReview.ps1) creates a single-stage
-  review. Reviewers are configured in `$ApplicationOwners`; the fallback
-  reviewer is configured in `$FallbackReviewerUserId`.
-- [Create-AccessReviewStages.ps1](./Create-AccessReviewStages.ps1) selects one,
-  two, or three stages based on the group's transitive member count. Configure
-  the ascending cutoffs in `$StageThresholds`: below the second cutoff uses
-  application owners; at the second, line managers then application owners;
-  at the third, self-review, line managers, then application owners. Counts
-  below the first cutoff still use one stage and produce a warning.
+## Application-owner sign-off and CSV
 
-  Set `$ApplicationOwners` to one or more user or group IDs for the application
-  owner stage; group membership is resolved transitively. `$FallbackReviewerUserId`
-  is used when a primary reviewer is unavailable, and `$StageDurationInDays`
-  sets the duration of each stage. The default thresholds and placeholder IDs
-  are defined at the top of the script.
+Application-owner sign-off is required in every mode. `-AppOwnerIds` accepts
+one or more **user object IDs** as run-wide defaults. Application discovery
+requires these explicit IDs; it never infers application owners.
 
-  Use `-ReviewerType LineManager` (default) or `-ReviewerType ResourceOwner`
-  to choose the reviewer stage before application owners in two-/three-stage
-  reviews. Resource owners are the group's user owners (service principals are
-  excluded); groups without user owners use `$FallbackReviewerUserId`. Owner
-  lookup errors fail the group instead of silently using the fallback.
-  Single-stage reviews still use application owners; the final stage and
-  optional initial self-review stage are unchanged.
-
-  Validated runs append JSON Lines to
-  `logs/Create-AccessReviewStages.jsonl` beside the script. This directory is
-  gitignored. Entries contain a run ID, UTC timestamp, runnable invocation
-  syntax with explicitly supplied parameters, working directory, effective
-  dates/frequency, reviewer selection, per-group status, created review ID and
-  any failure reason. `RunCompleted` contains totals. Single-group failures
-  are logged before being rethrown; preflight failures occur before logging
-  starts. `-WhatIf` writes local preview logs but never creates Graph reviews.
-  Logging failures stop the script explicitly; check existing review IDs
-  before retrying. Logs contain tenant/group metadata, so keep them private.
-
-  ```powershell
-  .\Create-AccessReviewStages.ps1 -CsvPath '.\groups.csv' -ReviewerType ResourceOwner -WhatIf
-  .\Create-AccessReviewStages.ps1 -GroupId '00000000-0000-0000-0000-000000000000' -ReviewerType LineManager
-  Get-Content '.\logs\Create-AccessReviewStages.jsonl' | ForEach-Object { $_ | ConvertFrom-Json }
-  ```
-
-  Offline reviewer-selection and logging tests:
-  `Invoke-Pester -Path '.\tests\Create-AccessReviewStages.Tests.ps1'`.
-- [Create-AccessReviewAppGroups.ps1](./Create-AccessReviewAppGroups.ps1) takes
-  `-ServicePrincipalId` instead of `-GroupId`. An access review of an
-  application can't use group owners as reviewers, and it doesn't remove users
-  who get access through a group. This script therefore creates one review per
-  group assigned to the enterprise application, and each group's owners review
-  their own group. Groups with more than `$SelfReviewStageThreshold` transitive
-  members (default 150) get a self-review stage first. Groups without
-  owners go to `$FallbackReviewerUserId`. Groups that already have a review with
-  the same name (`AR <application> - <group>`) are skipped. Each group gets a result with its status. At the end, the
-  script lists only the skipped or failed groups with the reason, and the number
-  of reviews created (with `-WhatIf`, the number that would be created).
-
-In all scripts, `$ReviewerMessage` optionally adds your own text (for example
-contact details or a link) to the reviewer email. The email supports up to 256
-characters in total, including the default text; the script stops if it is too
-long. The rest of the email is fixed by Microsoft.
-
-In all scripts, `$AdditionalNotificationRecipients` optionally lists user or
-group IDs for a completion notification; leave it empty to omit that
-notification. Unanswered reviews default to Deny, and denied access is
-automatically removed. Use `-WhatIf` to preview the operation.
-
-If the group is synchronized from on-premises Active Directory
-(`onPremisesSyncEnabled`), the access review cannot change its membership. The
-scripts detect this, disable automatic apply, and show a warning; decisions are
-only recorded and denied access must be removed in Active Directory. Download
-the CSV report from the completed review, or retrieve the decisions through
-Microsoft Graph, and act on them in Active Directory. Synced groups have no
-owners in Microsoft Entra ID, so the fallback reviewer is used. The
-application script skips groups with dynamic membership and groups with
-no members and no owners.
-
-`Create-AccessReview.ps1` and `Create-AccessReviewStages.ps1` also accept
-`-CsvPath` instead of `-GroupId` to create one review per group. The CSV needs
-a `GroupId` column and can have an optional `ReviewName` column; duplicate
-groups are processed once. A failure for one group doesn't stop the others;
-failed groups and a total are listed at the end.
+CSV requires `GroupId`; `AppOwnerIds` and `ReviewName` are optional columns:
 
 ```csv
-GroupId,ReviewName
-00000000-0000-0000-0000-000000000000,
-00000000-0000-0000-0000-000000000000,Quarterly review of Finance
+GroupId,AppOwnerIds,ReviewName
+11111111-1111-1111-1111-111111111111,22222222-2222-2222-2222-222222222222;33333333-3333-3333-3333-333333333333,Finance review
+44444444-4444-4444-4444-444444444444,55555555-5555-5555-5555-555555555555,Service desk review
 ```
 
-The group scripts require `-GroupId` or `-CsvPath`. For example:
+Column order does not matter. Nonblank row owners replace parameter defaults;
+blank/missing cells use `-AppOwnerIds`. Multiple IDs use semicolons. Missing or
+malformed owners fail that row without creating its review; other rows continue.
+Owner IDs must identify users, not groups. Duplicate owner IDs are collapsed.
+The script does not prevalidate that each GUID identifies an existing user.
+
+## Stage selection
+
+`-ReviewerType` (`-ReviewType` alias) defaults to `LineManager`:
+
+| ReviewerType | Below 500 transitive members | 500+ |
+| --- | --- | --- |
+| `ApplicationOwner` | Application owners | Application owners |
+| `LineManager` | Managers -> Application owners | Self-review -> Managers -> Application owners |
+| `ResourceOwner` | Group user owners -> Application owners | Self-review -> Group user owners -> Application owners |
+
+The 50/150-person cutoffs are removed in the unified behavior. Group counts
+include transitive directory members, not only users. Configure
+`$SelfReviewStageThreshold` (default 500, inclusive) and `$StageDurationInDays`
+(default five) in the script. Group user owners are resolved at creation time;
+service-principal owners are excluded. Missing owners/managers use
+`$FallbackReviewerUserId`, which must be configured before real creation.
+Lookup failures fail explicitly rather than silently using fallback.
+Graph advances `Approve` and `NotReviewed` decisions to subsequent stages;
+denied decisions do not advance. Final-stage review is by application owners.
+
+## Schedule and notifications
+
+Defaults to `-Frequency OneTime` and `-StartDate` today. Recurring options:
+`Weekly`, `Monthly`, `Quarterly`, `SemiAnnual`, `Annual`. Recurring `-EndDate`
+defaults to the end of the current month and must allow all stages to finish.
+For one-time reviews, EndDate is ignored; duration is stage count times days
+per stage. Supply a later EndDate when needed for a recurring series.
+
+Notifications and reminders are enabled; reviewer justification is required.
+Unanswered reviews default to Deny, and denied access is automatically removed.
+`$ReviewerMessage` adds optional email text; the full reviewer message supports
+256 characters. `$AdditionalNotificationRecipients` optionally adds completion
+notification recipients (user/group IDs), or leave it empty.
+
+Synchronized groups are report-only: decisions are recorded but removal must
+be performed in on-premises Active Directory. Automatic apply is disabled.
+
+Application-discovery mode preserves its skip rules: dynamic groups, groups
+with neither members nor user owners, and existing review names are skipped.
+Existing reviews are not updated. Direct-group/CSV modes do not skip existing
+names; check results before retrying to avoid duplicate reviews.
+
+## Results and private logs
+
+Results include group/review IDs, effective application-owner IDs, stage names,
+reviewer type, status and failure reason. Batch summaries are written separately
+from result objects:
 
 ```powershell
-.\Create-AccessReview.ps1 -CsvPath '.\groups.csv' -WhatIf
-.\Create-AccessReview.ps1 -GroupId '00000000-0000-0000-0000-000000000000' -WhatIf
-.\Create-AccessReviewStages.ps1 -GroupId '00000000-0000-0000-0000-000000000000' -Frequency Quarterly -WhatIf
-.\Create-AccessReviewAppGroups.ps1 -ServicePrincipalId '00000000-0000-0000-0000-000000000000' -WhatIf
+$results = .\Create-AccessReview.ps1 -CsvPath '.\groups.csv' -ReviewerType ResourceOwner
+$results | Export-Csv '.\results.csv' -NoTypeInformation
 ```
+
+Every validated run appends JSON Lines to `logs/Create-AccessReview.jsonl`.
+The whole `logs/` directory is gitignored. Entries contain UTC timestamps,
+run ID, runnable invocation syntax (including array parameters), working
+directory, effective schedule and per-group results including created IDs.
+CSV files themselves are not copied into logs; effective owner IDs are logged.
+Authentication commands, credentials and tokens are not logged. Keep logs
+private because they contain tenant/group metadata.
+
+WhatIf writes local preview logs. Logging errors stop execution explicitly;
+check IDs already returned before retrying. Single-group failures are logged
+before rethrowing; batch failures are reported per group. Application-discovery
+failures are logged as `RunFailed`. Preflight errors occur before logging starts.
+
+## Offline validation
+
+```powershell
+Invoke-Pester -Path '.\tests' -Output Detailed
+```
+
+Tests mock Graph; they never connect to or change a tenant.

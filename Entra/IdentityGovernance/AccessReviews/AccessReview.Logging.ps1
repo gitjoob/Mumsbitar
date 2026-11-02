@@ -39,6 +39,10 @@ function Start-AccessReviewLog {
 		if ($value -is [System.Management.Automation.SwitchParameter]) {
 			$syntaxParts += "-${key}:`$$($value.IsPresent.ToString().ToLowerInvariant())"
 		}
+		elseif ($value -is [array]) {
+			$items = @($value | ForEach-Object { "'$(([string]$_).Replace("'", "''"))'" })
+			$syntaxParts += "-$key @($($items -join ', '))"
+		}
 		else {
 			$text = if ($value -is [datetime]) { $value.ToString('o') } else { [string]$value }
 			$syntaxParts += "-$key '$($text.Replace("'", "''"))'"
