@@ -8,6 +8,43 @@ it is ignored for one-time reviews, whose period is `-StartDate` plus the days
 of all stages (a warning is shown if you pass it).
 `-ReviewName` is optional; otherwise, the group name is used.
 
+## Reviewer selection and creation logs
+
+All three scripts accept `-ReviewerType ResourceOwner` (group owners) or
+`-ReviewerType LineManager` (each reviewee's manager). Existing defaults and
+stage layouts are preserved:
+
+| Script | Default | What the selector changes |
+| --- | --- | --- |
+| `Create-AccessReview.ps1` | `ApplicationOwner` | Reviewers of the single stage. `ApplicationOwner` remains an additional supported value for the configured reviewers. |
+| `Create-AccessReviewStages.ps1` | `LineManager` | The stage before application owners in two-/three-stage reviews. Single-stage reviews still use application owners. |
+| `Create-AccessReviewAppGroups.ps1` | `ResourceOwner` | The final reviewer stage; an initial self-review stage is unchanged. |
+
+Missing managers or group user owners use the configured fallback reviewer.
+Owner lookup errors fail explicitly. The application-group script retains its
+skip rules for dynamic groups, groups with no members and no user owners, and
+existing review names.
+
+Each script appends invocation syntax, timestamps, run ID, effective schedule,
+reviewer selection, per-group results and created review IDs to its own
+`logs/<script-name>.jsonl`. The whole `logs/` directory is gitignored.
+`-WhatIf` writes local preview logs, never Graph reviews. Logging errors stop
+the run; inspect created IDs before retrying. Single-group failures are logged
+before being rethrown, and skipped application groups are logged as well.
+Preflight validation failures happen before logging starts.
+
+Keep the shared [AccessReview.Logging.ps1](./AccessReview.Logging.ps1) beside
+all three scripts when copying them. It logs explicit invocation parameters,
+not the authentication command, credentials or tokens. Logs contain group and
+tenant metadata and must be kept private. The logged working directory is
+needed when replaying commands with relative CSV paths.
+
+```powershell
+.\Create-AccessReview.ps1 -CsvPath '.\groups.csv' -ReviewerType ResourceOwner -WhatIf
+.\Create-AccessReviewAppGroups.ps1 -ServicePrincipalId '00000000-0000-0000-0000-000000000000' -ReviewerType LineManager -WhatIf
+Invoke-Pester -Path '.\tests'
+```
+
 ## Scripts
 
 - [Create-AccessReview.ps1](./Create-AccessReview.ps1) creates a single-stage
@@ -25,6 +62,34 @@ of all stages (a warning is shown if you pass it).
   is used when a primary reviewer is unavailable, and `$StageDurationInDays`
   sets the duration of each stage. The default thresholds and placeholder IDs
   are defined at the top of the script.
+
+  Use `-ReviewerType LineManager` (default) or `-ReviewerType ResourceOwner`
+  to choose the reviewer stage before application owners in two-/three-stage
+  reviews. Resource owners are the group's user owners (service principals are
+  excluded); groups without user owners use `$FallbackReviewerUserId`. Owner
+  lookup errors fail the group instead of silently using the fallback.
+  Single-stage reviews still use application owners; the final stage and
+  optional initial self-review stage are unchanged.
+
+  Validated runs append JSON Lines to
+  `logs/Create-AccessReviewStages.jsonl` beside the script. This directory is
+  gitignored. Entries contain a run ID, UTC timestamp, runnable invocation
+  syntax with explicitly supplied parameters, working directory, effective
+  dates/frequency, reviewer selection, per-group status, created review ID and
+  any failure reason. `RunCompleted` contains totals. Single-group failures
+  are logged before being rethrown; preflight failures occur before logging
+  starts. `-WhatIf` writes local preview logs but never creates Graph reviews.
+  Logging failures stop the script explicitly; check existing review IDs
+  before retrying. Logs contain tenant/group metadata, so keep them private.
+
+  ```powershell
+  .\Create-AccessReviewStages.ps1 -CsvPath '.\groups.csv' -ReviewerType ResourceOwner -WhatIf
+  .\Create-AccessReviewStages.ps1 -GroupId '00000000-0000-0000-0000-000000000000' -ReviewerType LineManager
+  Get-Content '.\logs\Create-AccessReviewStages.jsonl' | ForEach-Object { $_ | ConvertFrom-Json }
+  ```
+
+  Offline reviewer-selection and logging tests:
+  `Invoke-Pester -Path '.\tests\Create-AccessReviewStages.Tests.ps1'`.
 - [Create-AccessReviewAppGroups.ps1](./Create-AccessReviewAppGroups.ps1) takes
   `-ServicePrincipalId` instead of `-GroupId`. An access review of an
   application can't use group owners as reviewers, and it doesn't remove users

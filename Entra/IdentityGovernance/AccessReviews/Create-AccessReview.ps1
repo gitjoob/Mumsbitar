@@ -5,6 +5,10 @@ Creates an access review of a group's direct members.
 Connect to Microsoft Graph first.
 Requires AccessReview.ReadWrite.All and an appropriate access review license.
 Reviewers are configured in $ApplicationOwners, with $FallbackReviewerUserId as fallback.
+ReviewerType can select ResourceOwner (group user owners) or LineManager
+instead. ApplicationOwner is the default to preserve existing behavior.
+Invocation syntax and results are appended to logs/Create-AccessReview.jsonl
+(gitignored), including with WhatIf. Keep AccessReview.Logging.ps1 beside this script.
 Optional completion-notification recipients are configured in
 $ReviewerMessage optionally adds text (for example contact details) to the reviewer email.
 $AdditionalNotificationRecipients; leave it empty to send no additional notifications.
@@ -42,6 +46,8 @@ param(
 	[Parameter(Mandatory, ParameterSetName = 'Csv')]
 	[ValidateNotNullOrEmpty()]
 	[string]$CsvPath,
+	[ValidateSet('ApplicationOwner', 'ResourceOwner', 'LineManager')]
+	[string]$ReviewerType = 'ApplicationOwner',
 	[ValidateSet('OneTime', 'Weekly', 'Monthly', 'Quarterly', 'SemiAnnual', 'Annual')]
 	[string]$Frequency = 'OneTime',
 	[datetime]$StartDate = (Get-Date).Date,
@@ -69,6 +75,7 @@ $AdditionalNotificationRecipients = @(
 $FallbackReviewerUserId = '00000000-0000-0000-0000-000000000000'
 
 $ErrorActionPreference = 'Stop'
+$invocationParameters = @{} + $PSBoundParameters
 Import-Module Microsoft.Graph.Authentication
 Import-Module Microsoft.Graph.Groups
 Import-Module Microsoft.Graph.Identity.Governance
@@ -84,11 +91,11 @@ if ($context.Scopes -notcontains $requiredScope) {
 	throw "The required Microsoft Graph permission '$requiredScope' is not granted."
 }
 
-if (-not $ApplicationOwners) {
+if ($ReviewerType -eq 'ApplicationOwner' -and -not $ApplicationOwners) {
 	throw 'At least one reviewer must be configured in $ApplicationOwners.'
 }
 
-$applicationOwnerReviewers = foreach ($owner in $ApplicationOwners) {
+$applicationOwnerReviewers = foreach ($owner in $(if ($ReviewerType -eq 'ApplicationOwner') { $ApplicationOwners })) {
 	$ownerId = [guid]::Empty
 	if (-not [guid]::TryParse($owner.Id, [ref]$ownerId)) {
 		throw "Reviewer Id '$($owner.Id)' is not a valid GUID."
@@ -170,6 +177,13 @@ else {
 }
 
 $results = [System.Collections.Generic.List[object]]::new()
+. (Join-Path $PSScriptRoot 'AccessReview.Logging.ps1')
+$creationLog = Start-AccessReviewLog -ScriptPath $PSCommandPath -Parameters $invocationParameters -Settings @{
+	ReviewerType = $ReviewerType
+	StartDate = $StartDate.ToString('o')
+	EndDate = $EndDate.ToString('o')
+	Frequency = $Frequency
+}
 
 foreach ($target in $targets) {
 	$GroupId = $target.GroupId
@@ -177,6 +191,8 @@ foreach ($target in $targets) {
 		Group = "$GroupId"
 		GroupId = "$GroupId"
 		ReviewName = $null
+		ReviewId = $null
+		ReviewerType = $ReviewerType
 		Status = $null
 		Reason = $null
 	}
@@ -205,6 +221,22 @@ foreach ($target in $targets) {
 		if ([string]::IsNullOrWhiteSpace($reviewDisplayName)) {
 			throw 'ReviewName must not be empty or whitespace.'
 		}
+		$result.ReviewName = $reviewDisplayName
+		$reviewers = @($applicationOwnerReviewers)
+		if ($ReviewerType -eq 'LineManager') {
+			$reviewers = @(@{ query = './manager'; queryType = 'MicrosoftGraph'; queryRoot = 'decisions' })
+		}
+		elseif ($ReviewerType -eq 'ResourceOwner') {
+			$userOwners = @(Get-MgGroupOwner -GroupId $GroupId -All -Property id |
+				Where-Object { $_.AdditionalProperties['@odata.type'] -eq '#microsoft.graph.user' })
+			$reviewers = @(foreach ($owner in $userOwners) {
+				@{ query = "/users/$($owner.Id)"; queryType = 'MicrosoftGraph' }
+			})
+			if (-not $reviewers.Count) {
+				Write-Warning "Group '$($group.displayName)' has no user owners. Using the fallback reviewer."
+				$reviewers = @(@{ query = "/users/$FallbackReviewerUserId"; queryType = 'MicrosoftGraph' })
+			}
+		}
 
 		$descriptionForReviewers = "Confirm whether each user still needs access to the group $($group.displayName)."
 		if ($ReviewerMessage.Trim()) {
@@ -228,7 +260,7 @@ foreach ($target in $targets) {
 				query = "/groups/$GroupId/members"
 				queryType = "MicrosoftGraph"
 			}
-			reviewers = @($applicationOwnerReviewers)
+			reviewers = $reviewers
 			fallbackReviewers = @(
 				@{
 					query = "/users/$FallbackReviewerUserId"
@@ -287,7 +319,8 @@ foreach ($target in $targets) {
 			"Group $($group.displayName) ($GroupId)",
 			"Create access review '$reviewDisplayName' with notifications and $decisionHandling"
 		)) {
-			$null = New-MgIdentityGovernanceAccessReviewDefinition -BodyParameter $params -ErrorAction Stop
+			$createdReview = New-MgIdentityGovernanceAccessReviewDefinition -BodyParameter $params -ErrorAction Stop
+			$result.ReviewId = $createdReview.Id
 			$result.Status = 'Created'
 		}
 		else {
@@ -300,17 +333,28 @@ foreach ($target in $targets) {
 		}
 	}
 	catch {
+		$result.Status = 'Failed'
+		$result.Reason = $_.Exception.Message
 		if ($PSCmdlet.ParameterSetName -eq 'Single') {
 			throw
 		}
 
-		$result.Status = 'Failed'
-		$result.Reason = $_.Exception.Message
+	}
+	finally {
+		Write-AccessReviewLog -Log $creationLog -Entry @{ Event = 'GroupResult'; Result = [pscustomobject]$result }
 	}
 
 	$resultObject = [pscustomobject]$result
 	$results.Add($resultObject)
 	$resultObject
+}
+
+Write-AccessReviewLog -Log $creationLog -Entry @{
+	Event = 'RunCompleted'
+	Total = $results.Count
+	Created = @($results | Where-Object Status -eq 'Created').Count
+	Previewed = @($results | Where-Object Status -eq 'Would be created').Count
+	Failed = @($results | Where-Object Status -eq 'Failed').Count
 }
 
 if ($PSCmdlet.ParameterSetName -eq 'Csv') {

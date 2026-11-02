@@ -18,6 +18,10 @@ The number of transitive members in each group decides how many stages are used:
   - More than $SelfReviewStageThreshold: 2 stages - self-review, then group owners.
 $FallbackReviewerUserId reviews when a group has no owner.
 Each stage lasts $StageDurationInDays days.
+ReviewerType selects ResourceOwner (default) or LineManager for the final
+reviewer stage. The optional initial self-review stage is unchanged.
+Invocation syntax and results are appended to logs/Create-AccessReviewAppGroups.jsonl
+(gitignored), including with WhatIf. Keep AccessReview.Logging.ps1 beside this script.
 
 Optional completion notification recipients are configured in
 $ReviewerMessage optionally adds text (for example contact details) to the reviewer email.
@@ -50,6 +54,8 @@ reviews created (or, with -WhatIf, that would be created).
 param(
 	[Parameter(Mandatory)]
 	[guid]$ServicePrincipalId,
+	[ValidateSet('ResourceOwner', 'LineManager')]
+	[string]$ReviewerType = 'ResourceOwner',
 	[ValidateSet('OneTime', 'Weekly', 'Monthly', 'Quarterly', 'SemiAnnual', 'Annual')]
 	[string]$Frequency = 'OneTime',
 	[datetime]$StartDate = (Get-Date).Date,
@@ -81,6 +87,7 @@ $StageDurationInDays = 5
 $DecisionsThatMoveToNextStage = @('Approve', 'NotReviewed')
 
 $ErrorActionPreference = 'Stop'
+$invocationParameters = @{} + $PSBoundParameters
 Import-Module Microsoft.Graph.Authentication
 Import-Module Microsoft.Graph.Applications
 Import-Module Microsoft.Graph.Groups
@@ -153,11 +160,21 @@ if ($Frequency -ne 'OneTime') {
 	}
 }
 
+. (Join-Path $PSScriptRoot 'AccessReview.Logging.ps1')
+$creationLog = Start-AccessReviewLog -ScriptPath $PSCommandPath -Parameters $invocationParameters -Settings @{
+	ReviewerType = $ReviewerType
+	ServicePrincipalId = "$ServicePrincipalId"
+	StartDate = $StartDate.ToString('o')
+	EndDate = $EndDate.ToString('o')
+	Frequency = $Frequency
+}
+
 try {
 	$servicePrincipal = Get-MgServicePrincipal -ServicePrincipalId $ServicePrincipalId -Property id, displayName
 	$assignments = @(Get-MgServicePrincipalAppRoleAssignedTo -ServicePrincipalId $ServicePrincipalId -All)
 }
 catch {
+	Write-AccessReviewLog -Log $creationLog -Entry @{ Event = 'RunFailed'; Reason = $_.Exception.Message }
 	throw "Unable to read application '$ServicePrincipalId' or its assignments. Check that the service principal exists and that the signed-in account can read it. $($_.Exception.Message)"
 }
 
@@ -166,12 +183,19 @@ $groupIds = @($assignments | Where-Object { $_.PrincipalType -eq 'Group' } | For
 
 if (-not $groupIds) {
 	Write-Warning "Application '$($servicePrincipal.DisplayName)' has no assigned groups. No access reviews were created."
+	Write-AccessReviewLog -Log $creationLog -Entry @{ Event = 'RunCompleted'; Total = 0; Created = 0; Previewed = 0; Skipped = 0; Failed = 0 }
 	return
 }
 
 Write-Verbose "Application '$($servicePrincipal.DisplayName)' has $($groupIds.Count) assigned group(s)."
 
-$existingReviewNames = @(Get-MgIdentityGovernanceAccessReviewDefinition -All -Property id, displayName | ForEach-Object { $_.DisplayName })
+try {
+	$existingReviewNames = @(Get-MgIdentityGovernanceAccessReviewDefinition -All -Property id, displayName | ForEach-Object { $_.DisplayName })
+}
+catch {
+	Write-AccessReviewLog -Log $creationLog -Entry @{ Event = 'RunFailed'; Reason = $_.Exception.Message }
+	throw
+}
 
 $results = [System.Collections.Generic.List[object]]::new()
 
@@ -184,6 +208,8 @@ foreach ($groupId in $groupIds) {
 		Stages = $null
 		ReportOnly = $false
 		ReviewName = $null
+		ReviewId = $null
+		ReviewerType = $ReviewerType
 		Status = $null
 		Reason = $null
 	}
@@ -226,7 +252,7 @@ foreach ($groupId in $groupIds) {
 			continue
 		}
 
-		if ($userOwnerCount -eq 0) {
+		if ($ReviewerType -eq 'ResourceOwner' -and $userOwnerCount -eq 0) {
 			Write-Warning "Group '$($group.DisplayName)' has no user owners. The fallback reviewer reviews this group."
 		}
 
@@ -245,12 +271,15 @@ foreach ($groupId in $groupIds) {
 			throw "EndDate must allow at least $totalDurationInDays days for the review to complete."
 		}
 
-		$groupOwnerReviewers = @(
+		$selectedReviewers = @(
 			@{
 				query = "/groups/$groupId/owners"
 				queryType = 'MicrosoftGraph'
 			}
 		)
+		if ($ReviewerType -eq 'LineManager') {
+			$selectedReviewers = @(@{ query = './manager'; queryType = 'MicrosoftGraph'; queryRoot = 'decisions' })
+		}
 
 		$descriptionForReviewers = "Confirm whether each user still needs access to the application $($servicePrincipal.DisplayName) through the group $($group.DisplayName)."
 		if ($ReviewerMessage.Trim()) {
@@ -305,7 +334,7 @@ foreach ($groupId in $groupIds) {
 		}
 
 		if ($stageCount -eq 1) {
-			$params.reviewers = $groupOwnerReviewers
+			$params.reviewers = $selectedReviewers
 			$params.fallbackReviewers = $fallbackReviewers
 		}
 		else {
@@ -322,13 +351,14 @@ foreach ($groupId in $groupIds) {
 					dependsOn = @('1')
 					durationInDays = $StageDurationInDays
 					recommendationsEnabled = $true
-					reviewers = $groupOwnerReviewers
+					reviewers = $selectedReviewers
 					fallbackReviewers = $fallbackReviewers
 				}
 			)
 		}
 
-		$stageDescription = if ($stageCount -eq 1) { 'Group owners' } else { 'Self-review -> Group owners' }
+		$reviewerLabel = if ($ReviewerType -eq 'ResourceOwner') { 'Group owners' } else { 'Line managers' }
+		$stageDescription = if ($stageCount -eq 1) { $reviewerLabel } else { "Self-review -> $reviewerLabel" }
 		$decisionHandling = if ($isReportOnly) { 'recorded decisions only' } else { 'automatic removal of denied access' }
 
 		$step = 'Creating access review'
@@ -337,7 +367,8 @@ foreach ($groupId in $groupIds) {
 			"Group $($group.DisplayName) ($groupId, $memberCount transitive members)",
 			"Create $stageCount-stage access review '$reviewDisplayName' ($stageDescription) with notifications and $decisionHandling"
 		)) {
-			$null = New-MgIdentityGovernanceAccessReviewDefinition -BodyParameter $params -ErrorAction Stop
+			$createdReview = New-MgIdentityGovernanceAccessReviewDefinition -BodyParameter $params -ErrorAction Stop
+			$result.ReviewId = $createdReview.Id
 			$existingReviewNames += $reviewDisplayName
 			$result.Status = 'Created'
 		}
@@ -345,7 +376,7 @@ foreach ($groupId in $groupIds) {
 			$result.Status = if ($WhatIfPreference) { 'Would be created' } else { 'Not created' }
 		}
 
-		if ($userOwnerCount -eq 0) {
+		if ($ReviewerType -eq 'ResourceOwner' -and $userOwnerCount -eq 0) {
 			$result.Reason = 'No user owners; fallback reviewer used'
 		}
 		elseif ($isSyncedGroup) {
@@ -357,10 +388,20 @@ foreach ($groupId in $groupIds) {
 		$result.Reason = "$step`: $($_.Exception.Message)"
 	}
 	finally {
+		Write-AccessReviewLog -Log $creationLog -Entry @{ Event = 'GroupResult'; Result = [pscustomobject]$result }
 		$resultObject = [pscustomobject]$result
 		$results.Add($resultObject)
 		$resultObject
 	}
+}
+
+Write-AccessReviewLog -Log $creationLog -Entry @{
+	Event = 'RunCompleted'
+	Total = $results.Count
+	Created = @($results | Where-Object Status -eq 'Created').Count
+	Previewed = @($results | Where-Object Status -eq 'Would be created').Count
+	Skipped = @($results | Where-Object Status -eq 'Skipped').Count
+	Failed = @($results | Where-Object Status -eq 'Failed').Count
 }
 
 $createdStatus = if ($WhatIfPreference) { 'Would be created' } else { 'Created' }

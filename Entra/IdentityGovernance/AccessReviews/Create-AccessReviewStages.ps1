@@ -14,6 +14,15 @@ based on the thresholds in $StageThresholds:
   - Threshold 2 or more:    2 stages - line managers, then application owners.
   - Threshold 3 or more:    3 stages - self-review, line managers, then application owners.
 Groups below threshold 1 still get the 1-stage review, but a warning is shown.
+ReviewerType selects LineManager (default) or ResourceOwner for the stage
+before application owners in multi-stage reviews. ResourceOwner uses the
+group's user owners; groups without user owners use the fallback reviewer.
+Single-stage reviews continue to use application owners.
+
+Each validated run appends its invocation syntax and per-group results to
+logs/Create-AccessReviewStages.jsonl next to the script. This directory is
+gitignored. Local logging also occurs with WhatIf; no Graph writes occur.
+Keep AccessReview.Logging.ps1 beside this script.
 
 $ReviewerMessage optionally adds text (for example contact details) to the reviewer email.
 Application owners are configured in $ApplicationOwners. Optional completion
@@ -58,6 +67,8 @@ param(
 	[Parameter(Mandatory, ParameterSetName = 'Csv')]
 	[ValidateNotNullOrEmpty()]
 	[string]$CsvPath,
+	[ValidateSet('LineManager', 'ResourceOwner')]
+	[string]$ReviewerType = 'LineManager',
 	[ValidateSet('OneTime', 'Weekly', 'Monthly', 'Quarterly', 'SemiAnnual', 'Annual')]
 	[string]$Frequency = 'OneTime',
 	[datetime]$StartDate = (Get-Date).Date,
@@ -96,6 +107,7 @@ $StageDurationInDays = 5
 $DecisionsThatMoveToNextStage = @('Approve', 'NotReviewed')
 
 $ErrorActionPreference = 'Stop'
+$invocationParameters = @{} + $PSBoundParameters
 Import-Module Microsoft.Graph.Authentication
 Import-Module Microsoft.Graph.Groups
 Import-Module Microsoft.Graph.Identity.Governance
@@ -205,6 +217,14 @@ else {
 }
 
 $results = [System.Collections.Generic.List[object]]::new()
+. (Join-Path $PSScriptRoot 'AccessReview.Logging.ps1')
+$creationLog = Start-AccessReviewLog -ScriptPath $PSCommandPath -Parameters $invocationParameters -Settings @{
+	ReviewerType = $ReviewerType
+	StartDate = $StartDate.ToString('o')
+	EndDate = $EndDate.ToString('o')
+	Frequency = $Frequency
+	StageThresholds = $StageThresholds
+}
 
 foreach ($target in $targets) {
 	$GroupId = $target.GroupId
@@ -212,6 +232,10 @@ foreach ($target in $targets) {
 		Group = "$GroupId"
 		GroupId = "$GroupId"
 		ReviewName = $null
+		ReviewId = $null
+		ReviewerType = $ReviewerType
+		Stages = $null
+		StageNames = $null
 		Status = $null
 		Reason = $null
 	}
@@ -234,6 +258,7 @@ foreach ($target in $targets) {
 		$stageCount = if ($memberCount -ge $StageThresholds[2]) { 3 }
 			elseif ($memberCount -ge $StageThresholds[1]) { 2 }
 			else { 1 }
+		$result.Stages = $stageCount
 
 		if ($memberCount -lt $StageThresholds[0]) {
 			Write-Warning "Group '$($group.displayName)' has $memberCount transitive members, below threshold 1 ($($StageThresholds[0])). Creating a 1-stage review with application owners."
@@ -249,7 +274,7 @@ foreach ($target in $targets) {
 		}
 
 		$selfReviewStage = @{ name = 'Self-review'; reviewers = @(); fallbackReviewers = @() }
-		$managerStage = @{
+		$selectedReviewerStage = @{
 			name = 'Line managers'
 			reviewers = @(
 				@{
@@ -260,6 +285,22 @@ foreach ($target in $targets) {
 			)
 			fallbackReviewers = $fallbackReviewers
 		}
+		if ($ReviewerType -eq 'ResourceOwner' -and $stageCount -gt 1) {
+			$userOwners = @(Get-MgGroupOwner -GroupId $GroupId -All -Property id |
+				Where-Object { $_.AdditionalProperties['@odata.type'] -eq '#microsoft.graph.user' })
+			$ownerReviewers = @(foreach ($owner in $userOwners) {
+				@{ query = "/users/$($owner.Id)"; queryType = 'MicrosoftGraph' }
+			})
+			if (-not $ownerReviewers.Count) {
+				Write-Warning "Group '$($group.displayName)' has no user owners. Using the fallback reviewer for the ResourceOwner stage."
+				$ownerReviewers = $fallbackReviewers
+			}
+			$selectedReviewerStage = @{
+				name = 'Resource owners (group owners)'
+				reviewers = $ownerReviewers
+				fallbackReviewers = $fallbackReviewers
+			}
+		}
 		$applicationOwnerStage = @{
 			name = 'Application owners'
 			reviewers = @($applicationOwnerReviewers)
@@ -268,8 +309,8 @@ foreach ($target in $targets) {
 
 		$stages = @(switch ($stageCount) {
 			1 { $applicationOwnerStage }
-			2 { $managerStage, $applicationOwnerStage }
-			3 { $selfReviewStage, $managerStage, $applicationOwnerStage }
+			2 { $selectedReviewerStage, $applicationOwnerStage }
+			3 { $selfReviewStage, $selectedReviewerStage, $applicationOwnerStage }
 		})
 
 		$totalDurationInDays = $stageCount * $StageDurationInDays
@@ -378,13 +419,16 @@ foreach ($target in $targets) {
 		}
 
 		$stageDescription = ($stages | ForEach-Object { $_.name }) -join ' -> '
+		$result.StageNames = $stageDescription
+		$result.ReviewName = $reviewDisplayName
 		$decisionHandling = if ($isSyncedGroup) { 'recorded decisions only (group synchronized from on-premises)' } else { 'automatic removal of denied access' }
 
 		if ($PSCmdlet.ShouldProcess(
 			"Group $($group.displayName) ($GroupId, $memberCount transitive members)",
 			"Create $stageCount-stage access review '$reviewDisplayName' ($stageDescription) with notifications and $decisionHandling"
 		)) {
-			$null = New-MgIdentityGovernanceAccessReviewDefinition -BodyParameter $params -ErrorAction Stop
+			$createdReview = New-MgIdentityGovernanceAccessReviewDefinition -BodyParameter $params -ErrorAction Stop
+			$result.ReviewId = $createdReview.Id
 			$result.Status = 'Created'
 		}
 		else {
@@ -397,17 +441,27 @@ foreach ($target in $targets) {
 		}
 	}
 	catch {
+		$result.Status = 'Failed'
+		$result.Reason = $_.Exception.Message
 		if ($PSCmdlet.ParameterSetName -eq 'Single') {
 			throw
 		}
-
-		$result.Status = 'Failed'
-		$result.Reason = $_.Exception.Message
+	}
+	finally {
+		Write-AccessReviewLog -Log $creationLog -Entry @{ Event = 'GroupResult'; Result = [pscustomobject]$result }
 	}
 
 	$resultObject = [pscustomobject]$result
 	$results.Add($resultObject)
 	$resultObject
+}
+
+Write-AccessReviewLog -Log $creationLog -Entry @{
+	Event = 'RunCompleted'
+	Total = $results.Count
+	Created = @($results | Where-Object Status -eq 'Created').Count
+	Previewed = @($results | Where-Object Status -eq 'Would be created').Count
+	Failed = @($results | Where-Object Status -eq 'Failed').Count
 }
 
 if ($PSCmdlet.ParameterSetName -eq 'Csv') {
