@@ -86,12 +86,36 @@ The script does not prevalidate that each GUID identifies an existing user.
 | `LineManager` | Managers -> Application owners | Self-review -> Managers -> Application owners |
 | `ResourceOwner` | Group user owners -> Application owners | Self-review -> Group user owners -> Application owners |
 
+If the group-owner (or explicit fallback) reviewer set exactly matches the
+application-owner set, those stages are combined into one application-owner
+stage. Order, duplicate IDs and letter casing do not affect the comparison;
+partial overlap does not merge stages. Self-review remains separate at 500+
+members. Dynamic per-user manager routing is not merged, even if its fallback
+matches the application owners. Duration, stage dependencies and logs use the
+resulting stages, and a warning reports the merge.
+
 The 50/150-person cutoffs are removed in the unified behavior. Group counts
 include transitive directory members, not only users. Configure
 `$SelfReviewStageThreshold` (default 500, inclusive) and `$StageDurationInDays`
 (default five) in the script. Group user owners are resolved at creation time;
-service-principal owners are excluded. Missing owners/managers use
-`$FallbackReviewerUserId`, which must be configured before real creation.
+service-principal owners are excluded.
+
+If a group has no user owners, the ResourceOwner stage is omitted by default:
+application owners review directly (500+ members still start with self-review).
+To keep a separate first reviewer, supply `-FallbackReviewerUserId` with a
+nonempty **user object ID**:
+
+```powershell
+.\Create-AccessReview.ps1 -CsvPath '.\groups.csv' -ReviewerType ResourceOwner `
+    -FallbackReviewerUserId '44444444-4444-4444-4444-444444444444' -WhatIf
+```
+
+This produces fallback reviewer -> application owners for ownerless groups
+(preceded by self-review at 500+ members). Stage counts, duration and logs reflect
+the actual stages. The script warns whenever it substitutes or omits group owners.
+Missing managers use the same explicit fallback, or the effective application
+owners for that CSV row when no fallback is supplied. No zero-GUID placeholder
+is sent as a reviewer. Fallback IDs are GUID-validated, not checked for user existence.
 Lookup failures fail explicitly rather than silently using fallback.
 Graph advances `Approve` and `NotReviewed` decisions to subsequent stages;
 denied decisions do not advance. Final-stage review is by application owners.

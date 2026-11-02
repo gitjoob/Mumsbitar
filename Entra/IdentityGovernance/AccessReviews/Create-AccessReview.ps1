@@ -14,7 +14,12 @@ ReviewerType selects ApplicationOwner (one stage), LineManager (default), or
 ResourceOwner. LineManager and ResourceOwner always precede application-owner
 sign-off, even for small groups. At 500 or more transitive members, an initial
 self-review stage is added to those two-stage reviews. ResourceOwner uses
-the group's user owners; groups without user owners use the fallback reviewer.
+the group's user owners. Groups without user owners skip that stage unless
+FallbackReviewerUserId is supplied. Application-owner sign-off (and self-review
+for large groups) is retained. Missing managers use FallbackReviewerUserId or
+the effective application owners when no fallback is supplied.
+Identical group-owner/fallback and application-owner reviewer sets are combined
+into the application-owner stage. Dynamic manager routing remains separate.
 AppOwnerIds supplies application-owner user object IDs. The optional CSV
 AppOwnerIds column overrides that parameter per row, using comma- or semicolon-separated
 user IDs. Quote the cell when its separator matches the CSV column delimiter.
@@ -76,6 +81,7 @@ param(
 	[ValidateSet('ApplicationOwner', 'LineManager', 'ResourceOwner')]
 	[string]$ReviewerType = 'LineManager',
 	[guid[]]$AppOwnerIds = @(),
+	[guid]$FallbackReviewerUserId = [guid]::Empty,
 	[ValidateSet('OneTime', 'Weekly', 'Monthly', 'Quarterly', 'SemiAnnual', 'Annual')]
 	[string]$Frequency = 'OneTime',
 	[datetime]$StartDate = (Get-Date).Date,
@@ -96,9 +102,6 @@ $AdditionalNotificationRecipients = @(
 	# @{ Type = 'User'; Id = '00000000-0000-0000-0000-000000000000' }
 	# @{ Type = 'Group'; Id = '00000000-0000-0000-0000-000000000000' }
 )
-
-# Reviewer used when primary reviewers (for example a line manager) are missing.
-$FallbackReviewerUserId = '00000000-0000-0000-0000-000000000000'
 
 $StageDurationInDays = 5
 
@@ -132,6 +135,9 @@ if ($missingScopes.Count -gt 0) {
 if ($AppOwnerIds -contains [guid]::Empty) {
 	throw 'AppOwnerIds must contain nonempty user object GUIDs.'
 }
+if ($PSBoundParameters.ContainsKey('FallbackReviewerUserId') -and $FallbackReviewerUserId -eq [guid]::Empty) {
+	throw 'FallbackReviewerUserId must be a nonempty user object GUID.'
+}
 if ($PSCmdlet.ParameterSetName -ne 'Csv' -and -not $AppOwnerIds.Count) {
 	throw 'Application-owner sign-off is required. Supply -AppOwnerIds.'
 }
@@ -157,13 +163,6 @@ $additionalNotificationRecipients = foreach ($recipient in $AdditionalNotificati
 		notificationTemplateType = 'CompletedAdditionalRecipients'
 	}
 }
-
-$fallbackReviewers = @(
-	@{
-		query = "/users/$FallbackReviewerUserId"
-		queryType = 'MicrosoftGraph'
-	}
-)
 
 if ($Frequency -eq 'OneTime' -and $PSBoundParameters.ContainsKey('EndDate')) {
 	Write-Warning 'EndDate is ignored for one-time reviews. The review period is calculated from StartDate and the number of stages; use -Frequency for recurring reviews.'
@@ -225,6 +224,7 @@ $results = [System.Collections.Generic.List[object]]::new()
 . (Join-Path $PSScriptRoot 'AccessReview.Logging.ps1')
 $creationLog = Start-AccessReviewLog -ScriptPath $PSCommandPath -Parameters $invocationParameters -Settings @{
 	ReviewerType = $ReviewerType
+	FallbackReviewerUserId = if ($FallbackReviewerUserId -ne [guid]::Empty) { "$FallbackReviewerUserId" } else { $null }
 	StartDate = $StartDate.ToString('o')
 	EndDate = $EndDate.ToString('o')
 	Frequency = $Frequency
@@ -287,6 +287,10 @@ foreach ($target in $targets) {
 		$applicationOwnerReviewers = @(foreach ($ownerId in $targetOwnerIds) {
 			@{ query = "/users/$ownerId"; queryType = 'MicrosoftGraph' }
 		})
+		$fallbackReviewers = @(if ($FallbackReviewerUserId -ne [guid]::Empty) {
+			@{ query = "/users/$FallbackReviewerUserId"; queryType = 'MicrosoftGraph' }
+		}
+		else { $applicationOwnerReviewers })
 		try {
 			$group = Get-MgGroup -GroupId $GroupId -Property id, displayName, onPremisesSyncEnabled, groupTypes
 			$memberCount = [int](Get-MgGroupTransitiveMemberCount -GroupId $GroupId -ConsistencyLevel eventual)
@@ -326,13 +330,6 @@ foreach ($target in $targets) {
 			Write-Warning "Group '$($group.displayName)' is synchronized from on-premises Active Directory. Decisions will be recorded but not applied; remove denied access in Active Directory."
 		}
 
-		$stageCount = if ($ReviewerType -eq 'ApplicationOwner') { 1 }
-			elseif ($memberCount -ge $SelfReviewStageThreshold) { 3 }
-			else { 2 }
-		$result.Stages = $stageCount
-
-		Write-Verbose "Group '$($group.displayName)' has $memberCount transitive members. Using $stageCount stage(s)."
-
 		$selfReviewStage = @{ name = 'Self-review'; reviewers = @(); fallbackReviewers = @() }
 		$selectedReviewerStage = @{
 			name = 'Line managers'
@@ -345,20 +342,27 @@ foreach ($target in $targets) {
 			)
 			fallbackReviewers = $fallbackReviewers
 		}
-		if ($ReviewerType -eq 'ResourceOwner' -and $stageCount -gt 1) {
+		if ($ReviewerType -eq 'ResourceOwner') {
 			$userOwners = @(Get-MgGroupOwner -GroupId $GroupId -All -Property id |
 				Where-Object { $_.AdditionalProperties['@odata.type'] -eq '#microsoft.graph.user' })
 			$ownerReviewers = @(foreach ($owner in $userOwners) {
 				@{ query = "/users/$($owner.Id)"; queryType = 'MicrosoftGraph' }
 			})
-			if (-not $ownerReviewers.Count) {
-				Write-Warning "Group '$($group.displayName)' has no user owners. Using the fallback reviewer for the ResourceOwner stage."
-				$ownerReviewers = $fallbackReviewers
-			}
 			$selectedReviewerStage = @{
 				name = 'Resource owners (group owners)'
 				reviewers = $ownerReviewers
 				fallbackReviewers = $fallbackReviewers
+			}
+			if (-not $ownerReviewers.Count) {
+				if ($FallbackReviewerUserId -ne [guid]::Empty) {
+					Write-Warning "Group '$($group.displayName)' has no user owners. Using fallback reviewer '$FallbackReviewerUserId' before application-owner sign-off."
+					$selectedReviewerStage.name = 'Fallback reviewer (no group user owners)'
+					$selectedReviewerStage.reviewers = @($fallbackReviewers)
+				}
+				else {
+					Write-Warning "Group '$($group.displayName)' has no user owners and no fallback reviewer is configured. Skipping the ResourceOwner stage; application-owner sign-off is retained."
+					$selectedReviewerStage = $null
+				}
 			}
 		}
 		$applicationOwnerStage = @{
@@ -367,11 +371,26 @@ foreach ($target in $targets) {
 			fallbackReviewers = $fallbackReviewers
 		}
 
-		$stages = @(switch ($stageCount) {
-			1 { $applicationOwnerStage }
-			2 { $selectedReviewerStage, $applicationOwnerStage }
-			3 { $selfReviewStage, $selectedReviewerStage, $applicationOwnerStage }
-		})
+		if ($ReviewerType -eq 'ResourceOwner' -and $selectedReviewerStage) {
+			$selectedQueries = @($selectedReviewerStage.reviewers.query | Sort-Object -Unique)
+			$applicationOwnerQueries = @($applicationOwnerReviewers.query | Sort-Object -Unique)
+			if ($selectedQueries.Count -gt 0 -and
+				-not @(Compare-Object -ReferenceObject $selectedQueries -DifferenceObject $applicationOwnerQueries).Count) {
+				Write-Warning "Group '$($group.displayName)' has identical ResourceOwner/fallback and application-owner reviewers. Combining them into the application-owner stage."
+				$selectedReviewerStage = $null
+			}
+		}
+
+		$stages = @(
+			if ($ReviewerType -ne 'ApplicationOwner') {
+				if ($memberCount -ge $SelfReviewStageThreshold) { $selfReviewStage }
+				if ($selectedReviewerStage) { $selectedReviewerStage }
+			}
+			$applicationOwnerStage
+		)
+		$stageCount = $stages.Count
+		$result.Stages = $stageCount
+		Write-Verbose "Group '$($group.displayName)' has $memberCount transitive members. Using $stageCount stage(s)."
 
 		$totalDurationInDays = $stageCount * $StageDurationInDays
 
