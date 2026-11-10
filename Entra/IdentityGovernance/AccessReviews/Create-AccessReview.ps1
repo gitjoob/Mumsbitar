@@ -47,7 +47,10 @@ days for all stages to complete.
 
 The access review is named with ReviewName. CsvPath creates one review per row of a CSV file with a GroupId column and an
 optional ReviewName and AppOwnerIds columns. A table of skipped or failed groups and a summary
-are shown at the end. If ReviewName is omitted, the name is
+are shown at the end. All modes also show the total transitive directory-member
+count for created reviews (or would-be-created reviews with WhatIf), counting
+shared members separately per group. Reviews still cover direct membership.
+If ReviewName is omitted, the name is
 derived from the group's display name with the $ReviewNamePrefix prefix, for
 example 'AR Demo Group'.
 .EXAMPLE
@@ -258,6 +261,7 @@ foreach ($target in $targets) {
 	$result = [ordered]@{
 		Group = "$GroupId"
 		GroupId = "$GroupId"
+		MemberCount = $null
 		ReviewName = $null
 		ReviewId = $null
 		ReviewerType = $ReviewerType
@@ -294,6 +298,7 @@ foreach ($target in $targets) {
 		try {
 			$group = Get-MgGroup -GroupId $GroupId -Property id, displayName, onPremisesSyncEnabled, groupTypes
 			$memberCount = [int](Get-MgGroupTransitiveMemberCount -GroupId $GroupId -ConsistencyLevel eventual)
+			$result.MemberCount = $memberCount
 		}
 		catch {
 			throw "Unable to read group '$GroupId' or its member count. Check that the group exists and that the signed-in account can read it. $($_.Exception.Message)"
@@ -544,9 +549,10 @@ Write-AccessReviewLog -Log $creationLog -Entry @{
 	Skipped = @($results | Where-Object Status -eq 'Skipped').Count
 }
 
+$createdStatus = if ($WhatIfPreference) { 'Would be created' } else { 'Created' }
+$createdResults = @($results | Where-Object { $_.Status -eq $createdStatus })
 if ($PSCmdlet.ParameterSetName -ne 'Single') {
-	$createdStatus = if ($WhatIfPreference) { 'Would be created' } else { 'Created' }
-	$createdCount = @($results | Where-Object { $_.Status -eq $createdStatus }).Count
+	$createdCount = $createdResults.Count
 	$failedCount = @($results | Where-Object { $_.Status -eq 'Failed' }).Count
 	$skippedCount = @($results | Where-Object Status -eq 'Skipped').Count
 	$notCreated = @($results | Where-Object { $_.Status -in 'Failed', 'Skipped' })
@@ -556,3 +562,6 @@ if ($PSCmdlet.ParameterSetName -ne 'Single') {
 
 	Write-Host "$($results.Count) group(s): $createdCount $($createdStatus.ToLower()), $skippedCount skipped, $failedCount failed."
 }
+$totalMemberCount = [long](($createdResults | Measure-Object -Property MemberCount -Sum).Sum)
+$reviewSummary = if ($WhatIfPreference) { 'reviews that would be created' } else { 'created reviews' }
+Write-Host "Total transitive members in ${reviewSummary}: $totalMemberCount"

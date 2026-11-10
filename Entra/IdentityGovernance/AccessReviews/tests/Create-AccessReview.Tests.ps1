@@ -36,8 +36,13 @@ Describe 'Unified access review creation and local logging' {
 			Dynamic = $false
 			Assignments = @([pscustomobject]@{ PrincipalType = 'Group'; PrincipalId = $script:groupId })
 			ExistingNames = @()
+			HostMessages = [System.Collections.Generic.List[string]]::new()
 		}
 		$fixture = $script:fixture
+		Mock Write-Host ({
+			param($Object)
+			$fixture.HostMessages.Add([string]$Object)
+		}.GetNewClosure())
 		Mock Get-MgContext { @{ Scopes = @('AccessReview.ReadWrite.All', 'Application.Read.All') } }
 		Mock Get-MgGroup ({
 			param($GroupId)
@@ -74,6 +79,95 @@ Describe 'Unified access review creation and local logging' {
 		$body.stageSettings[0].reviewers[0].queryRoot | Should -Be 'decisions'
 		$body.stageSettings[1].reviewers[0].query | Should -Be "/users/$script:ownerId"
 		Should -Invoke Get-MgGroupOwner -Times 0 -Exactly
+	}
+
+	It 'reports and logs the existing single-group count of <Count> (preview: <Preview>)' -TestCases @(
+		@{ Count = 150; Preview = $false },
+		@{ Count = 150; Preview = $true },
+		@{ Count = 0; Preview = $false }
+	) {
+		param($Count, $Preview)
+		$script:fixture.Count = $Count
+		$result = & $script:testScript -GroupId $script:groupId -WhatIf:$Preview -Confirm:$false
+		$result.MemberCount | Should -Be $Count
+		(Get-LogEntries)[1].Result.MemberCount | Should -Be $Count
+		$label = if ($Preview) { 'reviews that would be created' } else { 'created reviews' }
+		$script:fixture.HostMessages[-1] | Should -Be "Total transitive members in ${label}: $Count"
+		Should -Invoke Get-MgGroupTransitiveMemberCount -Times 1 -Exactly -ParameterFilter {
+			"$GroupId" -eq $script:groupId -and $ConsistencyLevel -eq 'eventual'
+		}
+		if ($Preview) {
+			Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times 0 -Exactly
+		}
+	}
+
+	It 'sums different group counts below the CSV summary without counting duplicate targets (preview: <Preview>)' -TestCases @(
+		@{ Preview = $false }, @{ Preview = $true }
+	) {
+		param($Preview)
+		$second = '44444444-4444-4444-4444-444444444444'
+		Mock Get-MgGroupTransitiveMemberCount { 75 } -ParameterFilter {
+			"$GroupId" -eq '44444444-4444-4444-4444-444444444444'
+		}
+		$csv = Join-Path $script:testScriptRoot 'member-counts.csv'
+		"GroupId`n$script:groupId`n$second`n$script:groupId" | Set-Content $csv
+		$results = @(& $script:testScript -CsvPath $csv -WhatIf:$Preview -Confirm:$false)
+		$results | Should -HaveCount 2
+		$results.MemberCount | Should -Be @(150, 75)
+		$label = if ($Preview) { 'would be created' } else { 'created' }
+		$script:fixture.HostMessages[-2] | Should -Be "2 group(s): 2 $label, 0 skipped, 0 failed."
+		$script:fixture.HostMessages[-1] | Should -Match ': 225$'
+		Should -Invoke Get-MgGroupTransitiveMemberCount -Times 2 -Exactly
+	}
+
+	It 'excludes failed and skipped application groups from the member total' {
+		$second = '44444444-4444-4444-4444-444444444444'
+		$third = '55555555-5555-5555-5555-555555555555'
+		$script:fixture.Assignments += @(
+			[pscustomobject]@{ PrincipalType = 'Group'; PrincipalId = $second },
+			[pscustomobject]@{ PrincipalType = 'Group'; PrincipalId = $third }
+		)
+		Mock Get-MgGroup {
+			[pscustomobject]@{ DisplayName = 'Dynamic group'; GroupTypes = @('DynamicMembership') }
+		} -ParameterFilter { "$GroupId" -eq '44444444-4444-4444-4444-444444444444' }
+		Mock Get-MgGroupTransitiveMemberCount { throw 'Count unavailable.' } -ParameterFilter {
+			"$GroupId" -eq '55555555-5555-5555-5555-555555555555'
+		}
+		$results = @(& $script:testScript -ServicePrincipalId $script:groupId -Confirm:$false)
+		$results.Status | Should -Be @('Created', 'Skipped', 'Failed')
+		$results[1].MemberCount | Should -Be 150
+		$results[2].MemberCount | Should -BeNullOrEmpty
+		$results[2].Reason | Should -Match 'Count unavailable'
+		$script:fixture.HostMessages[-2] | Should -Be '3 group(s): 1 created, 1 skipped, 1 failed.'
+		$script:fixture.HostMessages[-1] | Should -Be 'Total transitive members in created reviews: 150'
+	}
+
+	It 'excludes groups whose review creation failed after retrieving a count' {
+		$script:fixture.CreateFailure = $true
+		$csv = Join-Path $script:testScriptRoot 'failed-counts.csv'
+		"GroupId`n$script:groupId" | Set-Content $csv
+		$result = & $script:testScript -CsvPath $csv -Confirm:$false
+		$result.Status | Should -Be 'Failed'
+		$result.MemberCount | Should -Be 150
+		$script:fixture.HostMessages[-1] | Should -Be 'Total transitive members in created reviews: 0'
+	}
+
+	It 'excludes a declined single-group review from the member total' {
+		# Simulate a declined prompt only in the isolated test copy.
+		$source = Get-Content $script:testScript -Raw
+		$ast = [System.Management.Automation.Language.Parser]::ParseInput($source, [ref]$null, [ref]$null)
+		$prompt = $ast.Find({
+			param($node)
+			$node -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -and
+				$node.Member.Value -eq 'ShouldProcess'
+		}, $true).Extent
+		$source.Remove($prompt.StartOffset, $prompt.EndOffset - $prompt.StartOffset).Insert($prompt.StartOffset, '$false') |
+			Set-Content $script:testScript
+		$result = & $script:testScript -GroupId $script:groupId -Confirm:$false
+		$result.Status | Should -Be 'Not created'
+		$result.MemberCount | Should -Be 150
+		$script:fixture.HostMessages[-1] | Should -Be 'Total transitive members in created reviews: 0'
+		Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times 0 -Exactly
 	}
 
 	It 'selects only human group owners and retains application owners as the final stage' {
@@ -391,6 +485,8 @@ Describe 'Unified access review creation and local logging' {
 		$results = @(& $script:testScript -ServicePrincipalId $script:groupId -WarningAction SilentlyContinue)
 		$results | Should -HaveCount 0
 		(Get-LogEntries)[1].Total | Should -Be 0
+		$script:fixture.HostMessages[-2] | Should -Be '0 group(s): 0 created, 0 skipped, 0 failed.'
+		$script:fixture.HostMessages[-1] | Should -Be 'Total transitive members in created reviews: 0'
 	}
 
 	It 'logs discovery errors and stops' {

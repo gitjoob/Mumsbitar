@@ -144,9 +144,16 @@ names; check results before retrying to avoid duplicate reviews.
 
 ## Results and private logs
 
-Results include group/review IDs, effective application-owner IDs, stage names,
+Results include group/review IDs, `MemberCount`, effective application-owner IDs, stage names,
 reviewer type, status and failure reason. Batch summaries are written separately
-from result objects:
+from result objects. A total transitive directory-member count appears directly
+below the batch summary and is also printed for single-group runs. It includes
+only created reviews, or would-be-created reviews with `-WhatIf`; skipped,
+failed, and declined reviews are excluded. The total is zero if no reviews
+qualify. Shared members count separately for each group. Counts include nested
+membership and directory objects other than users; reviews themselves still
+cover direct membership. `MemberCount` is null if the count was not retrieved,
+and is also retained in per-group logs:
 
 ```powershell
 $results = .\Create-AccessReview.ps1 -CsvPath '.\groups.csv' -ReviewerType ResourceOwner
