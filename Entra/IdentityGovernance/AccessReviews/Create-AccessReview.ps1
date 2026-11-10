@@ -25,9 +25,11 @@ AppOwnerIds column overrides that parameter per row, using comma- or semicolon-s
 user IDs. Quote the cell when its separator matches the CSV column delimiter.
 Blank cells use the parameter. Every group requires application owners.
 
-Each validated run appends its invocation syntax and per-group results to
-logs/Create-AccessReview.jsonl next to the script. This directory is
-gitignored. Local logging also occurs with WhatIf; no Graph writes occur.
+Each validated real run writes its invocation syntax and per-group results to
+a separate logs/Create-AccessReview_<UTC timestamp>_<RunId>.jsonl file next to
+the script and prints the log path. Logs are retained even if no reviews are
+created. This directory is gitignored. WhatIf writes no logs and makes no Graph
+writes. Existing combined logs are left untouched; no logs are deleted automatically.
 Keep AccessReview.Logging.ps1 beside this script.
 
 $ReviewerMessage optionally adds text (for example contact details) to the reviewer email.
@@ -225,13 +227,16 @@ else {
 
 $results = [System.Collections.Generic.List[object]]::new()
 . (Join-Path $PSScriptRoot 'AccessReview.Logging.ps1')
-$creationLog = Start-AccessReviewLog -ScriptPath $PSCommandPath -Parameters $invocationParameters -Settings @{
+$creationLog = Start-AccessReviewLog -ScriptPath $PSCommandPath -Parameters $invocationParameters -Enabled (-not $WhatIfPreference) -Settings @{
 	ReviewerType = $ReviewerType
 	FallbackReviewerUserId = if ($FallbackReviewerUserId -ne [guid]::Empty) { "$FallbackReviewerUserId" } else { $null }
 	StartDate = $StartDate.ToString('o')
 	EndDate = $EndDate.ToString('o')
 	Frequency = $Frequency
 	SelfReviewStageThreshold = $SelfReviewStageThreshold
+}
+if ($creationLog.Enabled) {
+	Write-Host "Creation log: $($creationLog.Path)"
 }
 $existingReviewNames = @()
 if ($PSCmdlet.ParameterSetName -eq 'Application') {

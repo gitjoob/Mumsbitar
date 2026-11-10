@@ -8,8 +8,17 @@ BeforeAll {
 	$script:ownerId = '22222222-2222-2222-2222-222222222222'
 	$script:groupOwnerId = '66666666-6666-6666-6666-666666666666'
 	$script:reviewId = '33333333-3333-3333-3333-333333333333'
+	function Get-RunLogs {
+		Get-ChildItem -LiteralPath (Join-Path $script:testScriptRoot 'logs') -Filter 'Create-AccessReview_*.jsonl' -File
+	}
 	function Get-LogEntries {
-		@(Get-Content (Join-Path $script:testScriptRoot 'logs/Create-AccessReview.jsonl') |
+		param([string]$Path)
+		if (-not $Path) {
+			$files = @(Get-RunLogs)
+			if ($files.Count -ne 1) { throw "Expected one run log, found $($files.Count). Supply a path." }
+			$Path = $files[0].FullName
+		}
+		@(Get-Content -LiteralPath $Path |
 			ForEach-Object { $_ | ConvertFrom-Json })
 	}
 }
@@ -81,7 +90,7 @@ Describe 'Unified access review creation and local logging' {
 		Should -Invoke Get-MgGroupOwner -Times 0 -Exactly
 	}
 
-	It 'reports and logs the existing single-group count of <Count> (preview: <Preview>)' -TestCases @(
+	It 'reports the existing single-group count of <Count> and logs only real runs (preview: <Preview>)' -TestCases @(
 		@{ Count = 150; Preview = $false },
 		@{ Count = 150; Preview = $true },
 		@{ Count = 0; Preview = $false }
@@ -90,7 +99,12 @@ Describe 'Unified access review creation and local logging' {
 		$script:fixture.Count = $Count
 		$result = & $script:testScript -GroupId $script:groupId -WhatIf:$Preview -Confirm:$false
 		$result.MemberCount | Should -Be $Count
-		(Get-LogEntries)[1].Result.MemberCount | Should -Be $Count
+		if ($Preview) {
+			Test-Path (Join-Path $script:testScriptRoot 'logs') | Should -BeFalse
+		}
+		else {
+			(Get-LogEntries)[1].Result.MemberCount | Should -Be $Count
+		}
 		$label = if ($Preview) { 'reviews that would be created' } else { 'created reviews' }
 		$script:fixture.HostMessages[-1] | Should -Be "Total transitive members in ${label}: $Count"
 		Should -Invoke Get-MgGroupTransitiveMemberCount -Times 1 -Exactly -ParameterFilter {
@@ -326,7 +340,7 @@ Describe 'Unified access review creation and local logging' {
 
 	It 'logs replayable array parameter syntax' {
 		$ids = @($script:ownerId, $script:reviewId)
-		$null = & $script:testScript -GroupId $script:groupId -AppOwnerIds $ids -WhatIf
+		$null = & $script:testScript -GroupId $script:groupId -AppOwnerIds $ids -Confirm:$false
 		(Get-LogEntries)[0].Syntax | Should -Match "-AppOwnerIds @\('$script:ownerId', '$script:reviewId'\)"
 	}
 
@@ -399,31 +413,119 @@ Describe 'Unified access review creation and local logging' {
 		Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times 0 -Exactly
 	}
 
-	It 'logs preview syntax with escaped quotes and no Graph creation' {
-		$result = & $script:testScript -GroupId $script:groupId -ReviewName "Review O'Brien" -ReviewerType ResourceOwner -WhatIf
-		$result.Status | Should -Be 'Would be created'
+	It 'logs real-run syntax with escaped quotes and created review IDs' {
+		$result = & $script:testScript -GroupId $script:groupId -ReviewName "Review O'Brien" -ReviewerType ResourceOwner -Confirm:$false
+		$result.Status | Should -Be 'Created'
 		$entries = Get-LogEntries
 		$entries.Count | Should -Be 3
 		$entries[0].Syntax | Should -Match "-ReviewName 'Review O''Brien'"
-		$entries[0].Syntax | Should -Match '-WhatIf:\$true'
 		$entries[0].Syntax | Should -Match "-ReviewerType 'ResourceOwner'"
-		$entries[1].Result.Status | Should -Be 'Would be created'
-		$entries[2].Previewed | Should -Be 1
-		$entries[2].Created | Should -Be 0
+		$entries[1].Result.ReviewId | Should -Be $script:reviewId
+		$entries[1].Result.Status | Should -Be 'Created'
+		$entries[2].Previewed | Should -Be 0
+		$entries[2].Created | Should -Be 1
+	}
+
+	It 'writes independent run files with timestamps, invocation and created review IDs' {
+		$null = & $script:testScript -GroupId $script:groupId -Confirm:$false
+		$firstFile = @(Get-RunLogs)[0]
+		$firstContents = Get-Content -LiteralPath $firstFile.FullName -Raw
+		$null = & $script:testScript -GroupId $script:groupId -ReviewerType ResourceOwner -Confirm:$false
+		$files = @(Get-RunLogs)
+		$files | Should -HaveCount 2
+		(Get-Content -LiteralPath $firstFile.FullName -Raw) | Should -BeExactly $firstContents
+		$runIds = @(foreach ($file in $files) {
+			$entries = Get-LogEntries -Path $file.FullName
+			$entries | Should -HaveCount 3
+			$entries.Event | Should -Be @('RunStarted', 'GroupResult', 'RunCompleted')
+			@($entries.RunId | Select-Object -Unique) | Should -HaveCount 1
+			$file.Name | Should -Match "^Create-AccessReview_\d{8}T\d{9}Z_$($entries[0].RunId)\.jsonl$"
+			([datetime]$entries[0].Timestamp).Kind | Should -Be ([System.DateTimeKind]::Utc)
+			$entries[1].Result.ReviewId | Should -Be $script:reviewId
+			$entries[2].Created | Should -Be 1
+			$entries[0].Syntax | Should -Match '-Confirm:\$false'
+			$script:fixture.HostMessages | Should -Contain "Creation log: $($file.FullName)"
+			$entries[0].RunId
+		})
+		@($runIds | Select-Object -Unique) | Should -HaveCount 2
+	}
+
+	It 'does not create logs for <Mode> previews (inherited WhatIf: <Inherited>)' -TestCases @(
+		@{ Mode = 'Single'; Inherited = $false },
+		@{ Mode = 'Csv'; Inherited = $false },
+		@{ Mode = 'Application'; Inherited = $false },
+		@{ Mode = 'Single'; Inherited = $true },
+		@{ Mode = 'Csv'; Inherited = $true },
+		@{ Mode = 'Application'; Inherited = $true }
+	) {
+		param($Mode, $Inherited)
+		$parameters = switch ($Mode) {
+			'Single' { @{ GroupId = $script:groupId } }
+			'Csv' {
+				$csv = Join-Path $script:testScriptRoot 'preview.csv'
+				"GroupId`n$script:groupId" | Set-Content $csv
+				@{ CsvPath = $csv }
+			}
+			'Application' { @{ ServicePrincipalId = $script:groupId } }
+		}
+		if ($Inherited) { $WhatIfPreference = $true }
+		else { $parameters.WhatIf = $true }
+		$results = @(& $script:testScript @parameters)
+		$results | Should -HaveCount 1
+		$results[0].Status | Should -Be 'Would be created'
+		$results[0].MemberCount | Should -Be 150
+		Test-Path (Join-Path $script:testScriptRoot 'logs') | Should -BeFalse
+		($script:fixture.HostMessages -join "`n") | Should -Not -Match 'Creation log:'
+		$script:fixture.HostMessages[-1] | Should -Be 'Total transitive members in reviews that would be created: 150'
 		Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times 0 -Exactly
 	}
 
-	It 'appends independent runs with timestamps, invocation and created review IDs' {
+	It 'leaves legacy logs untouched during real runs and all existing logs untouched during previews' {
+		$directory = Join-Path $script:testScriptRoot 'logs'
+		$null = New-Item -ItemType Directory -Path $directory
+		$legacy = Join-Path $directory 'Create-AccessReview.jsonl'
+		$legacyContents = '{"Event":"ExistingRun"}'
+		Set-Content -LiteralPath $legacy -Value $legacyContents -NoNewline
 		$null = & $script:testScript -GroupId $script:groupId -Confirm:$false
-		$null = & $script:testScript -GroupId $script:groupId -ReviewerType ResourceOwner -Confirm:$false
+		(Get-Content -LiteralPath $legacy -Raw) | Should -BeExactly $legacyContents
+		$runFile = @(Get-RunLogs)[0]
+		$runContents = Get-Content -LiteralPath $runFile.FullName -Raw
+		$runWriteTime = $runFile.LastWriteTimeUtc
+		$legacyWriteTime = (Get-Item -LiteralPath $legacy).LastWriteTimeUtc
+		$null = & $script:testScript -GroupId $script:groupId -WhatIf
+		@(Get-ChildItem -LiteralPath $directory -File) | Should -HaveCount 2
+		(Get-Content -LiteralPath $runFile.FullName -Raw) | Should -BeExactly $runContents
+		(Get-Item -LiteralPath $runFile.FullName).LastWriteTimeUtc | Should -Be $runWriteTime
+		(Get-Content -LiteralPath $legacy -Raw) | Should -BeExactly $legacyContents
+		(Get-Item -LiteralPath $legacy).LastWriteTimeUtc | Should -Be $legacyWriteTime
+	}
+
+	It 'does not require a writable log directory during WhatIf' {
+		$blockedPath = Join-Path $script:testScriptRoot 'logs'
+		Set-Content -LiteralPath $blockedPath -Value 'Blocked.' -NoNewline
+		$result = & $script:testScript -GroupId $script:groupId -WhatIf
+		$result.Status | Should -Be 'Would be created'
+		(Get-Content -LiteralPath $blockedPath -Raw) | Should -BeExactly 'Blocked.'
+		Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times 0 -Exactly
+	}
+
+	It 'preserves preview failures without writing diagnostic logs' {
+		$script:fixture.OwnerFailure = $true
+		{ & $script:testScript -GroupId $script:groupId -ReviewerType ResourceOwner -WhatIf } |
+			Should -Throw '*Owner read forbidden*'
+		Test-Path (Join-Path $script:testScriptRoot 'logs') | Should -BeFalse
+		Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times 0 -Exactly
+	}
+
+	It 'logs a real run when explicit WhatIf false overrides inherited WhatIf' {
+		$WhatIfPreference = $true
+		$result = & $script:testScript -GroupId $script:groupId -WhatIf:$false -Confirm:$false
+		$result.Status | Should -Be 'Created'
 		$entries = Get-LogEntries
-		$entries.Count | Should -Be 6
-		$entries[0].RunId | Should -Not -Be $entries[3].RunId
-		([datetime]$entries[0].Timestamp).Kind | Should -Be ([System.DateTimeKind]::Utc)
-		$entries[1].RunId | Should -Be $entries[0].RunId
-		$entries[1].Result.ReviewId | Should -Be $script:reviewId
+		$entries | Should -HaveCount 3
+		$entries[0].Syntax | Should -Match '-WhatIf:\$false'
 		$entries[2].Created | Should -Be 1
-		$entries[0].Syntax | Should -Match '-Confirm:\$false'
+		Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times 1 -Exactly
 	}
 
 	It 'logs each CSV failure and completes the batch' {

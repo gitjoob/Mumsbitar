@@ -160,7 +160,13 @@ $results = .\Create-AccessReview.ps1 -CsvPath '.\groups.csv' -ReviewerType Resou
 $results | Export-Csv '.\results.csv' -NoTypeInformation
 ```
 
-Every validated run appends JSON Lines to `logs/Create-AccessReview.jsonl`.
+Every validated real run writes a separate JSON Lines file named
+`logs/Create-AccessReview_<UTC timestamp>_<RunId>.jsonl`, for example
+`logs/Create-AccessReview_20261110T083000123Z_11111111-1111-1111-1111-111111111111.jsonl`.
+The timestamp makes runs easy to sort; the unique RunId keeps runs isolated.
+The script prints the log path when logging starts, including for runs that
+later fail. Events are written as they occur, so partial logs remain available.
+Real runs retain diagnostic logs even if no reviews are created.
 The whole `logs/` directory is gitignored. Entries contain UTC timestamps,
 run ID, runnable invocation syntax (including array parameters), working
 directory, effective schedule and per-group results including created IDs.
@@ -168,7 +174,18 @@ CSV files themselves are not copied into logs; effective owner IDs are logged.
 Authentication commands, credentials and tokens are not logged. Keep logs
 private because they contain tenant/group metadata.
 
-WhatIf writes local preview logs. Logging errors stop execution explicitly;
+WhatIf creates no log files or directories and does not change existing logs.
+All real-run logs are kept until you remove them manually. The old combined
+`logs/Create-AccessReview.jsonl` is left untouched; it is not migrated or appended to.
+
+Open the printed path to inspect one run, or find the most recent run:
+
+```powershell
+$log = Get-ChildItem '.\logs\Create-AccessReview_*.jsonl' | Sort-Object Name -Descending | Select-Object -First 1
+Get-Content -LiteralPath $log.FullName | ConvertFrom-Json
+```
+
+Logging errors stop real runs explicitly;
 check IDs already returned before retrying. Single-group failures are logged
 before rethrowing; batch failures are reported per group. Application-discovery
 failures are logged as `RunFailed`. Preflight errors occur before logging starts.

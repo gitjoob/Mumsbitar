@@ -4,6 +4,8 @@ function Write-AccessReviewLog {
 		[Parameter(Mandatory)][hashtable]$Entry
 	)
 
+	if (-not $Log.Enabled) { return }
+
 	$record = [ordered]@{
 		Timestamp = [datetime]::UtcNow.ToString('o')
 		RunId = $Log.RunId
@@ -26,12 +28,18 @@ function Start-AccessReviewLog {
 	param(
 		[Parameter(Mandatory)][string]$ScriptPath,
 		[Parameter(Mandatory)][hashtable]$Parameters,
-		[Parameter(Mandatory)][hashtable]$Settings
+		[Parameter(Mandatory)][hashtable]$Settings,
+		[bool]$Enabled = $true
 	)
 
+	if (-not $Enabled) { return @{ Enabled = $false; Path = $null; RunId = $null } }
+
+	$runId = [guid]::NewGuid().ToString()
+	$timestamp = [datetime]::UtcNow.ToString("yyyyMMdd'T'HHmmssfff'Z'")
 	$log = @{
-		RunId = [guid]::NewGuid().ToString()
-		Path = Join-Path (Split-Path -Parent $ScriptPath) "logs/$([System.IO.Path]::GetFileNameWithoutExtension($ScriptPath)).jsonl"
+		Enabled = $true
+		RunId = $runId
+		Path = Join-Path (Split-Path -Parent $ScriptPath) "logs/$([System.IO.Path]::GetFileNameWithoutExtension($ScriptPath))_${timestamp}_${runId}.jsonl"
 	}
 	$syntaxParts = @("& '$($ScriptPath.Replace("'", "''"))'")
 	foreach ($key in @($Parameters.Keys | Sort-Object)) {
