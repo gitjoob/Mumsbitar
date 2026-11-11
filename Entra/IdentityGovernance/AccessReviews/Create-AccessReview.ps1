@@ -8,7 +8,7 @@ It retains group-membership reviews and creates a separate application-access
 review for direct users. It also reports service-principal owners and non-user
 assignments (including service principals/managed identities) as Manual review
 required; these are not silently skipped or automatically revoked.
-Dynamic/empty-ownerless groups and existing review names are skipped.
+Dynamic/empty groups and existing review names are skipped.
 Application mode requires explicit AppOwnerIds for final sign-off.
 All modes use the same stage policy and application-owner sign-off.
 Connect to Microsoft Graph first.
@@ -16,8 +16,9 @@ Requires AccessReview.ReadWrite.All, access to read the group and its member cou
 and an appropriate access review license.
 
 ReviewerType selects ApplicationOwner (one stage), LineManager (default), or
-ResourceOwner. LineManager and ResourceOwner always precede application-owner
-sign-off, even for small groups. At 500 or more transitive members, an initial
+ResourceOwner. Below 150 members, only application owners review. At 150 or more,
+LineManager and ResourceOwner precede application-owner sign-off.
+Empty groups are skipped, regardless of owners. At 500 or more transitive members, an initial
 self-review stage is added to those two-stage reviews. ResourceOwner uses
 the group's user owners, or service-principal user owners for direct-user
 application reviews. Resources without user owners skip that stage unless
@@ -445,6 +446,12 @@ foreach ($target in $targets) {
 			}
 		}
 		$result.ReviewName = $reviewDisplayName
+		if ($memberCount -eq 0) {
+			$result.Status = 'Skipped'
+			$result.Reason = 'No members; no access review needed'
+			Write-Host "The $resourceDescription has no members; no access review needed."
+			continue
+		}
 		if ($PSCmdlet.ParameterSetName -eq 'Application') {
 			if (-not $isApplicationReview -and $group.GroupTypes -contains 'DynamicMembership') {
 				$result.Status = 'Skipped'
@@ -455,15 +462,6 @@ foreach ($target in $targets) {
 				$result.Status = 'Skipped'
 				$result.Reason = 'Access review with the same name already exists'
 				continue
-			}
-			if (-not $isApplicationReview -and $memberCount -eq 0) {
-				$userOwnerCount = @(Get-MgGroupOwner -GroupId $GroupId -All -Property id |
-					Where-Object { $_.AdditionalProperties['@odata.type'] -eq '#microsoft.graph.user' }).Count
-				if ($userOwnerCount -eq 0) {
-					$result.Status = 'Skipped'
-					$result.Reason = 'No members and no owners'
-					continue
-				}
 			}
 		}
 		if ($isSyncedGroup) {
@@ -482,7 +480,7 @@ foreach ($target in $targets) {
 			)
 			fallbackReviewers = $fallbackReviewers
 		}
-		if ($ReviewerType -eq 'ResourceOwner') {
+		if ($ReviewerType -eq 'ResourceOwner' -and $memberCount -ge 150) {
 			$userOwners = @(if ($isApplicationReview) {
 				$applicationOwners | Where-Object { $_.AdditionalProperties['@odata.type'] -eq '#microsoft.graph.user' }
 			}
@@ -527,7 +525,7 @@ foreach ($target in $targets) {
 		}
 
 		$stages = @(
-			if ($ReviewerType -ne 'ApplicationOwner') {
+			if ($ReviewerType -ne 'ApplicationOwner' -and $memberCount -ge 150) {
 				if ($memberCount -ge $SelfReviewStageThreshold) { $selfReviewStage }
 				if ($selectedReviewerStage) { $selectedReviewerStage }
 			}

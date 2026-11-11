@@ -95,7 +95,7 @@ Describe 'Unified access review creation and local logging' {
 	It 'reports the existing single-group count of <Count> and logs only real runs (preview: <Preview>)' -TestCases @(
 		@{ Count = 150; Preview = $false },
 		@{ Count = 150; Preview = $true },
-		@{ Count = 0; Preview = $false }
+		@{ Count = 1; Preview = $false }
 	) {
 		param($Count, $Preview)
 		$script:fixture.Count = $Count
@@ -277,18 +277,19 @@ Describe 'Unified access review creation and local logging' {
 		$body.settings.instanceDurationInDays | Should -Be 15
 	}
 
-	It 'always includes selected reviewers before application-owner sign-off for small groups' -TestCases @(
-		@{ Type = 'LineManager'; Count = 0 }, @{ Type = 'ResourceOwner'; Count = 1 },
+	It 'uses only application-owner sign-off below 150 members' -TestCases @(
+		@{ Type = 'LineManager'; Count = 1 }, @{ Type = 'ResourceOwner'; Count = 1 },
 		@{ Type = 'LineManager'; Count = 49 }, @{ Type = 'ResourceOwner'; Count = 50 },
-		@{ Type = 'LineManager'; Count = 149 }, @{ Type = 'ResourceOwner'; Count = 499 }
+		@{ Type = 'LineManager'; Count = 149 }, @{ Type = 'ResourceOwner'; Count = 149 }
 	) {
 		param($Type, $Count)
 		$script:fixture.Count = $Count
 		$null = & $script:testScript -GroupId $script:groupId -ReviewerType $Type -Confirm:$false
 		$body = $script:fixture.Bodies[0]
-		$body.stageSettings | Should -HaveCount 2
-		$body.stageSettings[1].reviewers[0].query | Should -Be "/users/$script:ownerId"
-		$body.stageSettings[0].reviewers[0].query | Should -Be $(if ($Type -eq 'ResourceOwner') { "/users/$script:groupOwnerId" } else { './manager' })
+		$body.ContainsKey('stageSettings') | Should -BeFalse
+		$body.reviewers[0].query | Should -Be "/users/$script:ownerId"
+		$body.settings.instanceDurationInDays | Should -Be 5
+		Should -Invoke Get-MgGroupOwner -Times 0 -Exactly
 	}
 
 	It 'uses application-owner-only mode regardless of member count' -TestCases @(
@@ -301,6 +302,74 @@ Describe 'Unified access review creation and local logging' {
 		$body.reviewers[0].query | Should -Be "/users/$script:ownerId"
 		$body.ContainsKey('stageSettings') | Should -BeFalse
 		Should -Invoke Get-MgGroupOwner -Times 0 -Exactly
+	}
+
+	It 'skips empty groups even with owners in <Mode> mode (preview: <Preview>)' -TestCases @(
+		@{ Mode = 'Single'; Preview = $false },
+		@{ Mode = 'Single'; Preview = $true },
+		@{ Mode = 'Csv'; Preview = $false },
+		@{ Mode = 'Csv'; Preview = $true },
+		@{ Mode = 'Application'; Preview = $false },
+		@{ Mode = 'Application'; Preview = $true }
+	) {
+		param($Mode, $Preview)
+		$script:fixture.Count = 0
+		$parameters = switch ($Mode) {
+			'Single' { @{ GroupId = $script:groupId } }
+			'Csv' {
+				$csv = Join-Path $script:testScriptRoot 'empty-group.csv'
+				"GroupId`n$script:groupId" | Set-Content $csv
+				@{ CsvPath = $csv }
+			}
+			'Application' { @{ ServicePrincipalId = $script:groupId } }
+		}
+		$result = & $script:testScript @parameters -ReviewerType ResourceOwner -WhatIf:$Preview -Confirm:$false -WarningAction SilentlyContinue
+		$result.Status | Should -Be 'Skipped'
+		$result.Reason | Should -Be 'No members; no access review needed'
+		$result.MemberCount | Should -Be 0
+		$result.Stages | Should -BeNullOrEmpty
+		$script:fixture.HostMessages | Should -Contain 'The group Demo group has no members; no access review needed.'
+		if (-not $Preview) {
+			(Get-LogEntries)[1].Result.Status | Should -Be 'Skipped'
+			(Get-LogEntries)[-1].Skipped | Should -Be 1
+		}
+		Should -Invoke Get-MgGroupOwner -Times 0 -Exactly
+		Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times 0 -Exactly
+	}
+
+	It 'applies stage thresholds to <Count> members in <Mode> mode' -TestCases @(
+		@{ Mode = 'Single'; Count = 10; Stages = 1 },
+		@{ Mode = 'Single'; Count = 149; Stages = 1 },
+		@{ Mode = 'Single'; Count = 150; Stages = 2 },
+		@{ Mode = 'Single'; Count = 499; Stages = 2 },
+		@{ Mode = 'Single'; Count = 500; Stages = 3 },
+		@{ Mode = 'Application'; Count = 10; Stages = 1 },
+		@{ Mode = 'Application'; Count = 149; Stages = 1 },
+		@{ Mode = 'Application'; Count = 150; Stages = 2 },
+		@{ Mode = 'Application'; Count = 499; Stages = 2 },
+		@{ Mode = 'Application'; Count = 500; Stages = 3 }
+	) {
+		param($Mode, $Count, $Stages)
+		$script:fixture.Count = $Count
+		$parameters = @{ GroupId = $script:groupId }
+		if ($Mode -eq 'Application') {
+			$parameters = @{ ServicePrincipalId = $script:groupId }
+			$script:fixture.Assignments = @(1..$Count | ForEach-Object {
+				[pscustomobject]@{ PrincipalType = 'User'; PrincipalId = ([guid]::NewGuid().ToString()) }
+			})
+		}
+		$result = & $script:testScript @parameters -Confirm:$false
+		$result.Stages | Should -Be $Stages
+		$body = $script:fixture.Bodies[0]
+		$body.settings.instanceDurationInDays | Should -Be ($Stages * 5)
+		if ($Stages -eq 1) {
+			$body.ContainsKey('stageSettings') | Should -BeFalse
+			$body.reviewers[0].query | Should -Be "/users/$script:ownerId"
+		}
+		else {
+			$body.stageSettings | Should -HaveCount $Stages
+			$body.stageSettings[-1].reviewers[0].query | Should -Be "/users/$script:ownerId"
+		}
 	}
 
 	It 'uses per-row CSV owners and falls back to the parameter for blank cells' {
@@ -612,8 +681,8 @@ Describe 'Unified access review creation and local logging' {
 		$scope.resourceScopes[0].query | Should -Be "/v1.0/servicePrincipals/$script:groupId"
 		$body.settings.autoApplyDecisionsEnabled | Should -BeTrue
 		$body.settings.applyActions[0].AdditionalProperties.'@odata.type' | Should -Be '#microsoft.graph.removeAccessApplyAction'
-		$body.stageSettings[0].reviewers[0].query | Should -Be './manager'
-		$body.stageSettings[1].reviewers[0].query | Should -Be "/users/$script:ownerId"
+		$result.Stages | Should -Be 1
+		$body.reviewers[0].query | Should -Be "/users/$script:ownerId"
 		$entries = Get-LogEntries
 		$entries[1].Event | Should -Be 'ApplicationResult'
 		$entries[1].Result.SubjectCount | Should -Be 2
@@ -670,7 +739,9 @@ Describe 'Unified access review creation and local logging' {
 			[pscustomobject]@{ Id = $script:groupOwnerId; AdditionalProperties = @{ '@odata.type' = '#microsoft.graph.user' } },
 			[pscustomobject]@{ Id = $script:reviewId; AdditionalProperties = @{ '@odata.type' = '#microsoft.graph.servicePrincipal' } }
 		)
-		$script:fixture.Assignments = @([pscustomobject]@{ PrincipalType = 'User'; PrincipalId = $script:ownerId })
+		$script:fixture.Assignments = @(1..150 | ForEach-Object {
+			[pscustomobject]@{ PrincipalType = 'User'; PrincipalId = ([guid]::NewGuid().ToString()) }
+		})
 		$results = @(& $script:testScript -ServicePrincipalId $script:groupId -ReviewerType ResourceOwner -Confirm:$false -WarningAction SilentlyContinue)
 		$results | Should -HaveCount 3
 		$results[-1].StageNames | Should -Be 'Resource owners (service-principal owners) -> Application owners'

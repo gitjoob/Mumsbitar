@@ -138,11 +138,15 @@ The script does not prevalidate that each GUID identifies an existing user.
 
 `-ReviewerType` (`-ReviewType` alias) defaults to `LineManager`:
 
-| ReviewerType | Below 500 transitive members | 500+ |
-| --- | --- | --- |
-| `ApplicationOwner` | Application owners | Application owners |
-| `LineManager` | Managers -> Application owners | Self-review -> Managers -> Application owners |
-| `ResourceOwner` | Group user owners -> Application owners | Self-review -> Group user owners -> Application owners |
+Empty groups are skipped with `No members; no access review needed`, even when
+they have owners. This applies to single-group, CSV, and application discovery.
+Applications without direct users do not get a direct-user review.
+
+| ReviewerType | 1-149 members | 150-499 members | 500+ |
+| --- | --- | --- | --- |
+| `ApplicationOwner` | Application owners | Application owners | Application owners |
+| `LineManager` | Application owners | Managers -> Application owners | Self-review -> Managers -> Application owners |
+| `ResourceOwner` | Application owners | Group user owners -> Application owners | Self-review -> Group user owners -> Application owners |
 
 If the group-owner (or explicit fallback) reviewer set exactly matches the
 application-owner set, those stages are combined into one application-owner
@@ -152,7 +156,8 @@ members. Dynamic per-user manager routing is not merged, even if its fallback
 matches the application owners. Duration, stage dependencies and logs use the
 resulting stages, and a warning reports the merge.
 
-The 50/150-person cutoffs are removed in the unified behavior. Group counts
+The 150-member threshold applies to all modes, including direct application
+users. Below it, group-owner lookups and fallback stages are not needed. Group counts
 include transitive directory members, not only users. Configure
 `$SelfReviewStageThreshold` (default 500, inclusive) and `$StageDurationInDays`
 (default five) in the script. Group user owners are resolved at creation time;
@@ -168,7 +173,7 @@ nonempty **user object ID**:
     -FallbackReviewerUserId '44444444-4444-4444-4444-444444444444' -WhatIf
 ```
 
-This produces fallback reviewer -> application owners for ownerless groups
+At 150+ members, this produces fallback reviewer -> application owners for ownerless groups
 (preceded by self-review at 500+ members). Stage counts, duration and logs reflect
 the actual stages. The script warns whenever it substitutes or omits group owners.
 Missing managers use the same explicit fallback, or the effective application
@@ -195,8 +200,8 @@ notification recipients (user/group IDs), or leave it empty.
 Synchronized groups are report-only: decisions are recorded but removal must
 be performed in on-premises Active Directory. Automatic apply is disabled.
 
-Application-discovery mode preserves its skip rules: dynamic groups, groups
-with neither members nor user owners, and existing review names are skipped.
+Application-discovery mode skips dynamic groups, empty groups regardless of
+owners, and existing review names.
 Existing reviews are not updated. Direct-group/CSV modes do not skip existing
 names; check results before retrying to avoid duplicate reviews.
 
