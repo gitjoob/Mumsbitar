@@ -12,9 +12,9 @@ Choose exactly one:
 - `-CsvPath`: one review per CSV row; duplicate group IDs are processed once.
 - `-ServicePrincipalId`: discover assigned groups, direct user assignments,
   service-principal owners, and other application-role assignments. Group reviews
-  retain names `AR <application> - <group>`. Direct users receive one additional
-  review named `AR <application> - Direct user assignments (<servicePrincipalId>)`.
-  The ID distinguishes it from ordinary group review names. Owners and non-user
+  retain names `AR <application> - <group>`. Direct users receive an
+  application-scoped review named `AR <application>`, without an assignment label
+  or GUID. With only direct users, this is the only native review created. Owners and non-user
   assignments are explicitly reported for manual review (see below).
 
 Connect to Graph first. Requires `Microsoft.Graph.Authentication`,

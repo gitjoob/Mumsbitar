@@ -565,7 +565,7 @@ Describe 'Unified access review creation and local logging' {
 		$results[0].Status | Should -Be 'Created'
 		$script:fixture.Bodies[0].stageSettings | Should -HaveCount 2
 		$script:fixture.Bodies[0].stageSettings[1].reviewers[0].query | Should -Be "/users/$script:ownerId"
-		$results[1].ReviewName | Should -Be "AR Demo app - Direct user assignments ($script:groupId)"
+		$results[1].ReviewName | Should -Be 'AR Demo app'
 		$results[1].SubjectCount | Should -Be 1
 	}
 
@@ -595,6 +595,7 @@ Describe 'Unified access review creation and local logging' {
 		$result = & $script:testScript -ServicePrincipalId $script:groupId -Confirm:$false
 		$result.Status | Should -Be 'Created'
 		$result.TargetType | Should -Be 'ApplicationDirectUsers'
+		$result.ReviewName | Should -Be 'AR Demo app'
 		$result.GroupId | Should -BeNullOrEmpty
 		$result.MemberCount | Should -BeNullOrEmpty
 		$result.SubjectCount | Should -Be 2
@@ -603,6 +604,7 @@ Describe 'Unified access review creation and local logging' {
 		$script:fixture.HostMessages | Should -Contain 'Discovered app-role assignments: 0 distinct group(s), 2 distinct direct user(s), 0 other assignment(s).'
 		$script:fixture.HostMessages | Should -Contain "Application: Demo app (service-principal Object ID: $script:groupId)"
 		$body = $script:fixture.Bodies[0]
+		$body.DisplayName | Should -Be 'AR Demo app'
 		$scope = $body.scope.AdditionalProperties
 		$scope.'@odata.type' | Should -Be '#microsoft.graph.principalResourceMembershipsScope'
 		$scope.principalScopes | Should -HaveCount 1
@@ -695,7 +697,7 @@ Describe 'Unified access review creation and local logging' {
 
 	It 'skips an existing direct-user review without skipping ownership reporting' {
 		$script:fixture.Assignments = @([pscustomobject]@{ PrincipalType = 'User'; PrincipalId = $script:ownerId })
-		$script:fixture.ExistingNames = @("AR Demo app - Direct user assignments ($script:groupId)")
+		$script:fixture.ExistingNames = @('AR Demo app')
 		$script:fixture.ApplicationOwners = @(
 			[pscustomobject]@{ Id = $script:ownerId; AdditionalProperties = @{ '@odata.type' = '#microsoft.graph.user' } }
 		)

@@ -273,7 +273,7 @@ if ($PSCmdlet.ParameterSetName -eq 'Application') {
 			$targets += [pscustomobject]@{
 				TargetType = 'ApplicationDirectUsers'
 				GroupId = $null
-				ReviewName = "$ReviewNamePrefix $($servicePrincipal.DisplayName) - Direct user assignments ($ServicePrincipalId)"
+				ReviewName = "$ReviewNamePrefix $($servicePrincipal.DisplayName)".Trim()
 				AppOwnerIds = $null
 			}
 		}
