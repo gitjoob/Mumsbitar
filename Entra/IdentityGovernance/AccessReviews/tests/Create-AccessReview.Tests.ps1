@@ -600,6 +600,8 @@ Describe 'Unified access review creation and local logging' {
 		$result.SubjectCount | Should -Be 2
 		$result.PrincipalIds | Should -Be @($script:ownerId, $script:groupOwnerId)
 		$result.AssignmentIds | Should -Be @('assignment-1', 'assignment-2', 'assignment-3')
+		$script:fixture.HostMessages | Should -Contain 'Discovered app-role assignments: 0 distinct group(s), 2 distinct direct user(s), 0 other assignment(s).'
+		$script:fixture.HostMessages | Should -Contain "Application: Demo app (service-principal Object ID: $script:groupId)"
 		$body = $script:fixture.Bodies[0]
 		$scope = $body.scope.AdditionalProperties
 		$scope.'@odata.type' | Should -Be '#microsoft.graph.principalResourceMembershipsScope'
@@ -618,7 +620,9 @@ Describe 'Unified access review creation and local logging' {
 		$script:fixture.HostMessages | Should -Contain 'Directly assigned users in created reviews: 2'
 		Should -Invoke Get-MgGroup -Times 0 -Exactly
 		Should -Invoke Get-MgGroupTransitiveMemberCount -Times 0 -Exactly
-		Should -Invoke Get-MgServicePrincipalAppRoleAssignedTo -Times 1 -Exactly -ParameterFilter { $All }
+		Should -Invoke Get-MgServicePrincipalAppRoleAssignedTo -Times 1 -Exactly -ParameterFilter {
+			$All -and $Property -contains 'principalType' -and $Property -contains 'principalId' -and $Property -contains 'id'
+		}
 		Should -Invoke Get-MgServicePrincipalOwner -Times 1 -Exactly -ParameterFilter { $All }
 	}
 
@@ -698,6 +702,8 @@ Describe 'Unified access review creation and local logging' {
 		$results = @(& $script:testScript -ServicePrincipalId $script:groupId -Confirm:$false -WarningAction SilentlyContinue)
 		$results.Status | Should -Be @('Manual review required', 'Skipped')
 		$results[-1].Reason | Should -Match 'already exists'
+		$script:fixture.HostMessages | Should -Contain 'Discovered app-role assignments: 0 distinct group(s), 1 distinct direct user(s), 0 other assignment(s).'
+		($script:fixture.HostMessages -join "`n") | Should -Match 'Direct-user review: Skipped; discovered users: 1;.*already exists'
 		Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times 0 -Exactly
 	}
 

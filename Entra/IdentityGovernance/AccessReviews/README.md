@@ -48,6 +48,21 @@ Application mode reads all pages of app-role assignments and service-principal
 owners before creating any reviews. Discovery errors terminate the run rather
 than silently producing incomplete coverage.
 
+The console prints the resolved application name, service-principal Object ID,
+distinct assigned group/user counts, and the direct-user review outcome (including
+skip/failure reason). Discovery counts include users even when an existing review
+causes creation to be skipped; the final created-review total does not.
+Use the **enterprise application's Object ID**, not its application/client ID or
+the app registration's Object ID. If Graph returns no direct users, check the
+enterprise application's **Users and groups** assignments and allow for replication
+after recent changes. To inspect the same read-only assignment source:
+
+```powershell
+Get-MgServicePrincipalAppRoleAssignedTo -ServicePrincipalId '<enterprise-application Object ID>' -All `
+    -Property id,principalId,principalType,principalDisplayName,appRoleId,resourceId |
+    Select-Object PrincipalType,PrincipalId,PrincipalDisplayName,Id,AppRoleId
+```
+
 | Relationship | Handling |
 | --- | --- |
 | Assigned groups | Existing group-membership reviews, with the existing skip rules. These do not review or remove the group's assignment to the application. |

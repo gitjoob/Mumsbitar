@@ -254,8 +254,16 @@ $directAssignments = @()
 if ($PSCmdlet.ParameterSetName -eq 'Application') {
 	try {
 		$servicePrincipal = Get-MgServicePrincipal -ServicePrincipalId $ServicePrincipalId -Property id, displayName
-		$assignments = @(Get-MgServicePrincipalAppRoleAssignedTo -ServicePrincipalId $ServicePrincipalId -All)
+		$assignments = @(Get-MgServicePrincipalAppRoleAssignedTo -ServicePrincipalId $ServicePrincipalId -All -Property id, principalId, principalType, principalDisplayName, appRoleId, resourceId)
 		$applicationOwners = @(Get-MgServicePrincipalOwner -ServicePrincipalId $ServicePrincipalId -All)
+		Write-Host "Application: $($servicePrincipal.DisplayName) (service-principal Object ID: $ServicePrincipalId)"
+		$assignedGroupCount = @($assignments | Where-Object PrincipalType -eq 'Group' | Select-Object -ExpandProperty PrincipalId -Unique).Count
+		$assignedUserCount = @($assignments | Where-Object PrincipalType -eq 'User' | Select-Object -ExpandProperty PrincipalId -Unique).Count
+		$otherAssignmentCount = @($assignments | Where-Object { $_.PrincipalType -notin @('Group', 'User') }).Count
+		Write-Host "Discovered app-role assignments: $assignedGroupCount distinct group(s), $assignedUserCount distinct direct user(s), $otherAssignmentCount other assignment(s)."
+		if ($assignedUserCount -eq 0) {
+			Write-Warning "Graph returned no direct user app-role assignments for service principal '$ServicePrincipalId'. Verify the enterprise application's Object ID and its Users and groups assignments. Ownership and group membership are not direct user assignments; recently changed assignments can take time to appear."
+		}
 		$targets = @($assignments | Where-Object PrincipalType -eq 'Group' |
 			Select-Object -ExpandProperty PrincipalId -Unique | ForEach-Object {
 				[pscustomobject]@{ GroupId = $_; ReviewName = $null; AppOwnerIds = $null }
@@ -704,6 +712,9 @@ $totalMemberCount = [long](($createdResults | Measure-Object -Property MemberCou
 $reviewSummary = if ($WhatIfPreference) { 'reviews that would be created' } else { 'created reviews' }
 Write-Host "Total transitive members in ${reviewSummary}: $totalMemberCount"
 if ($PSCmdlet.ParameterSetName -eq 'Application') {
+	foreach ($directUserResult in @($results | Where-Object TargetType -eq 'ApplicationDirectUsers')) {
+		Write-Host "Direct-user review: $($directUserResult.Status); discovered users: $($directUserResult.SubjectCount); review name: $($directUserResult.ReviewName); reason: $($directUserResult.Reason)"
+	}
 	$directUserCount = [long](($createdResults | Where-Object TargetType -eq 'ApplicationDirectUsers' | Measure-Object SubjectCount -Sum).Sum)
 	$manualReviewCount = @($results | Where-Object Status -eq 'Manual review required').Count
 	Write-Host "Directly assigned users in ${reviewSummary}: $directUserCount"
