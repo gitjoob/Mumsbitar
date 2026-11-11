@@ -1,7 +1,7 @@
 # Access reviews
 
 [Create-AccessReview.ps1](./Create-AccessReview.ps1) is the unified entry point
-for direct group-membership reviews. Keep
+for direct group-membership and direct application-user access reviews. Keep
 [AccessReview.Logging.ps1](./AccessReview.Logging.ps1) beside it.
 
 ## Input modes
@@ -10,9 +10,12 @@ Choose exactly one:
 
 - `-GroupId`: one group, optionally with `-ReviewName`.
 - `-CsvPath`: one review per CSV row; duplicate group IDs are processed once.
-- `-ServicePrincipalId`: discover groups assigned to an enterprise application.
-  Multiple application-role assignments for a group are collapsed. Direct user
-  assignments are not reviewed. Names are `AR <application> - <group>`.
+- `-ServicePrincipalId`: discover assigned groups, direct user assignments,
+  service-principal owners, and other application-role assignments. Group reviews
+  retain names `AR <application> - <group>`. Direct users receive one additional
+  review named `AR <application> - Direct user assignments (<servicePrincipalId>)`.
+  The ID distinguishes it from ordinary group review names. Owners and non-user
+  assignments are explicitly reported for manual review (see below).
 
 Connect to Graph first. Requires `Microsoft.Graph.Authentication`,
 `Microsoft.Graph.Groups` and `Microsoft.Graph.Identity.Governance`;
@@ -38,6 +41,46 @@ Connect-MgGraph -Scopes 'AccessReview.ReadWrite.All','Group.Read.All','Applicati
 
 Replace example IDs with real object IDs. Remove `-WhatIf` after checking the
 preview; preview performs Graph reads but never creates reviews.
+
+## Application identity coverage
+
+Application mode reads all pages of app-role assignments and service-principal
+owners before creating any reviews. Discovery errors terminate the run rather
+than silently producing incomplete coverage.
+
+| Relationship | Handling |
+| --- | --- |
+| Assigned groups | Existing group-membership reviews, with the existing skip rules. These do not review or remove the group's assignment to the application. |
+| Directly assigned users | One native application-access review. Multiple roles for the same user count once in `SubjectCount`; discovered principal and assignment IDs are retained in results/logs. |
+| Service-principal owners | Warning, structured result and real-run log entry marked `Manual review required`. Ownership is distinct from application access. |
+| Assigned service principals (including managed identities) | Each role assignment is explicitly reported as `Manual review required`, retaining principal, assignment and app-role IDs. |
+| Other/unknown assignment types | Explicit manual-review results, never silently discarded. |
+
+The direct-user review uses the documented
+[`principalResourceMembershipsScope`](https://learn.microsoft.com/en-us/graph/accessreviews-scope-concept#example-15-review-all-users-with-direct-or-transitive-assignment-to-an-application)
+with `/v1.0/users` as its sole principal scope and the selected service principal
+as its resource. The group-principal scope from that example is deliberately
+omitted: group membership remains covered by the separate group reviews.
+Its subject count is a discovery-time snapshot; Graph resolves the review scope
+when instances start, including subsequent recurring instances.
+
+Direct-user reviews retain the configured stage policy, schedule, notifications,
+and final `AppOwnerIds` sign-off. For `ResourceOwner`, actual service-principal
+**user** owners are first-stage reviewers; non-user owners are never reviewers.
+Identical reviewer sets still merge. Without user owners, the same fallback/skip
+policy applies. The 500-member self-review threshold uses distinct direct users.
+
+**Denied direct-user reviews automatically remove application access**, not group
+membership or ownership. This is separate from the existing group-membership
+removal behavior. Start with `-WhatIf` to inspect both kinds of targets.
+
+Manual-review results are an inventory requiring administrator follow-up, **not
+native access-review definitions or completed reviews**. No ownership or workload
+assignment is removed by the script. It does not invent unsupported owner or
+workload scopes for the user-access review. The inventory covers the enterprise
+application/service principal, not the separate app registration's owners,
+delegated consent grants, directory roles, or every possible access path.
+`AppOwnerIds` remains an explicit sign-off list, not a discovery filter.
 
 ## Application-owner sign-off and CSV
 
@@ -160,6 +203,15 @@ $results = .\Create-AccessReview.ps1 -CsvPath '.\groups.csv' -ReviewerType Resou
 $results | Export-Csv '.\results.csv' -NoTypeInformation
 ```
 
+Application-mode results also identify `TargetType` and `ServicePrincipalId`.
+`ApplicationDirectUsers` results have `SubjectCount`, `PrincipalIds` and
+`AssignmentIds` instead of `MemberCount`. Ownership and non-user results have
+`PrincipalId`, `PrincipalType`, `PrincipalDisplayName`, and where applicable
+`AssignmentId` and `AppRoleId`. All result types expose the same fields for
+mixed-result CSV exports. Application summaries count native review targets
+separately from manual-review items and print direct-user totals separately from
+group transitive-member totals.
+
 Every validated real run writes a separate JSON Lines file named
 `logs/Create-AccessReview_<UTC timestamp>_<RunId>.jsonl`, for example
 `logs/Create-AccessReview_20261110T083000123Z_11111111-1111-1111-1111-111111111111.jsonl`.
@@ -170,6 +222,8 @@ Real runs retain diagnostic logs even if no reviews are created.
 The whole `logs/` directory is gitignored. Entries contain UTC timestamps,
 run ID, runnable invocation syntax (including array parameters), working
 directory, effective schedule and per-group results including created IDs.
+Application reviews use `ApplicationResult` events; manual-review inventory uses
+`ManualReviewRequired` events and a separate count in `RunCompleted`.
 CSV files themselves are not copied into logs; effective owner IDs are logged.
 Authentication commands, credentials and tokens are not logged. Keep logs
 private because they contain tenant/group metadata.

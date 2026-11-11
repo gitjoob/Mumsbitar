@@ -44,6 +44,7 @@ Describe 'Unified access review creation and local logging' {
 			ReviewId = $script:reviewId
 			Dynamic = $false
 			Assignments = @([pscustomobject]@{ PrincipalType = 'Group'; PrincipalId = $script:groupId })
+			ApplicationOwners = @()
 			ExistingNames = @()
 			HostMessages = [System.Collections.Generic.List[string]]::new()
 		}
@@ -67,6 +68,7 @@ Describe 'Unified access review creation and local logging' {
 		}.GetNewClosure())
 		Mock Get-MgServicePrincipal { [pscustomobject]@{ DisplayName = 'Demo app' } }
 		Mock Get-MgServicePrincipalAppRoleAssignedTo ({ $fixture.Assignments }.GetNewClosure())
+		Mock Get-MgServicePrincipalOwner ({ $fixture.ApplicationOwners }.GetNewClosure())
 		Mock Get-MgIdentityGovernanceAccessReviewDefinition ({
 			foreach ($name in $fixture.ExistingNames) { [pscustomobject]@{ DisplayName = $name } }
 		}.GetNewClosure())
@@ -152,8 +154,8 @@ Describe 'Unified access review creation and local logging' {
 		$results[1].MemberCount | Should -Be 150
 		$results[2].MemberCount | Should -BeNullOrEmpty
 		$results[2].Reason | Should -Match 'Count unavailable'
-		$script:fixture.HostMessages[-2] | Should -Be '3 group(s): 1 created, 1 skipped, 1 failed.'
-		$script:fixture.HostMessages[-1] | Should -Be 'Total transitive members in created reviews: 150'
+		$script:fixture.HostMessages | Should -Contain '3 review target(s): 1 created, 1 skipped, 1 failed.'
+		$script:fixture.HostMessages | Should -Contain 'Total transitive members in created reviews: 150'
 	}
 
 	It 'excludes groups whose review creation failed after retrieving a count' {
@@ -476,7 +478,7 @@ Describe 'Unified access review creation and local logging' {
 		$results[0].MemberCount | Should -Be 150
 		Test-Path (Join-Path $script:testScriptRoot 'logs') | Should -BeFalse
 		($script:fixture.HostMessages -join "`n") | Should -Not -Match 'Creation log:'
-		$script:fixture.HostMessages[-1] | Should -Be 'Total transitive members in reviews that would be created: 150'
+		$script:fixture.HostMessages | Should -Contain 'Total transitive members in reviews that would be created: 150'
 		Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times 0 -Exactly
 	}
 
@@ -558,11 +560,13 @@ Describe 'Unified access review creation and local logging' {
 		$script:fixture.Assignments += $script:fixture.Assignments[0]
 		$script:fixture.Assignments += [pscustomobject]@{ PrincipalType = 'User'; PrincipalId = $script:ownerId }
 		$results = @(& $script:testScript -ServicePrincipalId $script:groupId -ReviewerType ResourceOwner -Confirm:$false)
-		$results | Should -HaveCount 1
+		$results | Should -HaveCount 2
 		$results[0].ReviewName | Should -Be 'AR Demo app - Demo group'
 		$results[0].Status | Should -Be 'Created'
 		$script:fixture.Bodies[0].stageSettings | Should -HaveCount 2
 		$script:fixture.Bodies[0].stageSettings[1].reviewers[0].query | Should -Be "/users/$script:ownerId"
+		$results[1].ReviewName | Should -Be "AR Demo app - Direct user assignments ($script:groupId)"
+		$results[1].SubjectCount | Should -Be 1
 	}
 
 	It 'logs skipped application groups for <Kind>' -TestCases @(
@@ -582,13 +586,188 @@ Describe 'Unified access review creation and local logging' {
 		Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times 0 -Exactly
 	}
 
+	It 'creates an application-scoped review for direct users without reading groups' {
+		$script:fixture.Assignments = @(
+			[pscustomobject]@{ Id = 'assignment-1'; PrincipalType = 'User'; PrincipalId = $script:ownerId },
+			[pscustomobject]@{ Id = 'assignment-2'; PrincipalType = 'User'; PrincipalId = $script:ownerId },
+			[pscustomobject]@{ Id = 'assignment-3'; PrincipalType = 'User'; PrincipalId = $script:groupOwnerId }
+		)
+		$result = & $script:testScript -ServicePrincipalId $script:groupId -Confirm:$false
+		$result.Status | Should -Be 'Created'
+		$result.TargetType | Should -Be 'ApplicationDirectUsers'
+		$result.GroupId | Should -BeNullOrEmpty
+		$result.MemberCount | Should -BeNullOrEmpty
+		$result.SubjectCount | Should -Be 2
+		$result.PrincipalIds | Should -Be @($script:ownerId, $script:groupOwnerId)
+		$result.AssignmentIds | Should -Be @('assignment-1', 'assignment-2', 'assignment-3')
+		$body = $script:fixture.Bodies[0]
+		$scope = $body.scope.AdditionalProperties
+		$scope.'@odata.type' | Should -Be '#microsoft.graph.principalResourceMembershipsScope'
+		$scope.principalScopes | Should -HaveCount 1
+		$scope.principalScopes[0].query | Should -Be '/v1.0/users'
+		$scope.resourceScopes[0].query | Should -Be "/v1.0/servicePrincipals/$script:groupId"
+		$body.settings.autoApplyDecisionsEnabled | Should -BeTrue
+		$body.settings.applyActions[0].AdditionalProperties.'@odata.type' | Should -Be '#microsoft.graph.removeAccessApplyAction'
+		$body.stageSettings[0].reviewers[0].query | Should -Be './manager'
+		$body.stageSettings[1].reviewers[0].query | Should -Be "/users/$script:ownerId"
+		$entries = Get-LogEntries
+		$entries[1].Event | Should -Be 'ApplicationResult'
+		$entries[1].Result.SubjectCount | Should -Be 2
+		$entries[1].Result.AssignmentIds | Should -Be $result.AssignmentIds
+		$script:fixture.HostMessages | Should -Contain 'Total transitive members in created reviews: 0'
+		$script:fixture.HostMessages | Should -Contain 'Directly assigned users in created reviews: 2'
+		Should -Invoke Get-MgGroup -Times 0 -Exactly
+		Should -Invoke Get-MgGroupTransitiveMemberCount -Times 0 -Exactly
+		Should -Invoke Get-MgServicePrincipalAppRoleAssignedTo -Times 1 -Exactly -ParameterFilter { $All }
+		Should -Invoke Get-MgServicePrincipalOwner -Times 1 -Exactly -ParameterFilter { $All }
+	}
+
+	It 'reports owners and workload or unknown assignments without pretending they are reviewed (preview: <Preview>)' -TestCases @(
+		@{ Preview = $false }, @{ Preview = $true }
+	) {
+		param($Preview)
+		$script:fixture.ApplicationOwners = @(
+			[pscustomobject]@{ Id = $script:ownerId; AdditionalProperties = @{ '@odata.type' = '#microsoft.graph.user'; displayName = 'App owner' } },
+			[pscustomobject]@{ Id = $script:reviewId; AdditionalProperties = @{ '@odata.type' = '#microsoft.graph.servicePrincipal'; displayName = 'Automation owner' } }
+		)
+		$script:fixture.Assignments = @(
+			[pscustomobject]@{ Id = 'workload-role-1'; PrincipalType = 'ServicePrincipal'; PrincipalId = $script:reviewId; PrincipalDisplayName = 'Automation'; AppRoleId = 'role-1' },
+			[pscustomobject]@{ Id = 'workload-role-2'; PrincipalType = 'ServicePrincipal'; PrincipalId = $script:reviewId; PrincipalDisplayName = 'Automation'; AppRoleId = 'role-2' },
+			[pscustomobject]@{ Id = 'unknown-assignment'; PrincipalType = 'FutureIdentity'; PrincipalId = $script:groupOwnerId; AppRoleId = 'role-3' }
+		)
+		$results = @(& $script:testScript -ServicePrincipalId $script:groupId -WhatIf:$Preview -Confirm:$false -WarningAction SilentlyContinue)
+		$results | Should -HaveCount 5
+		@($results.Status | Select-Object -Unique) | Should -Be @('Manual review required')
+		@($results | Where-Object TargetType -eq 'ServicePrincipalOwner') | Should -HaveCount 2
+		$results[0].PrincipalDisplayName | Should -Be 'App owner'
+		$results[1].PrincipalType | Should -Be 'servicePrincipal'
+		$results[2].AssignmentId | Should -Be 'workload-role-1'
+		$results[3].AppRoleId | Should -Be 'role-2'
+		$results[4].PrincipalType | Should -Be 'FutureIdentity'
+		$results[4].Reason | Should -Match 'manually'
+		$script:fixture.HostMessages | Should -Contain 'Manual review required: 5 ownership/assignment item(s). These are not covered by the created reviews.'
+		if ($Preview) {
+			Test-Path (Join-Path $script:testScriptRoot 'logs') | Should -BeFalse
+		}
+		else {
+			$entries = Get-LogEntries
+			@($entries | Where-Object Event -eq 'ManualReviewRequired') | Should -HaveCount 5
+			$entries[-1].Created | Should -Be 0
+			$entries[-1].ManualReviewRequired | Should -Be 5
+		}
+		Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times 0 -Exactly
+		Should -Invoke Get-MgGroup -Times 0 -Exactly
+	}
+
+	It 'uses actual service-principal user owners for ResourceOwner routing and still reports ownership separately' {
+		$script:fixture.ApplicationOwners = @(
+			[pscustomobject]@{ Id = $script:groupOwnerId; AdditionalProperties = @{ '@odata.type' = '#microsoft.graph.user' } },
+			[pscustomobject]@{ Id = $script:reviewId; AdditionalProperties = @{ '@odata.type' = '#microsoft.graph.servicePrincipal' } }
+		)
+		$script:fixture.Assignments = @([pscustomobject]@{ PrincipalType = 'User'; PrincipalId = $script:ownerId })
+		$results = @(& $script:testScript -ServicePrincipalId $script:groupId -ReviewerType ResourceOwner -Confirm:$false -WarningAction SilentlyContinue)
+		$results | Should -HaveCount 3
+		$results[-1].StageNames | Should -Be 'Resource owners (service-principal owners) -> Application owners'
+		$script:fixture.Bodies[0].stageSettings[0].reviewers.query | Should -Be @("/users/$script:groupOwnerId")
+		Should -Invoke Get-MgGroupOwner -Times 0 -Exactly
+	}
+
+	It 'previews mixed subjects without creating reviews or disk logs' {
+		$script:fixture.Assignments += [pscustomobject]@{ PrincipalType = 'User'; PrincipalId = $script:ownerId }
+		$script:fixture.ApplicationOwners = @(
+			[pscustomobject]@{ Id = $script:ownerId; AdditionalProperties = @{ '@odata.type' = '#microsoft.graph.user' } }
+		)
+		$results = @(& $script:testScript -ServicePrincipalId $script:groupId -WhatIf -WarningAction SilentlyContinue)
+		$results.Status | Should -Be @('Manual review required', 'Would be created', 'Would be created')
+		$manualFields = @($results[0].PSObject.Properties.Name | Sort-Object)
+		foreach ($result in $results) {
+			@($result.PSObject.Properties.Name | Sort-Object) | Should -Be $manualFields
+		}
+		Test-Path (Join-Path $script:testScriptRoot 'logs') | Should -BeFalse
+		$script:fixture.HostMessages | Should -Contain '2 review target(s): 2 would be created, 0 skipped, 0 failed.'
+		$script:fixture.HostMessages | Should -Contain 'Directly assigned users in reviews that would be created: 1'
+		Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times 0 -Exactly
+	}
+
+	It 'skips an existing direct-user review without skipping ownership reporting' {
+		$script:fixture.Assignments = @([pscustomobject]@{ PrincipalType = 'User'; PrincipalId = $script:ownerId })
+		$script:fixture.ExistingNames = @("AR Demo app - Direct user assignments ($script:groupId)")
+		$script:fixture.ApplicationOwners = @(
+			[pscustomobject]@{ Id = $script:ownerId; AdditionalProperties = @{ '@odata.type' = '#microsoft.graph.user' } }
+		)
+		$results = @(& $script:testScript -ServicePrincipalId $script:groupId -Confirm:$false -WarningAction SilentlyContinue)
+		$results.Status | Should -Be @('Manual review required', 'Skipped')
+		$results[-1].Reason | Should -Match 'already exists'
+		Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times 0 -Exactly
+	}
+
+	It 'does not let a failed group hide direct user assignments' {
+		$script:fixture.Assignments += [pscustomobject]@{ PrincipalType = 'User'; PrincipalId = $script:ownerId }
+		Mock Get-MgGroup { throw 'Group unavailable.' }
+		$results = @(& $script:testScript -ServicePrincipalId $script:groupId -Confirm:$false)
+		$results.Status | Should -Be @('Failed', 'Created')
+		$results[-1].TargetType | Should -Be 'ApplicationDirectUsers'
+	}
+
+	It 'does not confuse a group named Direct user assignments with the application review' {
+		$script:fixture.Assignments += [pscustomobject]@{ PrincipalType = 'User'; PrincipalId = $script:ownerId }
+		Mock Get-MgGroup {
+			[pscustomobject]@{ DisplayName = 'Direct user assignments'; GroupTypes = @(); OnPremisesSyncEnabled = $false }
+		}
+		$results = @(& $script:testScript -ServicePrincipalId $script:groupId -Confirm:$false)
+		$results.Status | Should -Be @('Created', 'Created')
+		$results[0].ReviewName | Should -Not -Be $results[1].ReviewName
+	}
+
+	It 'preserves stage policy and recurrence for large direct-user reviews with <Type> routing' -TestCases @(
+		@{ Type = 'LineManager'; Stages = 3 },
+		@{ Type = 'ApplicationOwner'; Stages = 1 }
+	) {
+		param($Type, $Stages)
+		$script:fixture.Assignments = @(1..500 | ForEach-Object {
+			[pscustomobject]@{ PrincipalType = 'User'; PrincipalId = ([guid]::NewGuid().ToString()) }
+		})
+		$start = (Get-Date).Date
+		$result = & $script:testScript -ServicePrincipalId $script:groupId -ReviewerType $Type -Frequency Quarterly -EndDate $start.AddYears(1) -Confirm:$false
+		$result.Stages | Should -Be $Stages
+		$result.SubjectCount | Should -Be 500
+		$body = $script:fixture.Bodies[0]
+		$body.settings.instanceDurationInDays | Should -Be ($Stages * 5)
+		$body.settings.recurrence.pattern.interval | Should -Be 3
+		if ($Stages -eq 3) {
+			$body.stageSettings[0].reviewers | Should -HaveCount 0
+			$body.stageSettings[-1].reviewers[0].query | Should -Be "/users/$script:ownerId"
+		}
+		else {
+			$body.reviewers[0].query | Should -Be "/users/$script:ownerId"
+		}
+	}
+
+	It 'reports failed direct-user creation without adding users to the created total' {
+		$script:fixture.Assignments = @([pscustomobject]@{ PrincipalType = 'User'; PrincipalId = $script:ownerId })
+		$script:fixture.CreateFailure = $true
+		$result = & $script:testScript -ServicePrincipalId $script:groupId -Confirm:$false
+		$result.Status | Should -Be 'Failed'
+		$result.SubjectCount | Should -Be 1
+		$result.Reason | Should -Match 'Create review forbidden'
+		$script:fixture.HostMessages | Should -Contain 'Directly assigned users in created reviews: 0'
+		(Get-LogEntries)[-1].Failed | Should -Be 1
+	}
+
+	It 'fails discovery explicitly if owners cannot be read, before any reviews are created' {
+		Mock Get-MgServicePrincipalOwner { throw 'Owner access denied.' }
+		{ & $script:testScript -ServicePrincipalId $script:groupId -Confirm:$false } | Should -Throw '*Owner access denied*'
+		(Get-LogEntries)[-1].Event | Should -Be 'RunFailed'
+		Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times 0 -Exactly
+	}
+
 	It 'logs empty application discovery without creating a review' {
 		$script:fixture.Assignments = @()
 		$results = @(& $script:testScript -ServicePrincipalId $script:groupId -WarningAction SilentlyContinue)
 		$results | Should -HaveCount 0
 		(Get-LogEntries)[1].Total | Should -Be 0
-		$script:fixture.HostMessages[-2] | Should -Be '0 group(s): 0 created, 0 skipped, 0 failed.'
-		$script:fixture.HostMessages[-1] | Should -Be 'Total transitive members in created reviews: 0'
+		$script:fixture.HostMessages | Should -Contain '0 review target(s): 0 created, 0 skipped, 0 failed.'
+		$script:fixture.HostMessages | Should -Contain 'Total transitive members in created reviews: 0'
 	}
 
 	It 'logs discovery errors and stops' {

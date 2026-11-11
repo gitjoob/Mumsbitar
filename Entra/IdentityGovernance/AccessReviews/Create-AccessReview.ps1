@@ -1,10 +1,15 @@
 <#
 .SYNOPSIS
-Creates a single- or multi-stage access review of a group's direct members.
+Creates group-membership and direct application-user access reviews.
 .DESCRIPTION
 Choose GroupId, CsvPath, or ServicePrincipalId. ServicePrincipalId discovers
-groups assigned to an enterprise application, skips dynamic/empty-ownerless
-groups and existing review names, and requires explicit AppOwnerIds.
+assigned groups and directly assigned users of an enterprise application.
+It retains group-membership reviews and creates a separate application-access
+review for direct users. It also reports service-principal owners and non-user
+assignments (including service principals/managed identities) as Manual review
+required; these are not silently skipped or automatically revoked.
+Dynamic/empty-ownerless groups and existing review names are skipped.
+Application mode requires explicit AppOwnerIds for final sign-off.
 All modes use the same stage policy and application-owner sign-off.
 Connect to Microsoft Graph first.
 Requires AccessReview.ReadWrite.All, access to read the group and its member count,
@@ -14,7 +19,8 @@ ReviewerType selects ApplicationOwner (one stage), LineManager (default), or
 ResourceOwner. LineManager and ResourceOwner always precede application-owner
 sign-off, even for small groups. At 500 or more transitive members, an initial
 self-review stage is added to those two-stage reviews. ResourceOwner uses
-the group's user owners. Groups without user owners skip that stage unless
+the group's user owners, or service-principal user owners for direct-user
+application reviews. Resources without user owners skip that stage unless
 FallbackReviewerUserId is supplied. Application-owner sign-off (and self-review
 for large groups) is retained. Missing managers use FallbackReviewerUserId or
 the effective application owners when no fallback is supplied.
@@ -51,7 +57,11 @@ The access review is named with ReviewName. CsvPath creates one review per row o
 optional ReviewName and AppOwnerIds columns. A table of skipped or failed groups and a summary
 are shown at the end. All modes also show the total transitive directory-member
 count for created reviews (or would-be-created reviews with WhatIf), counting
-shared members separately per group. Reviews still cover direct membership.
+shared members separately per group. Group reviews still cover direct membership.
+Application mode reports direct-user totals and manual-review item counts
+separately. Ownership is not application assignment; reporting an owner does not
+create an ownership review. Application registration ownership, consent grants,
+and other access paths are outside this script's scope.
 If ReviewName is omitted, the name is
 derived from the group's display name with the $ReviewNamePrefix prefix, for
 example 'AR Demo Group'.
@@ -239,20 +249,86 @@ if ($creationLog.Enabled) {
 	Write-Host "Creation log: $($creationLog.Path)"
 }
 $existingReviewNames = @()
+$applicationOwners = @()
+$directAssignments = @()
 if ($PSCmdlet.ParameterSetName -eq 'Application') {
 	try {
 		$servicePrincipal = Get-MgServicePrincipal -ServicePrincipalId $ServicePrincipalId -Property id, displayName
 		$assignments = @(Get-MgServicePrincipalAppRoleAssignedTo -ServicePrincipalId $ServicePrincipalId -All)
+		$applicationOwners = @(Get-MgServicePrincipalOwner -ServicePrincipalId $ServicePrincipalId -All)
 		$targets = @($assignments | Where-Object PrincipalType -eq 'Group' |
 			Select-Object -ExpandProperty PrincipalId -Unique | ForEach-Object {
 				[pscustomobject]@{ GroupId = $_; ReviewName = $null; AppOwnerIds = $null }
 			})
+		$directAssignments = @($assignments | Where-Object PrincipalType -eq 'User')
+		if ($directAssignments.Count) {
+			$targets += [pscustomobject]@{
+				TargetType = 'ApplicationDirectUsers'
+				GroupId = $null
+				ReviewName = "$ReviewNamePrefix $($servicePrincipal.DisplayName) - Direct user assignments ($ServicePrincipalId)"
+				AppOwnerIds = $null
+			}
+		}
 		if ($targets.Count) {
 			$existingReviewNames = @(Get-MgIdentityGovernanceAccessReviewDefinition -All -Property id, displayName |
 				ForEach-Object { $_.DisplayName })
 		}
 		else {
-			Write-Warning "Application '$($servicePrincipal.DisplayName)' has no assigned groups."
+			Write-Warning "Application '$($servicePrincipal.DisplayName)' has no assigned groups or users."
+		}
+		$manualItems = @(
+			foreach ($owner in $applicationOwners) {
+				[pscustomobject]@{
+					TargetType = 'ServicePrincipalOwner'
+					PrincipalId = $owner.Id
+					PrincipalType = $owner.AdditionalProperties['@odata.type'] -replace '^#microsoft\.graph\.', ''
+					PrincipalDisplayName = $owner.AdditionalProperties['displayName']
+					AssignmentId = $null
+					AppRoleId = $null
+					Reason = 'Service-principal ownership is not covered by the application user-access review. Review ownership manually; no ownership changes are applied.'
+				}
+			}
+			foreach ($assignment in @($assignments | Where-Object { $_.PrincipalType -notin @('Group', 'User') })) {
+				[pscustomobject]@{
+					TargetType = 'ApplicationNonUserAssignment'
+					PrincipalId = $assignment.PrincipalId
+					PrincipalType = $assignment.PrincipalType
+					PrincipalDisplayName = $assignment.PrincipalDisplayName
+					AssignmentId = $assignment.Id
+					AppRoleId = $assignment.AppRoleId
+					Reason = 'Non-user application-role assignment is not covered by the application user-access review. Review this assignment manually; no access changes are applied.'
+				}
+			}
+		)
+		foreach ($item in $manualItems) {
+			$manualResult = [pscustomobject]@{
+				TargetType = $item.TargetType
+				ServicePrincipalId = "$ServicePrincipalId"
+				Target = $servicePrincipal.DisplayName
+				Group = $null
+				GroupId = $null
+				MemberCount = $null
+				SubjectCount = $null
+				PrincipalIds = @()
+				AssignmentIds = @()
+				ReviewName = $null
+				ReviewId = $null
+				ReviewerType = $null
+				Stages = $null
+				StageNames = $null
+				AppOwnerIds = @()
+				PrincipalId = $item.PrincipalId
+				PrincipalType = $item.PrincipalType
+				PrincipalDisplayName = $item.PrincipalDisplayName
+				AssignmentId = $item.AssignmentId
+				AppRoleId = $item.AppRoleId
+				Status = 'Manual review required'
+				Reason = $item.Reason
+			}
+			Write-Warning "$($item.TargetType) '$($item.PrincipalId)' on '$($servicePrincipal.DisplayName)': $($item.Reason)"
+			Write-AccessReviewLog -Log $creationLog -Entry @{ Event = 'ManualReviewRequired'; Result = $manualResult }
+			$results.Add($manualResult)
+			$manualResult
 		}
 	}
 	catch {
@@ -262,11 +338,23 @@ if ($PSCmdlet.ParameterSetName -eq 'Application') {
 }
 
 foreach ($target in $targets) {
-	$GroupId = $target.GroupId
+	$isApplicationReview = $target.TargetType -eq 'ApplicationDirectUsers'
+	if (-not $isApplicationReview) { $GroupId = $target.GroupId }
 	$result = [ordered]@{
+		TargetType = if ($isApplicationReview) { 'ApplicationDirectUsers' } else { 'GroupMembership' }
+		Target = "$GroupId"
+		ServicePrincipalId = if ($PSCmdlet.ParameterSetName -eq 'Application') { "$ServicePrincipalId" } else { $null }
 		Group = "$GroupId"
 		GroupId = "$GroupId"
 		MemberCount = $null
+		SubjectCount = $null
+		PrincipalIds = @()
+		AssignmentIds = @()
+		PrincipalId = $null
+		PrincipalType = $null
+		PrincipalDisplayName = $null
+		AssignmentId = $null
+		AppRoleId = $null
 		ReviewName = $null
 		ReviewId = $null
 		ReviewerType = $ReviewerType
@@ -300,23 +388,57 @@ foreach ($target in $targets) {
 			@{ query = "/users/$FallbackReviewerUserId"; queryType = 'MicrosoftGraph' }
 		}
 		else { $applicationOwnerReviewers })
-		try {
-			$group = Get-MgGroup -GroupId $GroupId -Property id, displayName, onPremisesSyncEnabled, groupTypes
-			$memberCount = [int](Get-MgGroupTransitiveMemberCount -GroupId $GroupId -ConsistencyLevel eventual)
-			$result.MemberCount = $memberCount
+		if ($isApplicationReview) {
+			$memberCount = @($directAssignments.PrincipalId | Select-Object -Unique).Count
+			$result.SubjectCount = $memberCount
+			$result.PrincipalIds = @($directAssignments.PrincipalId | Select-Object -Unique)
+			$result.AssignmentIds = @($directAssignments | ForEach-Object { $_.Id } | Where-Object { $_ } | Select-Object -Unique)
+			$result.Group = $null
+			$result.GroupId = $null
+			$result.Target = $servicePrincipal.DisplayName
+			$isSyncedGroup = $false
+			$reviewDisplayName = $target.ReviewName
+			$resourceDescription = "application $($servicePrincipal.DisplayName) (direct user assignments)"
+			$reviewScope = @{
+				'@odata.type' = '#microsoft.graph.principalResourceMembershipsScope'
+				principalScopes = @(@{
+					'@odata.type' = '#microsoft.graph.accessReviewQueryScope'
+					query = '/v1.0/users'
+					queryType = 'MicrosoftGraph'
+				})
+				resourceScopes = @(@{
+					'@odata.type' = '#microsoft.graph.accessReviewQueryScope'
+					query = "/v1.0/servicePrincipals/$ServicePrincipalId"
+					queryType = 'MicrosoftGraph'
+				})
+			}
 		}
-		catch {
-			throw "Unable to read group '$GroupId' or its member count. Check that the group exists and that the signed-in account can read it. $($_.Exception.Message)"
-		}
+		else {
+			try {
+				$group = Get-MgGroup -GroupId $GroupId -Property id, displayName, onPremisesSyncEnabled, groupTypes
+				$memberCount = [int](Get-MgGroupTransitiveMemberCount -GroupId $GroupId -ConsistencyLevel eventual)
+				$result.MemberCount = $memberCount
+			}
+			catch {
+				throw "Unable to read group '$GroupId' or its member count. Check that the group exists and that the signed-in account can read it. $($_.Exception.Message)"
+			}
 
-		$isSyncedGroup = $group.OnPremisesSyncEnabled -eq $true
-		$result.Group = $group.displayName
-		$reviewDisplayName = if ($target.ReviewName) { $target.ReviewName.Trim() }
-			elseif ($PSCmdlet.ParameterSetName -eq 'Application') { "$ReviewNamePrefix $($servicePrincipal.DisplayName) - $($group.DisplayName)" }
-			else { "$ReviewNamePrefix $($group.DisplayName)".Trim() }
+			$isSyncedGroup = $group.OnPremisesSyncEnabled -eq $true
+			$result.Group = $group.displayName
+			$result.Target = $group.DisplayName
+			$reviewDisplayName = if ($target.ReviewName) { $target.ReviewName.Trim() }
+				elseif ($PSCmdlet.ParameterSetName -eq 'Application') { "$ReviewNamePrefix $($servicePrincipal.DisplayName) - $($group.DisplayName)" }
+				else { "$ReviewNamePrefix $($group.DisplayName)".Trim() }
+			$resourceDescription = "group $($group.DisplayName)"
+			$reviewScope = @{
+				'@odata.type' = '#microsoft.graph.accessReviewQueryScope'
+				query = "/groups/$GroupId/members"
+				queryType = 'MicrosoftGraph'
+			}
+		}
 		$result.ReviewName = $reviewDisplayName
 		if ($PSCmdlet.ParameterSetName -eq 'Application') {
-			if ($group.GroupTypes -contains 'DynamicMembership') {
+			if (-not $isApplicationReview -and $group.GroupTypes -contains 'DynamicMembership') {
 				$result.Status = 'Skipped'
 				$result.Reason = 'Dynamic membership group'
 				continue
@@ -326,7 +448,7 @@ foreach ($target in $targets) {
 				$result.Reason = 'Access review with the same name already exists'
 				continue
 			}
-			if ($memberCount -eq 0) {
+			if (-not $isApplicationReview -and $memberCount -eq 0) {
 				$userOwnerCount = @(Get-MgGroupOwner -GroupId $GroupId -All -Property id |
 					Where-Object { $_.AdditionalProperties['@odata.type'] -eq '#microsoft.graph.user' }).Count
 				if ($userOwnerCount -eq 0) {
@@ -353,24 +475,29 @@ foreach ($target in $targets) {
 			fallbackReviewers = $fallbackReviewers
 		}
 		if ($ReviewerType -eq 'ResourceOwner') {
-			$userOwners = @(Get-MgGroupOwner -GroupId $GroupId -All -Property id |
-				Where-Object { $_.AdditionalProperties['@odata.type'] -eq '#microsoft.graph.user' })
+			$userOwners = @(if ($isApplicationReview) {
+				$applicationOwners | Where-Object { $_.AdditionalProperties['@odata.type'] -eq '#microsoft.graph.user' }
+			}
+			else {
+				Get-MgGroupOwner -GroupId $GroupId -All -Property id |
+					Where-Object { $_.AdditionalProperties['@odata.type'] -eq '#microsoft.graph.user' }
+			})
 			$ownerReviewers = @(foreach ($owner in $userOwners) {
 				@{ query = "/users/$($owner.Id)"; queryType = 'MicrosoftGraph' }
 			})
 			$selectedReviewerStage = @{
-				name = 'Resource owners (group owners)'
+				name = if ($isApplicationReview) { 'Resource owners (service-principal owners)' } else { 'Resource owners (group owners)' }
 				reviewers = $ownerReviewers
 				fallbackReviewers = $fallbackReviewers
 			}
 			if (-not $ownerReviewers.Count) {
 				if ($FallbackReviewerUserId -ne [guid]::Empty) {
-					Write-Warning "Group '$($group.displayName)' has no user owners. Using fallback reviewer '$FallbackReviewerUserId' before application-owner sign-off."
-					$selectedReviewerStage.name = 'Fallback reviewer (no group user owners)'
+					Write-Warning "The $resourceDescription has no user owners. Using fallback reviewer '$FallbackReviewerUserId' before application-owner sign-off."
+					$selectedReviewerStage.name = if ($isApplicationReview) { 'Fallback reviewer (no service-principal user owners)' } else { 'Fallback reviewer (no group user owners)' }
 					$selectedReviewerStage.reviewers = @($fallbackReviewers)
 				}
 				else {
-					Write-Warning "Group '$($group.displayName)' has no user owners and no fallback reviewer is configured. Skipping the ResourceOwner stage; application-owner sign-off is retained."
+					Write-Warning "The $resourceDescription has no user owners and no fallback reviewer is configured. Skipping the ResourceOwner stage; application-owner sign-off is retained."
 					$selectedReviewerStage = $null
 				}
 			}
@@ -386,7 +513,7 @@ foreach ($target in $targets) {
 			$applicationOwnerQueries = @($applicationOwnerReviewers.query | Sort-Object -Unique)
 			if ($selectedQueries.Count -gt 0 -and
 				-not @(Compare-Object -ReferenceObject $selectedQueries -DifferenceObject $applicationOwnerQueries).Count) {
-				Write-Warning "Group '$($group.displayName)' has identical ResourceOwner/fallback and application-owner reviewers. Combining them into the application-owner stage."
+				Write-Warning "The $resourceDescription has identical ResourceOwner/fallback and application-owner reviewers. Combining them into the application-owner stage."
 				$selectedReviewerStage = $null
 			}
 		}
@@ -400,7 +527,8 @@ foreach ($target in $targets) {
 		)
 		$stageCount = $stages.Count
 		$result.Stages = $stageCount
-		Write-Verbose "Group '$($group.displayName)' has $memberCount transitive members. Using $stageCount stage(s)."
+		$countDescription = if ($isApplicationReview) { "$memberCount directly assigned users" } else { "$memberCount transitive members" }
+		Write-Verbose "The $resourceDescription has $countDescription. Using $stageCount stage(s)."
 
 		$totalDurationInDays = $stageCount * $StageDurationInDays
 
@@ -412,7 +540,7 @@ foreach ($target in $targets) {
 			throw "EndDate must allow at least $totalDurationInDays days for the review to complete."
 		}
 
-		$descriptionForReviewers = "Confirm whether each user still needs access to the group $($group.displayName)."
+		$descriptionForReviewers = "Confirm whether each user still needs access to the $resourceDescription."
 		if ($ReviewerMessage.Trim()) {
 			$descriptionForReviewers = "$descriptionForReviewers $($ReviewerMessage.Trim())"
 		}
@@ -422,18 +550,17 @@ foreach ($target in $targets) {
 
 		$params = @{
 			displayName = $reviewDisplayName
-			descriptionForAdmins = if ($isSyncedGroup) {
+			descriptionForAdmins = if ($isApplicationReview) {
+				"Review direct user assignments to the application $($servicePrincipal.DisplayName) ($stageCount stage(s), $countDescription). Denied access removes the user's application assignment, not group membership or ownership."
+			}
+			elseif ($isSyncedGroup) {
 				"Review direct membership of the group $($group.displayName) ($stageCount stage(s), $memberCount transitive members). The group is synchronized from on-premises Active Directory; apply denied access in Active Directory."
 			}
 			else {
 				"Review direct membership of the group $($group.displayName) ($stageCount stage(s), $memberCount transitive members)."
 			}
 			descriptionForReviewers = $descriptionForReviewers
-			scope = @{
-				"@odata.type" = "#microsoft.graph.accessReviewQueryScope"
-				query = "/groups/$GroupId/members"
-				queryType = "MicrosoftGraph"
-			}
+			scope = $reviewScope
 			settings = @{
 				mailNotificationsEnabled = $true
 				reminderNotificationsEnabled = $true
@@ -513,7 +640,7 @@ foreach ($target in $targets) {
 		$decisionHandling = if ($isSyncedGroup) { 'recorded decisions only (group synchronized from on-premises)' } else { 'automatic removal of denied access' }
 
 		if ($PSCmdlet.ShouldProcess(
-			"Group $($group.displayName) ($GroupId, $memberCount transitive members)",
+			"$resourceDescription ($(if ($isApplicationReview) { $ServicePrincipalId } else { $GroupId }), $countDescription)",
 			"Create $stageCount-stage access review '$reviewDisplayName' ($stageDescription) with notifications and $decisionHandling"
 		)) {
 			$createdReview = New-MgIdentityGovernanceAccessReviewDefinition -BodyParameter $params -ErrorAction Stop
@@ -538,7 +665,10 @@ foreach ($target in $targets) {
 		}
 	}
 	finally {
-		Write-AccessReviewLog -Log $creationLog -Entry @{ Event = 'GroupResult'; Result = [pscustomobject]$result }
+		Write-AccessReviewLog -Log $creationLog -Entry @{
+			Event = if ($isApplicationReview) { 'ApplicationResult' } else { 'GroupResult' }
+			Result = [pscustomobject]$result
+		}
 		$resultObject = [pscustomobject]$result
 		$results.Add($resultObject)
 		$resultObject
@@ -552,6 +682,7 @@ Write-AccessReviewLog -Log $creationLog -Entry @{
 	Previewed = @($results | Where-Object Status -eq 'Would be created').Count
 	Failed = @($results | Where-Object Status -eq 'Failed').Count
 	Skipped = @($results | Where-Object Status -eq 'Skipped').Count
+	ManualReviewRequired = @($results | Where-Object Status -eq 'Manual review required').Count
 }
 
 $createdStatus = if ($WhatIfPreference) { 'Would be created' } else { 'Created' }
@@ -562,11 +693,19 @@ if ($PSCmdlet.ParameterSetName -ne 'Single') {
 	$skippedCount = @($results | Where-Object Status -eq 'Skipped').Count
 	$notCreated = @($results | Where-Object { $_.Status -in 'Failed', 'Skipped' })
 	if ($notCreated) {
-		Write-Host ($notCreated | Select-Object Group, Status, Reason | Format-Table -AutoSize -Wrap | Out-String -Width 200)
+		Write-Host ($notCreated | Select-Object Target, Status, Reason | Format-Table -AutoSize -Wrap | Out-String -Width 200)
 	}
 
-	Write-Host "$($results.Count) group(s): $createdCount $($createdStatus.ToLower()), $skippedCount skipped, $failedCount failed."
+	$reviewTargetCount = @($results | Where-Object Status -ne 'Manual review required').Count
+	$targetLabel = if ($PSCmdlet.ParameterSetName -eq 'Application') { 'review target(s)' } else { 'group(s)' }
+	Write-Host "$reviewTargetCount ${targetLabel}: $createdCount $($createdStatus.ToLower()), $skippedCount skipped, $failedCount failed."
 }
 $totalMemberCount = [long](($createdResults | Measure-Object -Property MemberCount -Sum).Sum)
 $reviewSummary = if ($WhatIfPreference) { 'reviews that would be created' } else { 'created reviews' }
 Write-Host "Total transitive members in ${reviewSummary}: $totalMemberCount"
+if ($PSCmdlet.ParameterSetName -eq 'Application') {
+	$directUserCount = [long](($createdResults | Where-Object TargetType -eq 'ApplicationDirectUsers' | Measure-Object SubjectCount -Sum).Sum)
+	$manualReviewCount = @($results | Where-Object Status -eq 'Manual review required').Count
+	Write-Host "Directly assigned users in ${reviewSummary}: $directUserCount"
+	Write-Host "Manual review required: $manualReviewCount ownership/assignment item(s). These are not covered by the created reviews."
+}
