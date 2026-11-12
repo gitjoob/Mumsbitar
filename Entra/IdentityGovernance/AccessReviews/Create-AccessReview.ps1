@@ -52,6 +52,9 @@ Unanswered reviews default to Deny and denied access is automatically removed.
 Groups synchronized from on-premises Active Directory cannot be changed by the
 access review. For those groups, decisions are only recorded and must be
 applied in Active Directory.
+ResourceOwner routing for synchronized groups uses FallbackReviewerUserId, or
+the effective application owners if no explicit fallback is supplied, rather
+than group owners. The usual stage thresholds and merge rules still apply.
 Stage durations default to five days each. Override SelfReviewDurationInDays,
 SelectedReviewerDurationInDays (managers, resource owners or fallback), and
 ApplicationOwnerDurationInDays independently. Only included stages contribute
@@ -73,7 +76,7 @@ separately. Ownership is not application assignment; reporting an owner does not
 create an ownership review. Application registration ownership, consent grants,
 and other access paths are outside this script's scope.
 If ReviewName is omitted, the name is
-derived from the group's display name with the $ReviewNamePrefix prefix, for
+derived from the group's display name with the ReviewNamePrefix parameter (default AR), for
 example 'AR Demo Group'.
 .EXAMPLE
 .\Create-AccessReview.ps1 -CsvPath '.\groups.csv' -WhatIf
@@ -99,6 +102,8 @@ param(
 	[Parameter(ParameterSetName = 'Single')]
 	[ValidateNotNullOrEmpty()]
 	[string]$ReviewName,
+	[AllowEmptyString()]
+	[string]$ReviewNamePrefix = 'AR',
 	[Parameter(Mandatory, ParameterSetName = 'Csv')]
 	[ValidateNotNullOrEmpty()]
 	[string]$CsvPath,
@@ -121,9 +126,6 @@ param(
 	[datetime]$StartDate = (Get-Date).Date,
 	[datetime]$EndDate = (Get-Date).Date.AddDays(1 - (Get-Date).Day).AddMonths(1).AddDays(-1)
 )
-
-# Prefix for the access review name when ReviewName is not provided.
-$ReviewNamePrefix = 'AR'
 
 $SelfReviewStageThreshold = 500
 
@@ -459,7 +461,7 @@ foreach ($target in $targets) {
 			$result.Group = $group.displayName
 			$result.Target = $group.DisplayName
 			$reviewDisplayName = if ($target.ReviewName) { $target.ReviewName.Trim() }
-				elseif ($PSCmdlet.ParameterSetName -eq 'Application') { "$ReviewNamePrefix $($servicePrincipal.DisplayName) - $($group.DisplayName)" }
+				elseif ($PSCmdlet.ParameterSetName -eq 'Application') { "$ReviewNamePrefix $($servicePrincipal.DisplayName) - $($group.DisplayName)".Trim() }
 				else { "$ReviewNamePrefix $($group.DisplayName)".Trim() }
 			$resourceDescription = "group $($group.DisplayName)"
 			$reviewScope = @{
@@ -510,8 +512,10 @@ foreach ($target in $targets) {
 				$applicationOwners | Where-Object { $_.AdditionalProperties['@odata.type'] -eq '#microsoft.graph.user' }
 			}
 			else {
-				Get-MgGroupOwner -GroupId $GroupId -All -Property id |
-					Where-Object { $_.AdditionalProperties['@odata.type'] -eq '#microsoft.graph.user' }
+				if (-not $isSyncedGroup) {
+					Get-MgGroupOwner -GroupId $GroupId -All -Property id |
+						Where-Object { $_.AdditionalProperties['@odata.type'] -eq '#microsoft.graph.user' }
+				}
 			})
 			$ownerReviewers = @(foreach ($owner in $userOwners) {
 				@{ query = "/users/$($owner.Id)"; queryType = 'MicrosoftGraph' }
@@ -522,7 +526,12 @@ foreach ($target in $targets) {
 				reviewers = $ownerReviewers
 				fallbackReviewers = $fallbackReviewers
 			}
-			if (-not $ownerReviewers.Count) {
+			if ($isSyncedGroup) {
+				Write-Warning "The $resourceDescription is synchronized from on-premises. Using fallback reviewers instead of group owners."
+				$selectedReviewerStage.name = 'Fallback reviewer (synced group)'
+				$selectedReviewerStage.reviewers = @($fallbackReviewers)
+			}
+			elseif (-not $ownerReviewers.Count) {
 				if ($FallbackReviewerUserId -ne [guid]::Empty) {
 					Write-Warning "The $resourceDescription has no user owners. Using fallback reviewer '$FallbackReviewerUserId' before application-owner sign-off."
 					$selectedReviewerStage.name = if ($isApplicationReview) { 'Fallback reviewer (no service-principal user owners)' } else { 'Fallback reviewer (no group user owners)' }
@@ -566,7 +575,10 @@ foreach ($target in $targets) {
 		$countDescription = if ($isApplicationReview) { "$memberCount directly assigned users" } else { "$memberCount transitive members" }
 		Write-Verbose "The $resourceDescription has $countDescription. Using $stageCount stage(s)."
 
-		$totalDurationInDays = ($stages | Measure-Object -Property durationInDays -Sum).Sum
+		$totalDurationInDays = 0
+		foreach ($stage in $stages) {
+			$totalDurationInDays += $stage.durationInDays
+		}
 
 		if ($StartDate.Date -lt (Get-Date).Date) {
 			throw 'StartDate must be today or later.'

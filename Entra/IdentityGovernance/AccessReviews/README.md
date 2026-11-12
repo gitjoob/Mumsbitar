@@ -17,6 +17,10 @@ Choose exactly one:
   or GUID. With only direct users, this is the only native review created. Owners and non-user
   assignments are explicitly reported for manual review (see below).
 
+Use `-ReviewNamePrefix 'Custom'` in any mode to change the generated-name prefix
+(default `AR`), or `-ReviewNamePrefix ''` for no prefix. Explicit `-ReviewName`
+and CSV `ReviewName` values are used unchanged.
+
 Connect to Graph first. Requires `Microsoft.Graph.Authentication`,
 `Microsoft.Graph.Groups` and `Microsoft.Graph.Identity.Governance`;
 application discovery also requires `Microsoft.Graph.Applications`.
@@ -238,6 +242,10 @@ notification recipients (user/group IDs), or leave it empty.
 
 Synchronized groups are report-only: decisions are recorded but removal must
 be performed in on-premises Active Directory. Automatic apply is disabled.
+For `ResourceOwner` routing, synchronized groups use `-FallbackReviewerUserId`
+instead of querying group owners. Without an explicit fallback, the effective
+`AppOwnerIds` are used. Identical reviewer stages still merge unless
+`-ForceTwoStage` is set. The below-150 default and empty-group skips are unchanged.
 
 Application-discovery mode skips dynamic groups, empty groups regardless of
 owners, and existing review names.

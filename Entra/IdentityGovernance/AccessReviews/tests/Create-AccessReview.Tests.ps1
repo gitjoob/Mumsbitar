@@ -184,6 +184,84 @@ Describe 'Unified access review creation and local logging' {
 		Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times 0 -Exactly
 	}
 
+	It 'accepts a review-name prefix in <Mode> mode' -TestCases @(
+		@{ Mode = 'Single' }, @{ Mode = 'Csv' }, @{ Mode = 'Application' }
+	) {
+		param($Mode)
+		$parameters = switch ($Mode) {
+			'Single' { @{ GroupId = $script:groupId } }
+			'Csv' {
+				$csv = Join-Path $script:testScriptRoot 'prefix.csv'
+				"GroupId`n$script:groupId" | Set-Content $csv
+				@{ CsvPath = $csv }
+			}
+			'Application' {
+				$script:fixture.Assignments += [pscustomobject]@{ PrincipalType = 'User'; PrincipalId = $script:ownerId }
+				@{ ServicePrincipalId = $script:groupId }
+			}
+		}
+		$results = @(& $script:testScript @parameters -ReviewNamePrefix 'Custom' -Confirm:$false)
+		if ($Mode -eq 'Application') {
+			$results.ReviewName | Should -Be @('Custom Demo app - Demo group', 'Custom Demo app')
+		}
+		else { $results[0].ReviewName | Should -Be 'Custom Demo group' }
+		(Get-LogEntries)[0].Syntax | Should -Match "-ReviewNamePrefix 'Custom'"
+	}
+
+	It 'allows an empty prefix without a leading space' {
+		$result = & $script:testScript -GroupId $script:groupId -ReviewNamePrefix '' -Confirm:$false
+		$result.ReviewName | Should -Be 'Demo group'
+	}
+
+	It 'preserves explicit review names when a prefix is supplied' {
+		$result = & $script:testScript -GroupId $script:groupId -ReviewName 'Explicit review' -ReviewNamePrefix 'Custom' -Confirm:$false
+		$result.ReviewName | Should -Be 'Explicit review'
+	}
+
+	It 'sums stage durations without measuring hashtable properties' {
+		Mock Measure-Object { throw 'Hashtable property measurement is unavailable.' } -ParameterFilter {
+			$Property -contains 'durationInDays'
+		}
+		$result = & $script:testScript -GroupId $script:groupId -SelectedReviewerDurationInDays 7 -ApplicationOwnerDurationInDays 4 -Confirm:$false
+		$result.Stages | Should -Be 2
+		$script:fixture.Bodies[0].settings.instanceDurationInDays | Should -Be 11
+	}
+
+	It 'uses fallback reviewers for synced groups without querying owners (explicit: <Explicit>, forced: <Forced>, count: <Count>)' -TestCases @(
+		@{ Explicit = $true; Forced = $false; Count = 150; Stages = 2 },
+		@{ Explicit = $false; Forced = $false; Count = 150; Stages = 1 },
+		@{ Explicit = $false; Forced = $true; Count = 22; Stages = 2 },
+		@{ Explicit = $true; Forced = $true; Count = 22; Stages = 2 },
+		@{ Explicit = $true; Forced = $false; Count = 500; Stages = 3 }
+	) {
+		param($Explicit, $Forced, $Count, $Stages)
+		$script:fixture.Synced = $true
+		$script:fixture.Count = $Count
+		$script:fixture.OwnerFailure = $true
+		$parameters = @{}
+		$fallbackId = $script:ownerId
+		if ($Explicit) {
+			$parameters.FallbackReviewerUserId = $script:reviewId
+			$fallbackId = $script:reviewId
+		}
+		$result = & $script:testScript -GroupId $script:groupId -ReviewerType ResourceOwner -ForceTwoStage:$Forced @parameters `
+			-SelectedReviewerDurationInDays 7 -ApplicationOwnerDurationInDays 4 -Confirm:$false -WarningAction SilentlyContinue
+		$result.Stages | Should -Be $Stages
+		$body = $script:fixture.Bodies[0]
+		$body.settings.autoApplyDecisionsEnabled | Should -BeFalse
+		$body.settings.ContainsKey('applyActions') | Should -BeFalse
+		if ($Stages -gt 1) {
+			$body.stageSettings[-2].reviewers[0].query | Should -Be "/users/$fallbackId"
+			$body.stageSettings[-2].durationInDays | Should -Be 7
+			$result.StageNames | Should -Match 'Fallback reviewer \(synced group\)'
+		}
+		else {
+			$body.reviewers[0].query | Should -Be "/users/$script:ownerId"
+			$body.settings.instanceDurationInDays | Should -Be 4
+		}
+		Should -Invoke Get-MgGroupOwner -Times 0 -Exactly
+	}
+
 	It 'preserves default manager routing at the two-stage threshold' {
 		$result = & $script:testScript -GroupId $script:groupId -Confirm:$false
 		$result.Status | Should -Be 'Created'
