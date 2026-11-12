@@ -18,6 +18,11 @@ and an appropriate access review license.
 ReviewerType selects ApplicationOwner (one stage), LineManager (default), or
 ResourceOwner. Below 150 members, only application owners review. At 150 or more,
 LineManager and ResourceOwner precede application-owner sign-off.
+Use ForceTwoStage to retain that first reviewer stage below 150 members.
+It also keeps identical reviewer sets as separate stages. ResourceOwner requires
+user owners or FallbackReviewerUserId when forced; otherwise that target fails.
+ForceTwoStage cannot be combined with ApplicationOwner. Empty-group skips and
+the additional self-review stage at 500+ members are unchanged.
 Empty groups are skipped, regardless of owners. At 500 or more transitive members, an initial
 self-review stage is added to those two-stage reviews. ResourceOwner uses
 the group's user owners, or service-principal user owners for direct-user
@@ -47,7 +52,11 @@ Unanswered reviews default to Deny and denied access is automatically removed.
 Groups synchronized from on-premises Active Directory cannot be changed by the
 access review. For those groups, decisions are only recorded and must be
 applied in Active Directory.
-Each stage lasts $StageDurationInDays days. Frequency defaults to OneTime; use
+Stage durations default to five days each. Override SelfReviewDurationInDays,
+SelectedReviewerDurationInDays (managers, resource owners or fallback), and
+ApplicationOwnerDurationInDays independently. Only included stages contribute
+to the total; merged stages use the application-owner duration.
+Frequency defaults to OneTime; use
 Frequency to select Weekly, Monthly, Quarterly, SemiAnnual, or Annual recurrence.
 For recurring reviews, the series ends at EndDate, which defaults to the end of
 the current month; provide a later date to allow subsequent occurrences.
@@ -77,6 +86,8 @@ example 'AR Demo Group'.
 .EXAMPLE
 .\Create-AccessReview.ps1 -CsvPath '.\groups.csv' -ReviewerType ResourceOwner -WhatIf
 .EXAMPLE
+.\Create-AccessReview.ps1 -GroupId '11111111-1111-1111-1111-111111111111' -AppOwnerIds '22222222-2222-2222-2222-222222222222' -ReviewerType ResourceOwner -ForceTwoStage -WhatIf
+.EXAMPLE
 .\Create-AccessReview.ps1 -CsvPath '.\groups.csv' -AppOwnerIds '22222222-2222-2222-2222-222222222222' -Frequency Quarterly -EndDate '2027-10-31' -WhatIf
 .EXAMPLE
 .\Create-AccessReview.ps1 -ServicePrincipalId '33333333-3333-3333-3333-333333333333' -AppOwnerIds '22222222-2222-2222-2222-222222222222' -ReviewerType ResourceOwner -WhatIf
@@ -96,6 +107,13 @@ param(
 	[Alias('ReviewType')]
 	[ValidateSet('ApplicationOwner', 'LineManager', 'ResourceOwner')]
 	[string]$ReviewerType = 'LineManager',
+	[switch]$ForceTwoStage,
+	[ValidateRange(1, [int]::MaxValue)]
+	[int]$SelfReviewDurationInDays = 5,
+	[ValidateRange(1, [int]::MaxValue)]
+	[int]$SelectedReviewerDurationInDays = 5,
+	[ValidateRange(1, [int]::MaxValue)]
+	[int]$ApplicationOwnerDurationInDays = 5,
 	[guid[]]$AppOwnerIds = @(),
 	[guid]$FallbackReviewerUserId = [guid]::Empty,
 	[ValidateSet('OneTime', 'Weekly', 'Monthly', 'Quarterly', 'SemiAnnual', 'Annual')]
@@ -119,12 +137,13 @@ $AdditionalNotificationRecipients = @(
 	# @{ Type = 'Group'; Id = '00000000-0000-0000-0000-000000000000' }
 )
 
-$StageDurationInDays = 5
-
 # Decisions passed on from one stage to the next in multi-stage reviews.
 $DecisionsThatMoveToNextStage = @('Approve', 'NotReviewed')
 
 $ErrorActionPreference = 'Stop'
+if ($ForceTwoStage -and $ReviewerType -eq 'ApplicationOwner') {
+	throw 'ForceTwoStage requires ReviewerType LineManager or ResourceOwner.'
+}
 $invocationParameters = @{} + $PSBoundParameters
 Import-Module Microsoft.Graph.Authentication
 Import-Module Microsoft.Graph.Groups
@@ -240,6 +259,10 @@ $results = [System.Collections.Generic.List[object]]::new()
 . (Join-Path $PSScriptRoot 'AccessReview.Logging.ps1')
 $creationLog = Start-AccessReviewLog -ScriptPath $PSCommandPath -Parameters $invocationParameters -Enabled (-not $WhatIfPreference) -Settings @{
 	ReviewerType = $ReviewerType
+	ForceTwoStage = [bool]$ForceTwoStage
+	SelfReviewDurationInDays = $SelfReviewDurationInDays
+	SelectedReviewerDurationInDays = $SelectedReviewerDurationInDays
+	ApplicationOwnerDurationInDays = $ApplicationOwnerDurationInDays
 	FallbackReviewerUserId = if ($FallbackReviewerUserId -ne [guid]::Empty) { "$FallbackReviewerUserId" } else { $null }
 	StartDate = $StartDate.ToString('o')
 	EndDate = $EndDate.ToString('o')
@@ -468,9 +491,10 @@ foreach ($target in $targets) {
 			Write-Warning "Group '$($group.displayName)' is synchronized from on-premises Active Directory. Decisions will be recorded but not applied; remove denied access in Active Directory."
 		}
 
-		$selfReviewStage = @{ name = 'Self-review'; reviewers = @(); fallbackReviewers = @() }
+		$selfReviewStage = @{ name = 'Self-review'; durationInDays = $SelfReviewDurationInDays; reviewers = @(); fallbackReviewers = @() }
 		$selectedReviewerStage = @{
 			name = 'Line managers'
+			durationInDays = $SelectedReviewerDurationInDays
 			reviewers = @(
 				@{
 					query = './manager'
@@ -480,7 +504,8 @@ foreach ($target in $targets) {
 			)
 			fallbackReviewers = $fallbackReviewers
 		}
-		if ($ReviewerType -eq 'ResourceOwner' -and $memberCount -ge 150) {
+		$includeSelectedReviewerStage = $memberCount -ge 150 -or $ForceTwoStage
+		if ($ReviewerType -eq 'ResourceOwner' -and $includeSelectedReviewerStage) {
 			$userOwners = @(if ($isApplicationReview) {
 				$applicationOwners | Where-Object { $_.AdditionalProperties['@odata.type'] -eq '#microsoft.graph.user' }
 			}
@@ -493,6 +518,7 @@ foreach ($target in $targets) {
 			})
 			$selectedReviewerStage = @{
 				name = if ($isApplicationReview) { 'Resource owners (service-principal owners)' } else { 'Resource owners (group owners)' }
+				durationInDays = $SelectedReviewerDurationInDays
 				reviewers = $ownerReviewers
 				fallbackReviewers = $fallbackReviewers
 			}
@@ -502,6 +528,9 @@ foreach ($target in $targets) {
 					$selectedReviewerStage.name = if ($isApplicationReview) { 'Fallback reviewer (no service-principal user owners)' } else { 'Fallback reviewer (no group user owners)' }
 					$selectedReviewerStage.reviewers = @($fallbackReviewers)
 				}
+				elseif ($ForceTwoStage) {
+					throw "The $resourceDescription has no user owners. ForceTwoStage requires user owners or FallbackReviewerUserId."
+				}
 				else {
 					Write-Warning "The $resourceDescription has no user owners and no fallback reviewer is configured. Skipping the ResourceOwner stage; application-owner sign-off is retained."
 					$selectedReviewerStage = $null
@@ -510,11 +539,12 @@ foreach ($target in $targets) {
 		}
 		$applicationOwnerStage = @{
 			name = 'Application owners'
+			durationInDays = $ApplicationOwnerDurationInDays
 			reviewers = @($applicationOwnerReviewers)
 			fallbackReviewers = $fallbackReviewers
 		}
 
-		if ($ReviewerType -eq 'ResourceOwner' -and $selectedReviewerStage) {
+		if (-not $ForceTwoStage -and $ReviewerType -eq 'ResourceOwner' -and $selectedReviewerStage) {
 			$selectedQueries = @($selectedReviewerStage.reviewers.query | Sort-Object -Unique)
 			$applicationOwnerQueries = @($applicationOwnerReviewers.query | Sort-Object -Unique)
 			if ($selectedQueries.Count -gt 0 -and
@@ -525,7 +555,7 @@ foreach ($target in $targets) {
 		}
 
 		$stages = @(
-			if ($ReviewerType -ne 'ApplicationOwner' -and $memberCount -ge 150) {
+			if ($ReviewerType -ne 'ApplicationOwner' -and $includeSelectedReviewerStage) {
 				if ($memberCount -ge $SelfReviewStageThreshold) { $selfReviewStage }
 				if ($selectedReviewerStage) { $selectedReviewerStage }
 			}
@@ -536,7 +566,7 @@ foreach ($target in $targets) {
 		$countDescription = if ($isApplicationReview) { "$memberCount directly assigned users" } else { "$memberCount transitive members" }
 		Write-Verbose "The $resourceDescription has $countDescription. Using $stageCount stage(s)."
 
-		$totalDurationInDays = $stageCount * $StageDurationInDays
+		$totalDurationInDays = ($stages | Measure-Object -Property durationInDays -Sum).Sum
 
 		if ($StartDate.Date -lt (Get-Date).Date) {
 			throw 'StartDate must be today or later.'
@@ -622,7 +652,7 @@ foreach ($target in $targets) {
 				for ($i = 0; $i -lt $stages.Count; $i++) {
 					$stageSetting = @{
 						stageId = [string]($i + 1)
-						durationInDays = $StageDurationInDays
+						durationInDays = $stages[$i].durationInDays
 						recommendationsEnabled = $true
 						reviewers = @($stages[$i].reviewers)
 					}

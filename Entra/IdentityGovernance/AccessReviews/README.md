@@ -148,19 +148,38 @@ Applications without direct users do not get a direct-user review.
 | `LineManager` | Application owners | Managers -> Application owners | Self-review -> Managers -> Application owners |
 | `ResourceOwner` | Application owners | Group user owners -> Application owners | Self-review -> Group user owners -> Application owners |
 
+For special cases, use `-ForceTwoStage` with `-ReviewerType ResourceOwner` or
+`LineManager` to include the selected reviewer stage even below 150 members:
+
+```powershell
+.\Create-AccessReview.ps1 -GroupId '<group Object ID>' -AppOwnerIds '<application-owner user Object ID>' `
+    -ReviewerType ResourceOwner -ForceTwoStage -WhatIf
+```
+
+For a 22-member group, this creates **group owners -> application owners** instead
+of application owners only. Without the switch, the defaults above are unchanged.
+The switch applies to single-group, CSV, and application modes. It forces at least
+two stages, retaining self-review at 500+ members (three stages). Identical owner
+sets are not merged when forced. Ownerless resources require
+`-FallbackReviewerUserId`; otherwise the target fails explicitly rather than
+silently creating one stage. Empty groups are still skipped.
+`-ReviewerType ApplicationOwner -ForceTwoStage` is rejected as contradictory.
+Use `-WhatIf` to preview; real-run logs record the override.
+
 If the group-owner (or explicit fallback) reviewer set exactly matches the
 application-owner set, those stages are combined into one application-owner
-stage. Order, duplicate IDs and letter casing do not affect the comparison;
+stage unless `-ForceTwoStage` is supplied. Order, duplicate IDs and letter casing do not affect the comparison;
 partial overlap does not merge stages. Self-review remains separate at 500+
 members. Dynamic per-user manager routing is not merged, even if its fallback
 matches the application owners. Duration, stage dependencies and logs use the
 resulting stages, and a warning reports the merge.
 
 The 150-member threshold applies to all modes, including direct application
-users. Below it, group-owner lookups and fallback stages are not needed. Group counts
+users. Below it, group-owner lookups and fallback stages are not needed unless
+`-ForceTwoStage` is supplied. Group counts
 include transitive directory members, not only users. Configure
-`$SelfReviewStageThreshold` (default 500, inclusive) and `$StageDurationInDays`
-(default five) in the script. Group user owners are resolved at creation time;
+`$SelfReviewStageThreshold` (default 500, inclusive) in the script.
+Stage durations are configured with the parameters below. Group user owners are resolved at creation time;
 service-principal owners are excluded.
 
 If a group has no user owners, the ResourceOwner stage is omitted by default:
@@ -188,8 +207,28 @@ denied decisions do not advance. Final-stage review is by application owners.
 Defaults to `-Frequency OneTime` and `-StartDate` today. Recurring options:
 `Weekly`, `Monthly`, `Quarterly`, `SemiAnnual`, `Annual`. Recurring `-EndDate`
 defaults to the end of the current month and must allow all stages to finish.
-For one-time reviews, EndDate is ignored; duration is stage count times days
-per stage. Supply a later EndDate when needed for a recurring series.
+For one-time reviews, EndDate is ignored; duration is the sum of the included
+stages. Supply a later EndDate when needed for a recurring series.
+
+Each stage defaults to five days. Set independent positive whole-day durations:
+
+- `-SelfReviewDurationInDays`: self-review.
+- `-SelectedReviewerDurationInDays`: managers, resource owners, or their explicit
+  fallback stage.
+- `-ApplicationOwnerDurationInDays`: final application-owner sign-off, including
+  application-owner-only reviews.
+
+```powershell
+.\Create-AccessReview.ps1 -GroupId '<group Object ID>' -AppOwnerIds '<application-owner user Object ID>' `
+    -ReviewerType ResourceOwner -ForceTwoStage `
+    -SelfReviewDurationInDays 3 -SelectedReviewerDurationInDays 7 -ApplicationOwnerDurationInDays 5 -WhatIf
+```
+
+For 22 members with forced two-stage routing, this lasts 12 days (7 + 5).
+For 500+ members it lasts 15 days (3 + 7 + 5). Skipped or merged stages add no
+time; a merged owner stage uses only the application-owner duration. The same
+parameters work in CSV and application modes. Recurring EndDate validation uses
+the actual total, and real-run logs record all three configured durations.
 
 Notifications and reminders are enabled; reviewer justification is required.
 Unanswered reviews default to Deny, and denied access is automatically removed.

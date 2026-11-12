@@ -80,6 +80,110 @@ Describe 'Unified access review creation and local logging' {
 		}.GetNewClosure())
 	}
 
+	It 'uses independent durations for <Case> routing' -TestCases @(
+		@{ Case = 'single'; Count = 22; Type = 'ResourceOwner'; Force = $false; Durations = @(5) },
+		@{ Case = 'forced'; Count = 22; Type = 'ResourceOwner'; Force = $true; Durations = @(7, 5) },
+		@{ Case = 'managers'; Count = 150; Type = 'LineManager'; Force = $false; Durations = @(7, 5) },
+		@{ Case = 'three-stage'; Count = 500; Type = 'ResourceOwner'; Force = $false; Durations = @(3, 7, 5) },
+		@{ Case = 'appowners'; Count = 500; Type = 'ApplicationOwner'; Force = $false; Durations = @(5) },
+		@{ Case = 'merged'; Count = 500; Type = 'ResourceOwner'; Force = $false; Durations = @(3, 5) },
+		@{ Case = 'ownerless'; Count = 500; Type = 'ResourceOwner'; Force = $false; Durations = @(3, 5) },
+		@{ Case = 'fallback'; Count = 150; Type = 'ResourceOwner'; Force = $false; Durations = @(7, 5) }
+	) {
+		param($Case, $Count, $Type, $Force, $Durations)
+		$script:fixture.Count = $Count
+		$extra = @{}
+		if ($Case -eq 'merged') {
+			$script:fixture.Owners = @([pscustomobject]@{
+				Id = $script:ownerId; AdditionalProperties = @{ '@odata.type' = '#microsoft.graph.user' }
+			})
+		}
+		if ($Case -in @('ownerless', 'fallback')) { $script:fixture.Owners = @() }
+		if ($Case -eq 'fallback') { $extra.FallbackReviewerUserId = $script:reviewId }
+		$result = & $script:testScript -GroupId $script:groupId -ReviewerType $Type -ForceTwoStage:$Force @extra `
+			-SelfReviewDurationInDays 3 -SelectedReviewerDurationInDays 7 -ApplicationOwnerDurationInDays 5 -Confirm:$false -WarningAction SilentlyContinue
+		$body = $script:fixture.Bodies[0]
+		$total = ($Durations | Measure-Object -Sum).Sum
+		$result.Stages | Should -Be $Durations.Count
+		$body.settings.instanceDurationInDays | Should -Be $total
+		([datetime]$body.settings.recurrence.range.endDate).Date | Should -Be ((Get-Date).Date.AddDays($total))
+		if ($Durations.Count -gt 1) {
+			@($body.stageSettings.durationInDays) | Should -Be $Durations
+		}
+		else { $body.ContainsKey('stageSettings') | Should -BeFalse }
+		$entry = (Get-LogEntries)[0]
+		$entry.SelfReviewDurationInDays | Should -Be 3
+		$entry.SelectedReviewerDurationInDays | Should -Be 7
+		$entry.ApplicationOwnerDurationInDays | Should -Be 5
+		$entry.Syntax | Should -Match "-SelectedReviewerDurationInDays '7'"
+	}
+
+	It 'uses the application-owner duration for a single-stage review' {
+		$script:fixture.Count = 22
+		$null = & $script:testScript -GroupId $script:groupId -ApplicationOwnerDurationInDays 9 -Confirm:$false
+		$script:fixture.Bodies[0].settings.instanceDurationInDays | Should -Be 9
+	}
+
+	It 'applies custom durations in <Mode> mode (preview: <Preview>)' -TestCases @(
+		@{ Mode = 'Csv'; Preview = $false },
+		@{ Mode = 'Application'; Preview = $false },
+		@{ Mode = 'Application'; Preview = $true }
+	) {
+		param($Mode, $Preview)
+		if ($Mode -eq 'Csv') {
+			$csv = Join-Path $script:testScriptRoot 'durations.csv'
+			"GroupId`n$script:groupId" | Set-Content $csv
+			$parameters = @{ CsvPath = $csv }
+		}
+		else {
+			$script:fixture.Assignments = @([pscustomobject]@{ PrincipalType = 'User'; PrincipalId = $script:ownerId })
+			$parameters = @{ ServicePrincipalId = $script:groupId }
+		}
+		$result = & $script:testScript @parameters -ForceTwoStage -SelectedReviewerDurationInDays 7 -ApplicationOwnerDurationInDays 4 -WhatIf:$Preview -Confirm:$false
+		$result.Stages | Should -Be 2
+		if ($Preview) {
+			Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times 0 -Exactly
+			Test-Path (Join-Path $script:testScriptRoot 'logs') | Should -BeFalse
+		}
+		else {
+			@($script:fixture.Bodies[0].stageSettings.durationInDays) | Should -Be @(7, 4)
+			$script:fixture.Bodies[0].settings.instanceDurationInDays | Should -Be 11
+		}
+	}
+
+	It 'validates recurring schedules against the actual duration sum (days: <Days>)' -TestCases @(
+		@{ Days = 11; Valid = $false }, @{ Days = 12; Valid = $true }
+	) {
+		param($Days, $Valid)
+		$parameters = @{
+			GroupId = $script:groupId
+			SelectedReviewerDurationInDays = 7
+			ApplicationOwnerDurationInDays = 5
+			Frequency = 'Monthly'
+			EndDate = (Get-Date).Date.AddDays($Days)
+			Confirm = $false
+		}
+		if ($Valid) {
+			$null = & $script:testScript @parameters
+			$script:fixture.Bodies[0].settings.instanceDurationInDays | Should -Be 12
+		}
+		else {
+			{ & $script:testScript @parameters } | Should -Throw '*at least 12 days*'
+			Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times 0 -Exactly
+		}
+	}
+
+	It 'rejects nonpositive <Parameter> durations before creating reviews' -TestCases @(
+		@{ Parameter = 'SelfReviewDurationInDays'; Value = 0 },
+		@{ Parameter = 'SelectedReviewerDurationInDays'; Value = -1 },
+		@{ Parameter = 'ApplicationOwnerDurationInDays'; Value = 0 }
+	) {
+		param($Parameter, $Value)
+		$parameters = @{ GroupId = $script:groupId; $Parameter = $Value }
+		{ & $script:testScript @parameters } | Should -Throw
+		Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times 0 -Exactly
+	}
+
 	It 'preserves default manager routing at the two-stage threshold' {
 		$result = & $script:testScript -GroupId $script:groupId -Confirm:$false
 		$result.Status | Should -Be 'Created'
@@ -290,6 +394,118 @@ Describe 'Unified access review creation and local logging' {
 		$body.reviewers[0].query | Should -Be "/users/$script:ownerId"
 		$body.settings.instanceDurationInDays | Should -Be 5
 		Should -Invoke Get-MgGroupOwner -Times 0 -Exactly
+	}
+
+	It 'forces two stages for 22 members in <Mode> mode with <Type> reviewers (preview: <Preview>)' -TestCases @(
+		@{ Mode = 'Single'; Type = 'ResourceOwner'; Preview = $false },
+		@{ Mode = 'Single'; Type = 'LineManager'; Preview = $false },
+		@{ Mode = 'Csv'; Type = 'ResourceOwner'; Preview = $false },
+		@{ Mode = 'Application'; Type = 'ResourceOwner'; Preview = $false },
+		@{ Mode = 'Single'; Type = 'ResourceOwner'; Preview = $true }
+	) {
+		param($Mode, $Type, $Preview)
+		$script:fixture.Count = 22
+		$parameters = switch ($Mode) {
+			'Single' { @{ GroupId = $script:groupId } }
+			'Csv' {
+				$csv = Join-Path $script:testScriptRoot 'forced.csv'
+				"GroupId`n$script:groupId" | Set-Content $csv
+				@{ CsvPath = $csv }
+			}
+			'Application' {
+				$script:fixture.ApplicationOwners = @($script:fixture.Owners[0])
+				$script:fixture.Assignments = @(1..22 | ForEach-Object {
+					[pscustomobject]@{ PrincipalType = 'User'; PrincipalId = ([guid]::NewGuid().ToString()) }
+				})
+				@{ ServicePrincipalId = $script:groupId }
+			}
+		}
+		$results = @(& $script:testScript @parameters -ReviewerType $Type -ForceTwoStage -WhatIf:$Preview -Confirm:$false -WarningAction SilentlyContinue)
+		$result = $results[-1]
+		$result.Stages | Should -Be 2
+		if ($Preview) {
+			$result.Status | Should -Be 'Would be created'
+			Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times 0 -Exactly
+			Test-Path (Join-Path $script:testScriptRoot 'logs') | Should -BeFalse
+		}
+		else {
+			$result.Status | Should -Be 'Created'
+			$body = $script:fixture.Bodies[0]
+			$body.stageSettings | Should -HaveCount 2
+			$body.stageSettings[0].reviewers[0].query | Should -Be $(if ($Type -eq 'ResourceOwner') { "/users/$script:groupOwnerId" } else { './manager' })
+			$body.stageSettings[1].reviewers[0].query | Should -Be "/users/$script:ownerId"
+			$body.stageSettings[1].dependsOn | Should -Be @('1')
+			$body.settings.instanceDurationInDays | Should -Be 10
+			([datetime]$body.settings.recurrence.range.endDate).Date | Should -Be ((Get-Date).Date.AddDays(10))
+			$entries = Get-LogEntries
+			$entries[0].ForceTwoStage | Should -BeTrue
+			$entries[0].Syntax | Should -Match '-ForceTwoStage:\$true'
+			@($entries | Where-Object Event -in @('GroupResult', 'ApplicationResult'))[-1].Result.Stages | Should -Be 2
+		}
+	}
+
+	It 'preserves default single-stage behavior with ForceTwoStage false' {
+		$script:fixture.Count = 22
+		$result = & $script:testScript -GroupId $script:groupId -ReviewerType ResourceOwner -ForceTwoStage:$false -Confirm:$false
+		$result.Stages | Should -Be 1
+		Should -Invoke Get-MgGroupOwner -Times 0 -Exactly
+	}
+
+	It 'retains identical owner sets as separate stages only when forced' {
+		$script:fixture.Count = 22
+		$script:fixture.Owners = @([pscustomobject]@{
+			Id = $script:ownerId; AdditionalProperties = @{ '@odata.type' = '#microsoft.graph.user' }
+		})
+		$result = & $script:testScript -GroupId $script:groupId -ReviewerType ResourceOwner -ForceTwoStage -Confirm:$false
+		$result.Stages | Should -Be 2
+		$body = $script:fixture.Bodies[0]
+		$body.stageSettings[0].reviewers[0].query | Should -Be "/users/$script:ownerId"
+		$body.stageSettings[1].reviewers[0].query | Should -Be "/users/$script:ownerId"
+	}
+
+	It 'requires owners or an explicit fallback for a forced ResourceOwner stage' {
+		$script:fixture.Count = 22
+		$script:fixture.Owners = @()
+		{ & $script:testScript -GroupId $script:groupId -ReviewerType ResourceOwner -ForceTwoStage -Confirm:$false } |
+			Should -Throw '*ForceTwoStage requires user owners or FallbackReviewerUserId*'
+		(Get-LogEntries)[1].Result.Status | Should -Be 'Failed'
+		Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times 0 -Exactly
+	}
+
+	It 'uses a fallback for an ownerless forced review even if it matches application owners' {
+		$script:fixture.Count = 22
+		$script:fixture.Owners = @()
+		$result = & $script:testScript -GroupId $script:groupId -ReviewerType ResourceOwner -ForceTwoStage -FallbackReviewerUserId $script:ownerId -Confirm:$false -WarningAction SilentlyContinue
+		$result.Stages | Should -Be 2
+		$script:fixture.Bodies[0].stageSettings[0].reviewers[0].query | Should -Be "/users/$script:ownerId"
+	}
+
+	It 'retains self-review at 500 members with the override' {
+		$script:fixture.Count = 500
+		$result = & $script:testScript -GroupId $script:groupId -ReviewerType ResourceOwner -ForceTwoStage -Confirm:$false
+		$result.Stages | Should -Be 3
+		$script:fixture.Bodies[0].stageSettings[0].reviewers | Should -HaveCount 0
+	}
+
+	It 'still skips empty groups when forcing two stages' {
+		$script:fixture.Count = 0
+		$result = & $script:testScript -GroupId $script:groupId -ReviewerType ResourceOwner -ForceTwoStage -Confirm:$false
+		$result.Status | Should -Be 'Skipped'
+		Should -Invoke Get-MgGroupOwner -Times 0 -Exactly
+		Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times 0 -Exactly
+	}
+
+	It 'rejects a contradictory ApplicationOwner-only override' {
+		{ & $script:testScript -GroupId $script:groupId -ReviewerType ApplicationOwner -ForceTwoStage } |
+			Should -Throw '*ForceTwoStage requires ReviewerType LineManager or ResourceOwner*'
+		Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times 0 -Exactly
+	}
+
+	It 'validates recurrence against both forced stages' {
+		$script:fixture.Count = 22
+		{ & $script:testScript -GroupId $script:groupId -ReviewerType ResourceOwner -ForceTwoStage -Frequency Monthly -EndDate ((Get-Date).Date.AddDays(9)) -Confirm:$false } |
+			Should -Throw '*at least 10 days*'
+		Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times 0 -Exactly
 	}
 
 	It 'uses application-owner-only mode regardless of member count' -TestCases @(
