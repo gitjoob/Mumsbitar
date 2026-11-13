@@ -10,33 +10,29 @@ assignments (including service principals/managed identities) as Manual review
 required; these are not silently skipped or automatically revoked.
 Existing review names are skipped in all modes. Application mode also skips
 dynamic groups; empty groups are skipped in all modes.
-Application mode requires explicit AppOwnerIds for final sign-off.
-All modes use the same stage policy and application-owner sign-off.
+All modes use the same stage policy.
 Connect to Microsoft Graph first.
 Requires AccessReview.ReadWrite.All, access to read the group and its member count,
 and an appropriate access review license.
 
-ReviewerType selects ApplicationOwner (one stage), LineManager (default), or
-ResourceOwner. Below 150 members, only application owners review. At 150 or more,
-LineManager and ResourceOwner precede application-owner sign-off.
-Use ForceTwoStage to retain that first reviewer stage below 150 members.
-It also keeps identical reviewer sets as separate stages. ResourceOwner requires
-user owners or FallbackReviewerUserId when forced; otherwise that target fails.
-ForceTwoStage cannot be combined with ApplicationOwner. Empty-group skips and
-the additional self-review stage at 500+ members are unchanged.
-Empty groups are skipped, regardless of owners. At 500 or more transitive members, an initial
-self-review stage is added to those two-stage reviews. ResourceOwner uses
-the group's user owners, or service-principal user owners for direct-user
-application reviews. Resources without user owners skip that stage unless
-FallbackReviewerUserId is supplied. Application-owner sign-off (and self-review
-for large groups) is retained. Missing managers use FallbackReviewerUserId or
-the effective application owners when no fallback is supplied.
-Identical group-owner/fallback and application-owner reviewer sets are combined
-into the application-owner stage. Dynamic manager routing remains separate.
-AppOwnerIds supplies application-owner user object IDs. The optional CSV
-AppOwnerIds column overrides that parameter per row, using comma- or semicolon-separated
-user IDs. Quote the cell when its separator matches the CSV column delimiter.
-Blank cells use the parameter. Every group requires application owners.
+ReviewerType selects the owner stage: ApplicationOwner (default) or ResourceOwner.
+For 1-150 members the owner is the only stage; for 151-499, managers precede
+the owner; for 500+ the stages are self-review, managers and application owners.
+Group counts include transitive directory members, not only users. Direct-user
+reviews count distinct directly assigned users. Empty groups are skipped.
+ResourceOwner uses the group's user owners, or service-principal user owners for
+direct-user application reviews below 500 members. If no usable user owners are
+available, or a group is synchronized from on-premises, that ResourceOwner
+target fails rather than substituting reviewers. The owner stage for 500+
+always uses AppOwnerIds.
+Missing managers use FallbackReviewerUserId, or the effective application owners,
+or the selected resource owners when no application owners are supplied.
+AppOwnerIds supplies application-owner user object IDs and is required whenever
+application owners review. CSV AppOwnerIds and ReviewerType override their
+run-wide parameters per row; blank cells use the parameters. Multiple owner IDs
+are comma- or semicolon-separated. Quote cells when needed for the CSV delimiter.
+The old LineManager ReviewerType maps to ApplicationOwner with a warning;
+ForceTwoStage is no longer supported.
 
 Each validated real run writes its invocation syntax and per-group results to
 a separate logs/Create-AccessReview_<UTC timestamp>_<RunId>.jsonl file next to
@@ -53,13 +49,9 @@ Unanswered reviews default to Deny and denied access is automatically removed.
 Groups synchronized from on-premises Active Directory cannot be changed by the
 access review. For those groups, decisions are only recorded and must be
 applied in Active Directory.
-ResourceOwner routing for synchronized groups uses FallbackReviewerUserId, or
-the effective application owners if no explicit fallback is supplied, rather
-than group owners. The usual stage thresholds and merge rules still apply.
 Stage durations default to five days each. Override SelfReviewDurationInDays,
-SelectedReviewerDurationInDays (managers, resource owners or fallback), and
-ApplicationOwnerDurationInDays independently. Only included stages contribute
-to the total; merged stages use the application-owner duration.
+SelectedReviewerDurationInDays (managers), and ApplicationOwnerDurationInDays
+(the final owner stage, including resource owners) independently.
 Frequency defaults to OneTime; use
 Frequency to select Weekly, Monthly, Quarterly, SemiAnnual, or Annual recurrence.
 For recurring reviews, the series ends at EndDate, which defaults to the end of
@@ -67,8 +59,10 @@ the current month; provide a later date to allow subsequent occurrences.
 StartDate defaults to today. For recurring reviews, EndDate must allow enough
 days for all stages to complete.
 
-The access review is named with ReviewName. CsvPath creates one review per row of a CSV file with a GroupId column and an
-optional ReviewName and AppOwnerIds columns. A table of skipped or failed groups and a summary
+CsvPath accepts GroupId or ServicePrincipalId rows and optional AppOwnerIds,
+ReviewerType, and Role columns; ReviewName is supported for group rows only.
+Role is appended to the reviewer message for each review generated by the row;
+it does not filter assignments. A table of skipped or failed targets and a summary
 are shown at the end. All modes also show the total transitive directory-member
 count for created reviews (or would-be-created reviews with WhatIf), counting
 shared members separately per group. Group reviews still cover direct membership.
@@ -90,7 +84,7 @@ example 'AR Demo Group'.
 .EXAMPLE
 .\Create-AccessReview.ps1 -CsvPath '.\groups.csv' -ReviewerType ResourceOwner -WhatIf
 .EXAMPLE
-.\Create-AccessReview.ps1 -GroupId '11111111-1111-1111-1111-111111111111' -AppOwnerIds '22222222-2222-2222-2222-222222222222' -ReviewerType ResourceOwner -ForceTwoStage -WhatIf
+.\Create-AccessReview.ps1 -GroupId '11111111-1111-1111-1111-111111111111' -ReviewerType ResourceOwner -WhatIf
 .EXAMPLE
 .\Create-AccessReview.ps1 -CsvPath '.\groups.csv' -AppOwnerIds '22222222-2222-2222-2222-222222222222' -Frequency Quarterly -EndDate '2027-10-31' -WhatIf
 .EXAMPLE
@@ -112,7 +106,7 @@ param(
 	[guid]$ServicePrincipalId,
 	[Alias('ReviewType')]
 	[ValidateSet('ApplicationOwner', 'LineManager', 'ResourceOwner')]
-	[string]$ReviewerType = 'LineManager',
+	[string]$ReviewerType = 'ApplicationOwner',
 	[switch]$ForceTwoStage,
 	[ValidateRange(1, [int]::MaxValue)]
 	[int]$SelfReviewDurationInDays = 5,
@@ -144,8 +138,12 @@ $AdditionalNotificationRecipients = @(
 $DecisionsThatMoveToNextStage = @('Approve', 'NotReviewed')
 
 $ErrorActionPreference = 'Stop'
-if ($ForceTwoStage -and $ReviewerType -eq 'ApplicationOwner') {
-	throw 'ForceTwoStage requires ReviewerType LineManager or ResourceOwner.'
+if ($ForceTwoStage) {
+	throw 'ForceTwoStage is no longer supported: stage count is determined by the target size.'
+}
+if ($ReviewerType -eq 'LineManager') {
+	Write-Warning 'ReviewerType LineManager is deprecated; using ApplicationOwner for the owner stage. Managers are selected automatically based on target size.'
+	$ReviewerType = 'ApplicationOwner'
 }
 $invocationParameters = @{} + $PSBoundParameters
 Import-Module Microsoft.Graph.Authentication
@@ -176,7 +174,7 @@ if ($AppOwnerIds -contains [guid]::Empty) {
 if ($PSBoundParameters.ContainsKey('FallbackReviewerUserId') -and $FallbackReviewerUserId -eq [guid]::Empty) {
 	throw 'FallbackReviewerUserId must be a nonempty user object GUID.'
 }
-if ($PSCmdlet.ParameterSetName -ne 'Csv' -and -not $AppOwnerIds.Count) {
+if ($PSCmdlet.ParameterSetName -ne 'Csv' -and $ReviewerType -eq 'ApplicationOwner' -and -not $AppOwnerIds.Count) {
 	throw 'Application-owner sign-off is required. Supply -AppOwnerIds.'
 }
 
@@ -218,44 +216,88 @@ if ($PSCmdlet.ParameterSetName -eq 'Csv') {
 	$csvDelimiter = $null
 	foreach ($candidate in @(',', ';', "`t")) {
 		$probe = ConvertFrom-Csv -InputObject "$header`nheader-detection" -Delimiter $candidate
-		if ($probe.PSObject.Properties['GroupId']) {
+		if ($probe.PSObject.Properties['GroupId'] -or $probe.PSObject.Properties['ServicePrincipalId']) {
 			$csvDelimiter = $candidate
 			break
 		}
 	}
 	if ($null -eq $csvDelimiter) {
-		throw "The CSV file must contain a 'GroupId' column. Supported column delimiters are comma, semicolon and tab. Detected header: $header"
+		throw "The CSV file must contain a 'GroupId' or 'ServicePrincipalId' column. Supported column delimiters are comma, semicolon and tab. Detected header: $header"
 	}
 
-	$targets = foreach ($row in @(Import-Csv -LiteralPath $CsvPath -Delimiter $csvDelimiter)) {
-		$rowGroupId = [guid]::Empty
-		if (-not [guid]::TryParse($row.GroupId.Trim(), [ref]$rowGroupId)) {
-			throw "CSV GroupId '$($row.GroupId)' is not a valid GUID."
+	$inputTargets = @(foreach ($row in @(Import-Csv -LiteralPath $CsvPath -Delimiter $csvDelimiter)) {
+		$groupValue = if ($row.PSObject.Properties['GroupId']) { $row.GroupId.Trim() } else { '' }
+		$applicationValue = if ($row.PSObject.Properties['ServicePrincipalId']) { $row.ServicePrincipalId.Trim() } else { '' }
+		if ([bool]$groupValue -eq [bool]$applicationValue) {
+			throw 'Each CSV row must contain exactly one GroupId or ServicePrincipalId.'
 		}
-
+		$idValue = if ($groupValue) { $groupValue } else { $applicationValue }
+		$idColumn = if ($groupValue) { 'GroupId' } else { 'ServicePrincipalId' }
+		$rowId = [guid]::Empty
+		if (-not [guid]::TryParse($idValue, [ref]$rowId) -or $rowId -eq [guid]::Empty) {
+			throw "CSV $idColumn '$idValue' is not a valid nonempty GUID."
+		}
+		$rowReviewerType = if ($row.PSObject.Properties['ReviewerType']) { $row.ReviewerType.Trim() } else { '' }
+		if ($rowReviewerType -and $rowReviewerType -notin @('ApplicationOwner', 'ResourceOwner')) {
+			throw "CSV ReviewerType '$rowReviewerType' must be ApplicationOwner or ResourceOwner."
+		}
+		$rowReviewName = if ($row.PSObject.Properties['ReviewName']) { $row.ReviewName.Trim() } else { '' }
+		if ($applicationValue -and $rowReviewName) {
+			throw 'CSV ReviewName is only supported for GroupId rows; an application can produce multiple reviews.'
+		}
 		[pscustomobject]@{
-			GroupId = $rowGroupId
-			ReviewName = if ($row.PSObject.Properties['ReviewName']) { $row.ReviewName.Trim() } else { $null }
+			GroupId = if ($groupValue) { $rowId } else { $null }
+			ServicePrincipalId = if ($applicationValue) { $rowId } else { $null }
+			ReviewName = $rowReviewName
 			AppOwnerIds = if ($row.PSObject.Properties['AppOwnerIds']) { $row.AppOwnerIds.Trim() } else { $null }
+			ReviewerType = $rowReviewerType
+			Role = if ($row.PSObject.Properties['Role']) { $row.Role.Trim() } else { $null }
 		}
-	}
+	})
 
-	$seenGroupIds = @{}
-	$targets = @($targets | Where-Object { -not $seenGroupIds.ContainsKey($_.GroupId) -and ($seenGroupIds[$_.GroupId] = $true) })
-	if ($targets.Count -eq 0) {
-		throw 'The CSV file contains no groups.'
+	$seenTargets = @{}
+	$inputTargets = @($inputTargets | Where-Object {
+		$key = if ($_.GroupId) { "group:$($_.GroupId)" } else { "application:$($_.ServicePrincipalId)" }
+		if ($seenTargets.ContainsKey($key)) {
+			$previous = $seenTargets[$key]
+			if ($_.ReviewName -ne $previous.ReviewName -or $_.AppOwnerIds -ne $previous.AppOwnerIds -or
+				$_.ReviewerType -ne $previous.ReviewerType -or $_.Role -ne $previous.Role) {
+				throw "CSV contains conflicting settings for duplicate target '$key'."
+			}
+			return
+		}
+		$seenTargets[$key] = $_
+		$true
+	})
+	if ($inputTargets.Count -eq 0) {
+		throw 'The CSV file contains no targets.'
+	}
+	if (@($inputTargets | Where-Object ServicePrincipalId).Count) {
+		Import-Module Microsoft.Graph.Applications
+		if ($context.AuthType -ne 'AppOnly' -and $context.Scopes -notcontains 'Application.Read.All') {
+			throw 'The required Microsoft Graph permission(s) not granted: Application.Read.All.'
+		}
 	}
 }
 elseif ($PSCmdlet.ParameterSetName -eq 'Single') {
-	$targets = @([pscustomobject]@{
+	$inputTargets = @([pscustomobject]@{
 		GroupId = $GroupId
+		ServicePrincipalId = $null
 		ReviewName = if ($PSBoundParameters.ContainsKey('ReviewName')) { $ReviewName } else { $null }
 		AppOwnerIds = $null
+		ReviewerType = $null
+		Role = $null
 	})
 }
-
 else {
-	$targets = @()
+	$inputTargets = @([pscustomobject]@{
+		GroupId = $null
+		ServicePrincipalId = $ServicePrincipalId
+		ReviewName = $null
+		AppOwnerIds = $null
+		ReviewerType = $null
+		Role = $null
+	})
 }
 
 $results = [System.Collections.Generic.List[object]]::new()
@@ -276,9 +318,13 @@ if ($creationLog.Enabled) {
 	Write-Host "Creation log: $($creationLog.Path)"
 }
 $existingReviewNames = @()
-$applicationOwners = @()
-$directAssignments = @()
-if ($PSCmdlet.ParameterSetName -eq 'Application') {
+$targets = [System.Collections.Generic.List[object]]::new()
+foreach ($inputTarget in $inputTargets) {
+	if (-not $inputTarget.ServicePrincipalId) {
+		$targets.Add($inputTarget)
+		continue
+	}
+	$ServicePrincipalId = $inputTarget.ServicePrincipalId
 	try {
 		$servicePrincipal = Get-MgServicePrincipal -ServicePrincipalId $ServicePrincipalId -Property id, displayName
 		$assignments = @(Get-MgServicePrincipalAppRoleAssignedTo -ServicePrincipalId $ServicePrincipalId -All -Property id, principalId, principalType, principalDisplayName, appRoleId, resourceId)
@@ -291,20 +337,32 @@ if ($PSCmdlet.ParameterSetName -eq 'Application') {
 		if ($assignedUserCount -eq 0) {
 			Write-Warning "Graph returned no direct user app-role assignments for service principal '$ServicePrincipalId'. Verify the enterprise application's Object ID and its Users and groups assignments. Ownership and group membership are not direct user assignments; recently changed assignments can take time to appear."
 		}
-		$targets = @($assignments | Where-Object PrincipalType -eq 'Group' |
-			Select-Object -ExpandProperty PrincipalId -Unique | ForEach-Object {
-				[pscustomobject]@{ GroupId = $_; ReviewName = $null; AppOwnerIds = $null }
-			})
+		$assignedGroups = @($assignments | Where-Object PrincipalType -eq 'Group' |
+			Select-Object -ExpandProperty PrincipalId -Unique)
 		$directAssignments = @($assignments | Where-Object PrincipalType -eq 'User')
+		foreach ($assignedGroup in $assignedGroups) {
+			$targets.Add([pscustomobject]@{
+				GroupId = $assignedGroup; ServicePrincipalId = $ServicePrincipalId
+				ServicePrincipal = $servicePrincipal; ApplicationOwners = $applicationOwners
+				DirectAssignments = $directAssignments; ReviewName = $null
+				AppOwnerIds = $inputTarget.AppOwnerIds; ReviewerType = $inputTarget.ReviewerType; Role = $inputTarget.Role
+			})
+		}
 		if ($directAssignments.Count) {
-			$targets += [pscustomobject]@{
+			$targets.Add([pscustomobject]@{
 				TargetType = 'ApplicationDirectUsers'
 				GroupId = $null
+				ServicePrincipalId = $ServicePrincipalId
+				ServicePrincipal = $servicePrincipal
+				ApplicationOwners = $applicationOwners
+				DirectAssignments = $directAssignments
 				ReviewName = "$ReviewNamePrefix $($servicePrincipal.DisplayName)".Trim()
-				AppOwnerIds = $null
-			}
+				AppOwnerIds = $inputTarget.AppOwnerIds
+				ReviewerType = $inputTarget.ReviewerType
+				Role = $inputTarget.Role
+			})
 		}
-		if (-not $targets.Count) {
+		if (-not $assignedGroups.Count -and -not $directAssignments.Count) {
 			Write-Warning "Application '$($servicePrincipal.DisplayName)' has no assigned groups or users."
 		}
 		$manualItems = @(
@@ -345,6 +403,7 @@ if ($PSCmdlet.ParameterSetName -eq 'Application') {
 				ReviewName = $null
 				ReviewId = $null
 				ReviewerType = $null
+				Role = $inputTarget.Role
 				Stages = $null
 				StageNames = $null
 				AppOwnerIds = @()
@@ -381,11 +440,19 @@ if ($targets.Count) {
 
 foreach ($target in $targets) {
 	$isApplicationReview = $target.TargetType -eq 'ApplicationDirectUsers'
+	$isApplicationTarget = $null -ne $target.ServicePrincipalId
+	if ($isApplicationTarget) {
+		$ServicePrincipalId = $target.ServicePrincipalId
+		$servicePrincipal = $target.ServicePrincipal
+		$applicationOwners = @($target.ApplicationOwners)
+		$directAssignments = @($target.DirectAssignments)
+	}
+	$targetReviewerType = if ($target.ReviewerType) { $target.ReviewerType } else { $ReviewerType }
 	if (-not $isApplicationReview) { $GroupId = $target.GroupId }
 	$result = [ordered]@{
 		TargetType = if ($isApplicationReview) { 'ApplicationDirectUsers' } else { 'GroupMembership' }
 		Target = "$GroupId"
-		ServicePrincipalId = if ($PSCmdlet.ParameterSetName -eq 'Application') { "$ServicePrincipalId" } else { $null }
+		ServicePrincipalId = if ($isApplicationTarget) { "$ServicePrincipalId" } else { $null }
 		Group = "$GroupId"
 		GroupId = "$GroupId"
 		MemberCount = $null
@@ -399,7 +466,8 @@ foreach ($target in $targets) {
 		AppRoleId = $null
 		ReviewName = $null
 		ReviewId = $null
-		ReviewerType = $ReviewerType
+		ReviewerType = $targetReviewerType
+		Role = $target.Role
 		Stages = $null
 		StageNames = $null
 		AppOwnerIds = @()
@@ -417,9 +485,6 @@ foreach ($target in $targets) {
 				}
 				$ownerId
 			})
-		}
-		if (-not $targetOwnerIds.Count) {
-			throw 'Application-owner sign-off is required. Supply -AppOwnerIds or an AppOwnerIds CSV value for this group.'
 		}
 		$targetOwnerIds = @($targetOwnerIds | Select-Object -Unique)
 		$result.AppOwnerIds = @($targetOwnerIds | ForEach-Object { "$_" })
@@ -469,7 +534,7 @@ foreach ($target in $targets) {
 			$result.Group = $group.displayName
 			$result.Target = $group.DisplayName
 			$reviewDisplayName = if ($target.ReviewName) { $target.ReviewName.Trim() }
-				elseif ($PSCmdlet.ParameterSetName -eq 'Application') { "$ReviewNamePrefix $($servicePrincipal.DisplayName) - $($group.DisplayName)".Trim() }
+				elseif ($isApplicationTarget) { "$ReviewNamePrefix $($servicePrincipal.DisplayName) - $($group.DisplayName)".Trim() }
 				else { "$ReviewNamePrefix $($group.DisplayName)".Trim() }
 			$resourceDescription = "group $($group.DisplayName)"
 			$reviewScope = @{
@@ -485,7 +550,7 @@ foreach ($target in $targets) {
 			Write-Host "The $resourceDescription has no members; no access review needed."
 			continue
 		}
-		if ($PSCmdlet.ParameterSetName -eq 'Application') {
+		if ($isApplicationTarget) {
 			if (-not $isApplicationReview -and $group.GroupTypes -contains 'DynamicMembership') {
 				$result.Status = 'Skipped'
 				$result.Reason = 'Dynamic membership group'
@@ -501,8 +566,42 @@ foreach ($target in $targets) {
 			Write-Warning "Group '$($group.displayName)' is synchronized from on-premises Active Directory. Decisions will be recorded but not applied; remove denied access in Active Directory."
 		}
 
+		if (($targetReviewerType -eq 'ApplicationOwner' -or $memberCount -ge $SelfReviewStageThreshold) -and -not $targetOwnerIds.Count) {
+			throw 'Application-owner sign-off is required. Supply -AppOwnerIds or an AppOwnerIds CSV value.'
+		}
 		$selfReviewStage = @{ name = 'Self-review'; durationInDays = $SelfReviewDurationInDays; reviewers = @(); fallbackReviewers = @() }
-		$selectedReviewerStage = @{
+		$ownerStage = @{
+			name = 'Application owners'
+			durationInDays = $ApplicationOwnerDurationInDays
+			reviewers = @($applicationOwnerReviewers)
+			fallbackReviewers = $fallbackReviewers
+		}
+		if ($targetReviewerType -eq 'ResourceOwner' -and $memberCount -lt $SelfReviewStageThreshold) {
+			if ($isSyncedGroup) {
+				throw "The $resourceDescription is synchronized from on-premises; group owners are not available for ResourceOwner routing."
+			}
+			$userOwners = @(if ($isApplicationReview) {
+				$applicationOwners | Where-Object { $_.AdditionalProperties['@odata.type'] -eq '#microsoft.graph.user' }
+			}
+			else {
+				Get-MgGroupOwner -GroupId $GroupId -All -Property id |
+					Where-Object { $_.AdditionalProperties['@odata.type'] -eq '#microsoft.graph.user' }
+			})
+			$ownerReviewers = @(foreach ($owner in $userOwners) {
+				@{ query = "/users/$($owner.Id)"; queryType = 'MicrosoftGraph' }
+			})
+			if (-not $ownerReviewers.Count) {
+				throw "The $resourceDescription has no user owners for ResourceOwner routing."
+			}
+			if (-not $fallbackReviewers.Count) { $fallbackReviewers = @($ownerReviewers) }
+			$ownerStage = @{
+				name = if ($isApplicationReview) { 'Resource owners (service-principal owners)' } else { 'Resource owners (group owners)' }
+				durationInDays = $ApplicationOwnerDurationInDays
+				reviewers = $ownerReviewers
+				fallbackReviewers = $fallbackReviewers
+			}
+		}
+		$managerStage = @{
 			name = 'Line managers'
 			durationInDays = $SelectedReviewerDurationInDays
 			reviewers = @(
@@ -514,69 +613,11 @@ foreach ($target in $targets) {
 			)
 			fallbackReviewers = $fallbackReviewers
 		}
-		$includeSelectedReviewerStage = $memberCount -ge 150 -or $ForceTwoStage
-		if ($ReviewerType -eq 'ResourceOwner' -and $includeSelectedReviewerStage) {
-			$userOwners = @(if ($isApplicationReview) {
-				$applicationOwners | Where-Object { $_.AdditionalProperties['@odata.type'] -eq '#microsoft.graph.user' }
-			}
-			else {
-				if (-not $isSyncedGroup) {
-					Get-MgGroupOwner -GroupId $GroupId -All -Property id |
-						Where-Object { $_.AdditionalProperties['@odata.type'] -eq '#microsoft.graph.user' }
-				}
-			})
-			$ownerReviewers = @(foreach ($owner in $userOwners) {
-				@{ query = "/users/$($owner.Id)"; queryType = 'MicrosoftGraph' }
-			})
-			$selectedReviewerStage = @{
-				name = if ($isApplicationReview) { 'Resource owners (service-principal owners)' } else { 'Resource owners (group owners)' }
-				durationInDays = $SelectedReviewerDurationInDays
-				reviewers = $ownerReviewers
-				fallbackReviewers = $fallbackReviewers
-			}
-			if ($isSyncedGroup) {
-				Write-Warning "The $resourceDescription is synchronized from on-premises. Using fallback reviewers instead of group owners."
-				$selectedReviewerStage.name = 'Fallback reviewer (synced group)'
-				$selectedReviewerStage.reviewers = @($fallbackReviewers)
-			}
-			elseif (-not $ownerReviewers.Count) {
-				if ($FallbackReviewerUserId -ne [guid]::Empty) {
-					Write-Warning "The $resourceDescription has no user owners. Using fallback reviewer '$FallbackReviewerUserId' before application-owner sign-off."
-					$selectedReviewerStage.name = if ($isApplicationReview) { 'Fallback reviewer (no service-principal user owners)' } else { 'Fallback reviewer (no group user owners)' }
-					$selectedReviewerStage.reviewers = @($fallbackReviewers)
-				}
-				elseif ($ForceTwoStage) {
-					throw "The $resourceDescription has no user owners. ForceTwoStage requires user owners or FallbackReviewerUserId."
-				}
-				else {
-					Write-Warning "The $resourceDescription has no user owners and no fallback reviewer is configured. Skipping the ResourceOwner stage; application-owner sign-off is retained."
-					$selectedReviewerStage = $null
-				}
-			}
-		}
-		$applicationOwnerStage = @{
-			name = 'Application owners'
-			durationInDays = $ApplicationOwnerDurationInDays
-			reviewers = @($applicationOwnerReviewers)
-			fallbackReviewers = $fallbackReviewers
-		}
-
-		if (-not $ForceTwoStage -and $ReviewerType -eq 'ResourceOwner' -and $selectedReviewerStage) {
-			$selectedQueries = @($selectedReviewerStage.reviewers.query | Sort-Object -Unique)
-			$applicationOwnerQueries = @($applicationOwnerReviewers.query | Sort-Object -Unique)
-			if ($selectedQueries.Count -gt 0 -and
-				-not @(Compare-Object -ReferenceObject $selectedQueries -DifferenceObject $applicationOwnerQueries).Count) {
-				Write-Warning "The $resourceDescription has identical ResourceOwner/fallback and application-owner reviewers. Combining them into the application-owner stage."
-				$selectedReviewerStage = $null
-			}
-		}
 
 		$stages = @(
-			if ($ReviewerType -ne 'ApplicationOwner' -and $includeSelectedReviewerStage) {
-				if ($memberCount -ge $SelfReviewStageThreshold) { $selfReviewStage }
-				if ($selectedReviewerStage) { $selectedReviewerStage }
-			}
-			$applicationOwnerStage
+			if ($memberCount -ge $SelfReviewStageThreshold) { $selfReviewStage }
+			if ($memberCount -gt 150) { $managerStage }
+			$ownerStage
 		)
 		$stageCount = $stages.Count
 		$result.Stages = $stageCount
@@ -600,8 +641,11 @@ foreach ($target in $targets) {
 		if ($ReviewerMessage.Trim()) {
 			$descriptionForReviewers = "$descriptionForReviewers $($ReviewerMessage.Trim())"
 		}
-		if ($ReviewerMessage.Trim() -and $descriptionForReviewers.Length -gt 256) {
-			throw "descriptionForReviewers is $($descriptionForReviewers.Length) characters; reviewer emails support up to 256. Shorten ReviewerMessage."
+		if (-not [string]::IsNullOrWhiteSpace($target.Role)) {
+			$descriptionForReviewers = "$descriptionForReviewers Role: $($target.Role.Trim())."
+		}
+		if (($ReviewerMessage.Trim() -or $target.Role) -and $descriptionForReviewers.Length -gt 256) {
+			throw "descriptionForReviewers is $($descriptionForReviewers.Length) characters; reviewer emails support up to 256. Shorten ReviewerMessage or Role."
 		}
 
 		$params = @{
@@ -664,8 +708,8 @@ foreach ($target in $targets) {
 		$params.settings.recurrence = $recurrence
 
 		if ($stageCount -eq 1) {
-			$params.reviewers = $applicationOwnerStage.reviewers
-			$params.fallbackReviewers = $applicationOwnerStage.fallbackReviewers
+			$params.reviewers = $stages[0].reviewers
+			$params.fallbackReviewers = $stages[0].fallbackReviewers
 		}
 		else {
 			$params.stageSettings = @(
@@ -754,13 +798,13 @@ if ($PSCmdlet.ParameterSetName -ne 'Single') {
 	}
 
 	$reviewTargetCount = @($results | Where-Object Status -ne 'Manual review required').Count
-	$targetLabel = if ($PSCmdlet.ParameterSetName -eq 'Application') { 'review target(s)' } else { 'group(s)' }
+	$targetLabel = if (@($inputTargets | Where-Object ServicePrincipalId).Count) { 'review target(s)' } else { 'group(s)' }
 	Write-Host "$reviewTargetCount ${targetLabel}: $createdCount $($createdStatus.ToLower()), $skippedCount skipped, $failedCount failed."
 }
 $totalMemberCount = [long](($createdResults | Measure-Object -Property MemberCount -Sum).Sum)
 $reviewSummary = if ($WhatIfPreference) { 'reviews that would be created' } else { 'created reviews' }
 Write-Host "Total transitive members in ${reviewSummary}: $totalMemberCount"
-if ($PSCmdlet.ParameterSetName -eq 'Application') {
+if (@($inputTargets | Where-Object ServicePrincipalId).Count) {
 	foreach ($directUserResult in @($results | Where-Object TargetType -eq 'ApplicationDirectUsers')) {
 		Write-Host "Direct-user review: $($directUserResult.Status); discovered users: $($directUserResult.SubjectCount); review name: $($directUserResult.ReviewName); reason: $($directUserResult.Reason)"
 	}

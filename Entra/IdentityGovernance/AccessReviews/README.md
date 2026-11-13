@@ -9,7 +9,8 @@ for direct group-membership and direct application-user access reviews. Keep
 Choose exactly one:
 
 - `-GroupId`: one group, optionally with `-ReviewName`.
-- `-CsvPath`: one review per CSV row; duplicate group IDs are processed once.
+- `-CsvPath`: group and/or enterprise-application object IDs in CSV rows.
+  Application rows use the same discovery as `-ServicePrincipalId`.
 - `-ServicePrincipalId`: discover assigned groups, direct user assignments,
   service-principal owners, and other application-role assignments. Group reviews
   retain names `AR <application> - <group>`. Direct users receive an
@@ -40,7 +41,7 @@ Connect-MgGraph -Scopes 'AccessReview.ReadWrite.All','Group.Read.All','Applicati
 
 .\Create-AccessReview.ps1 -ServicePrincipalId '33333333-3333-3333-3333-333333333333' `
     -AppOwnerIds '22222222-2222-2222-2222-222222222222' `
-    -ReviewerType LineManager -WhatIf
+    -ReviewerType ApplicationOwner -WhatIf
 ```
 
 Replace example IDs with real object IDs. Remove `-WhatIf` after checking the
@@ -83,11 +84,11 @@ omitted: group membership remains covered by the separate group reviews.
 Its subject count is a discovery-time snapshot; Graph resolves the review scope
 when instances start, including subsequent recurring instances.
 
-Direct-user reviews retain the configured stage policy, schedule, notifications,
-and final `AppOwnerIds` sign-off. For `ResourceOwner`, actual service-principal
-**user** owners are first-stage reviewers; non-user owners are never reviewers.
-Identical reviewer sets still merge. Without user owners, the same fallback/skip
-policy applies. The 500-member self-review threshold uses distinct direct users.
+Direct-user reviews follow the same stage policy, schedule and notifications.
+For `ResourceOwner`, actual service-principal **user** owners are the owner
+stage for fewer than 500 direct users; non-user owners are never reviewers.
+Without usable user owners, the target fails. At 500 or more direct users,
+the final stage always uses explicit `AppOwnerIds`.
 
 **Denied direct-user reviews automatically remove application access**, not group
 membership or ownership. This is separate from the existing group-membership
@@ -103,17 +104,26 @@ delegated consent grants, directory roles, or every possible access path.
 
 ## Application-owner sign-off and CSV
 
-Application-owner sign-off is required in every mode. `-AppOwnerIds` accepts
-one or more **user object IDs** as run-wide defaults. Application discovery
-requires these explicit IDs; it never infers application owners.
+`-AppOwnerIds` accepts one or more **user object IDs** as run-wide defaults.
+They are required whenever application owners review, including every target
+with 500 or more members. They are optional when a smaller target uses
+`ResourceOwner`; application-owner IDs are never inferred from discovery.
 
-CSV requires `GroupId`; `AppOwnerIds` and `ReviewName` are optional columns:
+CSV rows contain either `GroupId` or `ServicePrincipalId`. Optional columns
+are `AppOwnerIds`, `ReviewerType`, and `Role`; `ReviewName` is supported for
+group rows only, because an application can produce multiple reviews:
 
 ```csv
-GroupId,AppOwnerIds,ReviewName
-11111111-1111-1111-1111-111111111111,22222222-2222-2222-2222-222222222222;33333333-3333-3333-3333-333333333333,Finance review
-44444444-4444-4444-4444-444444444444,55555555-5555-5555-5555-555555555555,Service desk review
+GroupId,ServicePrincipalId,AppOwnerIds,ReviewerType,Role,ReviewName
+11111111-1111-1111-1111-111111111111,,22222222-2222-2222-2222-222222222222,ResourceOwner,Finance approver,Finance review
+,33333333-3333-3333-3333-333333333333,22222222-2222-2222-2222-222222222222,ApplicationOwner,Reader,
 ```
+
+For an application row use the enterprise application's **object ID**, not
+its client ID. Its role text and row settings apply to each group and direct-user
+review discovered from that application. `Role` is added to the friendly
+reviewer message; it does **not** filter the assignments or restrict access
+being reviewed. Blank role cells add nothing.
 
 Comma, semicolon (common in Excel exports), and tab column delimiters are
 detected automatically from the header. Inside `AppOwnerIds`, separate multiple
@@ -132,79 +142,47 @@ GroupId;AppOwnerIds
 11111111-1111-1111-1111-111111111111;22222222-2222-2222-2222-222222222222,33333333-3333-3333-3333-333333333333
 ```
 
-Column order does not matter. Nonblank row owners replace parameter defaults;
-blank/missing cells use `-AppOwnerIds`. Whitespace around IDs is ignored. Missing or
-malformed owners fail that row without creating its review; other rows continue.
+Column order does not matter. Nonblank row owners and reviewer types replace
+parameter defaults; blank/missing cells use the run-wide values. ReviewerType
+must be `ApplicationOwner` or `ResourceOwner`. Duplicate identical targets are
+processed once; conflicting duplicate row settings stop the run. Whitespace
+around IDs is ignored. Missing or malformed required owners fail the affected
+target without creating its review; other targets continue.
 Owner IDs must identify users, not groups. Duplicate owner IDs are collapsed.
 The script does not prevalidate that each GUID identifies an existing user.
 
 ## Stage selection
 
-`-ReviewerType` (`-ReviewType` alias) defaults to `LineManager`:
+`-ReviewerType` (`-ReviewType` alias) selects the owner stage and defaults to
+`ApplicationOwner`:
 
 Empty groups are skipped with `No members; no access review needed`, even when
 they have owners. This applies to single-group, CSV, and application discovery.
 Applications without direct users do not get a direct-user review.
 
-| ReviewerType | 1-149 members | 150-499 members | 500+ |
-| --- | --- | --- | --- |
-| `ApplicationOwner` | Application owners | Application owners | Application owners |
-| `LineManager` | Application owners | Managers -> Application owners | Self-review -> Managers -> Application owners |
-| `ResourceOwner` | Application owners | Group user owners -> Application owners | Self-review -> Group user owners -> Application owners |
+| Size | Stages |
+| --- | --- |
+| 1-150 | Selected owner |
+| 151-499 | Line managers -> selected owner |
+| 500+ | Self-review -> line managers -> application owners |
 
-For special cases, use `-ForceTwoStage` with `-ReviewerType ResourceOwner` or
-`LineManager` to include the selected reviewer stage even below 150 members:
+`ResourceOwner` selects group user owners or, for direct-user application reviews,
+service-principal user owners. If no usable user owners exist, the target fails
+even if a fallback is configured. For synchronized groups, `ResourceOwner`
+fails below 500 because this script cannot use group-owner routing for them.
+At 500+ the owner selection is ignored and application owners are required.
+Group counts include transitive directory members, not only users; direct-user
+application reviews count distinct directly assigned users.
 
-```powershell
-.\Create-AccessReview.ps1 -GroupId '<group Object ID>' -AppOwnerIds '<application-owner user Object ID>' `
-    -ReviewerType ResourceOwner -ForceTwoStage -WhatIf
-```
-
-For a 22-member group, this creates **group owners -> application owners** instead
-of application owners only. Without the switch, the defaults above are unchanged.
-The switch applies to single-group, CSV, and application modes. It forces at least
-two stages, retaining self-review at 500+ members (three stages). Identical owner
-sets are not merged when forced. Ownerless resources require
-`-FallbackReviewerUserId`; otherwise the target fails explicitly rather than
-silently creating one stage. Empty groups are still skipped.
-`-ReviewerType ApplicationOwner -ForceTwoStage` is rejected as contradictory.
-Use `-WhatIf` to preview; real-run logs record the override.
-
-If the group-owner (or explicit fallback) reviewer set exactly matches the
-application-owner set, those stages are combined into one application-owner
-stage unless `-ForceTwoStage` is supplied. Order, duplicate IDs and letter casing do not affect the comparison;
-partial overlap does not merge stages. Self-review remains separate at 500+
-members. Dynamic per-user manager routing is not merged, even if its fallback
-matches the application owners. Duration, stage dependencies and logs use the
-resulting stages, and a warning reports the merge.
-
-The 150-member threshold applies to all modes, including direct application
-users. Below it, group-owner lookups and fallback stages are not needed unless
-`-ForceTwoStage` is supplied. Group counts
-include transitive directory members, not only users. Configure
-`$SelfReviewStageThreshold` (default 500, inclusive) in the script.
-Stage durations are configured with the parameters below. Group user owners are resolved at creation time;
-service-principal owners are excluded.
-
-If a group has no user owners, the ResourceOwner stage is omitted by default:
-application owners review directly (500+ members still start with self-review).
-To keep a separate first reviewer, supply `-FallbackReviewerUserId` with a
-nonempty **user object ID**:
-
-```powershell
-.\Create-AccessReview.ps1 -CsvPath '.\groups.csv' -ReviewerType ResourceOwner `
-    -FallbackReviewerUserId '44444444-4444-4444-4444-444444444444' -WhatIf
-```
-
-At 150+ members, this produces fallback reviewer -> application owners for ownerless groups
-(preceded by self-review at 500+ members). Stage counts, duration and logs reflect
-the actual stages. The script warns whenever it substitutes or omits group owners.
-Missing managers use the same explicit fallback, or the effective application
-owners for that CSV row when no fallback is supplied. No zero-GUID placeholder
-is sent as a reviewer. Fallback IDs are GUID-validated, not checked for user existence.
-Lookup failures fail explicitly rather than silently using fallback.
+Missing managers use `-FallbackReviewerUserId` when supplied, otherwise the
+effective application owners, or the selected resource owners when no
+application owners were supplied. Fallback IDs are GUID-validated, not checked
+for user existence. Lookup failures fail explicitly.
+`-ReviewerType LineManager` is deprecated and maps to `ApplicationOwner` with
+a warning; manager stages now depend on size. `-ForceTwoStage` is rejected,
+because it conflicts with the required stage policy.
 Graph advances `Approve` and `NotReviewed` decisions to subsequent stages;
-denied decisions do not advance. Final-stage review is by application owners.
+denied decisions do not advance.
 
 ## Schedule and notifications
 
@@ -217,20 +195,18 @@ stages. Supply a later EndDate when needed for a recurring series.
 Each stage defaults to five days. Set independent positive whole-day durations:
 
 - `-SelfReviewDurationInDays`: self-review.
-- `-SelectedReviewerDurationInDays`: managers, resource owners, or their explicit
-  fallback stage.
-- `-ApplicationOwnerDurationInDays`: final application-owner sign-off, including
-  application-owner-only reviews.
+- `-SelectedReviewerDurationInDays`: managers.
+- `-ApplicationOwnerDurationInDays`: the final owner stage, whether application
+  owners or resource owners.
 
 ```powershell
 .\Create-AccessReview.ps1 -GroupId '<group Object ID>' -AppOwnerIds '<application-owner user Object ID>' `
-    -ReviewerType ResourceOwner -ForceTwoStage `
+    -ReviewerType ResourceOwner `
     -SelfReviewDurationInDays 3 -SelectedReviewerDurationInDays 7 -ApplicationOwnerDurationInDays 5 -WhatIf
 ```
 
-For 22 members with forced two-stage routing, this lasts 12 days (7 + 5).
-For 500+ members it lasts 15 days (3 + 7 + 5). Skipped or merged stages add no
-time; a merged owner stage uses only the application-owner duration. The same
+For 22 members this lasts 5 days; for 151-499 it lasts 12 days (7 + 5);
+for 500+ it lasts 15 days (3 + 7 + 5). The same
 parameters work in CSV and application modes. Recurring EndDate validation uses
 the actual total, and real-run logs record all three configured durations.
 
@@ -242,10 +218,8 @@ notification recipients (user/group IDs), or leave it empty.
 
 Synchronized groups are report-only: decisions are recorded but removal must
 be performed in on-premises Active Directory. Automatic apply is disabled.
-For `ResourceOwner` routing, synchronized groups use `-FallbackReviewerUserId`
-instead of querying group owners. Without an explicit fallback, the effective
-`AppOwnerIds` are used. Identical reviewer stages still merge unless
-`-ForceTwoStage` is set. The below-150 default and empty-group skips are unchanged.
+For `ResourceOwner` routing below 500 members, synchronized groups fail rather
+than substitute another reviewer.
 
 All modes skip an existing review with the same display name (case-insensitive),
 including completed reviews; existing reviews are not updated. The script stops
@@ -294,7 +268,8 @@ run ID, runnable invocation syntax (including array parameters), working
 directory, effective schedule and per-group results including created IDs.
 Application reviews use `ApplicationResult` events; manual-review inventory uses
 `ManualReviewRequired` events and a separate count in `RunCompleted`.
-CSV files themselves are not copied into logs; effective owner IDs are logged.
+CSV files themselves are not copied into logs; effective owner IDs and role
+text are logged in results.
 Authentication commands, credentials and tokens are not logged. Keep logs
 private because they contain tenant/group metadata.
 
