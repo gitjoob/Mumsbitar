@@ -110,7 +110,7 @@ with 500 or more members. They are optional when a smaller target uses
 `ResourceOwner`; application-owner IDs are never inferred from discovery.
 
 CSV rows contain either `GroupId` or `ServicePrincipalId`. Optional columns
-are `AppOwnerIds`, `ReviewerType`, and `Role`; `ReviewName` is supported for
+are `AppOwnerIds`, `Owner`, `ReviewerType`, and `Role`; `ReviewName` is supported for
 group rows only, because an application can produce multiple reviews:
 
 ```csv
@@ -119,6 +119,22 @@ GroupId,ServicePrincipalId,AppOwnerIds,ReviewerType,Role,ReviewName
 ,33333333-3333-3333-3333-333333333333,22222222-2222-2222-2222-222222222222,ApplicationOwner,Reader,
 ```
 
+For a synchronized group, use `Owner` to supply one or more resource-owner
+**user object IDs** without looking up group owners:
+
+```csv
+GroupId,ReviewerType,Owner
+11111111-1111-1111-1111-111111111111,ResourceOwner,"22222222-2222-2222-2222-222222222222,33333333-3333-3333-3333-333333333333"
+```
+
+For a service-principal row, `Owner` applies to every synchronized group
+discovered from that application, not to its direct-user review. The column is
+used only for synchronized groups with `ResourceOwner` routing below 500
+members; cloud groups use their Entra owners and 500+ reviews use application
+owners. A populated `Owner` takes precedence over `-FallbackReviewerUserId`
+for the owner stage. If `Owner` is blank, the explicit fallback users are used;
+if neither is available, the target fails.
+
 For an application row use the enterprise application's **object ID**, not
 its client ID. Its role text and row settings apply to each group and direct-user
 review discovered from that application. `Role` is added to the friendly
@@ -126,7 +142,7 @@ reviewer message; it does **not** filter the assignments or restrict access
 being reviewed. Blank role cells add nothing.
 
 Comma, semicolon (common in Excel exports), and tab column delimiters are
-detected automatically from the header. Inside `AppOwnerIds`, separate multiple
+detected automatically from the header. Inside `AppOwnerIds` or `Owner`, separate multiple
 IDs with commas or semicolons. Quote the cell when its separator matches the
 CSV column delimiter. For example, comma-separated IDs in a comma-delimited file:
 
@@ -146,7 +162,7 @@ Column order does not matter. Nonblank row owners and reviewer types replace
 parameter defaults; blank/missing cells use the run-wide values. ReviewerType
 must be `ApplicationOwner` or `ResourceOwner`. Duplicate identical targets are
 processed once; conflicting duplicate row settings stop the run. Whitespace
-around IDs is ignored. Missing or malformed required owners fail the affected
+around IDs is ignored. Malformed populated `Owner` values and missing or malformed required owners fail the affected
 target without creating its review; other targets continue.
 Owner IDs must identify users, not groups. Duplicate owner IDs are collapsed.
 The script does not prevalidate that each GUID identifies an existing user.
@@ -169,8 +185,9 @@ Applications without direct users do not get a direct-user review.
 `ResourceOwner` selects group user owners or, for direct-user application reviews,
 service-principal user owners. If no usable user owners exist on a non-synchronized
 resource, the target fails even if a fallback is configured. For synchronized
-groups below 500 members, explicitly supplied fallback users review instead of
-group owners; without them the target fails. At 500+ the owner selection is
+groups below 500 members, CSV `Owner` users review instead of group owners.
+If `Owner` is blank or absent, explicitly supplied fallback users review
+instead; without either the target fails. At 500+ the owner selection is
 ignored and application owners are required.
 Group counts include transitive directory members, not only users; direct-user
 application reviews count distinct directly assigned users.
@@ -226,8 +243,8 @@ notification recipients (user/group IDs), or leave it empty.
 
 Synchronized groups are report-only: decisions are recorded but removal must
 be performed in on-premises Active Directory. Automatic apply is disabled.
-For `ResourceOwner` routing below 500 members, synchronized groups require
-explicit fallback users as described above.
+For `ResourceOwner` routing below 500 members, synchronized groups require CSV
+owners or explicit fallback users as described above.
 
 All modes skip an existing review with the same display name (case-insensitive),
 including completed reviews; existing reviews are not updated. The script stops
@@ -276,8 +293,8 @@ run ID, runnable invocation syntax (including array parameters), working
 directory, effective schedule and per-group results including created IDs.
 Application reviews use `ApplicationResult` events; manual-review inventory uses
 `ManualReviewRequired` events and a separate count in `RunCompleted`.
-CSV files themselves are not copied into logs; effective owner IDs and role
-text are logged in results.
+CSV files themselves are not copied into logs; effective application-owner IDs,
+CSV owner IDs and role text are logged in results.
 Authentication commands, credentials and tokens are not logged. Keep logs
 private because they contain tenant/group metadata.
 

@@ -201,6 +201,130 @@ Describe 'Unified access review creation and local logging' {
 		(Get-LogEntries)[0].FallbackReviewerUserId | Should -Be $script:reviewId
 	}
 
+	It 'uses CSV owners before fallbacks for synced groups at <Count> members (preview: <Preview>)' -TestCases @(
+		@{ Count = 150; Preview = $false },
+		@{ Count = 151; Preview = $false },
+		@{ Count = 500; Preview = $false },
+		@{ Count = 151; Preview = $true }
+	) {
+		param($Count, $Preview)
+		$script:fixture.Synced = $true
+		$script:fixture.Count = $Count
+		$csv = Join-Path $script:testScriptRoot 'synced-owners.csv'
+		"GroupId,Owner`n$script:groupId,`"$script:groupOwnerId,$script:reviewId,$script:groupOwnerId`"" | Set-Content $csv
+		$result = & $script:testScript -CsvPath $csv -ReviewerType ResourceOwner -FallbackReviewerUserId $script:ownerId `
+			-WhatIf:$Preview -Confirm:$false -WarningAction SilentlyContinue
+		$result.Status | Should -Be $(if ($Preview) { 'Would be created' } else { 'Created' })
+		$result.CsvOwnerIds | Should -Be @($script:groupOwnerId, $script:reviewId)
+		$result.StageNames | Should -Be $(if ($Count -ge 500) { 'Self-review -> Line managers -> Application owners' }
+			elseif ($Count -gt 150) { 'Line managers -> CSV owners (synced group)' }
+			else { 'CSV owners (synced group)' })
+		Should -Invoke Get-MgGroupOwner -Times 0 -Exactly
+		if ($Preview) {
+			Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times 0 -Exactly
+			Test-Path (Join-Path $script:testScriptRoot 'logs') | Should -BeFalse
+		}
+		else {
+			$body = $script:fixture.Bodies[0]
+			$body.settings.autoApplyDecisionsEnabled | Should -BeFalse
+			$body.settings.ContainsKey('applyActions') | Should -BeFalse
+			if ($Count -le 150) {
+				$body.reviewers.query | Should -Be @("/users/$script:groupOwnerId", "/users/$script:reviewId")
+			}
+			else {
+				$body.stageSettings[-2].reviewers[0].query | Should -Be './manager'
+				$body.stageSettings[-2].fallbackReviewers.query | Should -Be @("/users/$script:ownerId")
+				$expected = if ($Count -ge 500) { @("/users/$script:ownerId") } else { @("/users/$script:groupOwnerId", "/users/$script:reviewId") }
+				$body.stageSettings[-1].reviewers.query | Should -Be $expected
+			}
+			(Get-LogEntries)[1].Result.CsvOwnerIds | Should -Be @($script:groupOwnerId, $script:reviewId)
+		}
+	}
+
+	It 'uses CSV owners as manager fallback if no other fallback or application owner is supplied' {
+		$script:fixture.Synced = $true
+		$script:fixture.Count = 151
+		$csv = Join-Path $script:testScriptRoot 'synced-owner-only.csv'
+		"GroupId;Owner`n$script:groupId;$script:groupOwnerId,$script:reviewId" | Set-Content $csv
+		$result = & $script:testScript -CsvPath $csv -ReviewerType ResourceOwner -AppOwnerIds @() -Confirm:$false -WarningAction SilentlyContinue
+		$result.Status | Should -Be 'Created'
+		$body = $script:fixture.Bodies[0]
+		$body.stageSettings[0].fallbackReviewers.query | Should -Be @("/users/$script:groupOwnerId", "/users/$script:reviewId")
+		$body.stageSettings[1].reviewers.query | Should -Be @("/users/$script:groupOwnerId", "/users/$script:reviewId")
+	}
+
+	It 'uses the explicit fallback when the CSV Owner cell is blank' {
+		$script:fixture.Synced = $true
+		$csv = Join-Path $script:testScriptRoot 'blank-owner.csv'
+		"GroupId,Owner`n$script:groupId," | Set-Content $csv
+		$result = & $script:testScript -CsvPath $csv -ReviewerType ResourceOwner -FallbackReviewerUserId $script:reviewId `
+			-Confirm:$false -WarningAction SilentlyContinue
+		$result.StageNames | Should -Be 'Fallback reviewers (synced group)'
+		$script:fixture.Bodies[0].reviewers.query | Should -Be @("/users/$script:reviewId")
+	}
+
+	It 'keeps cloud group owners when a CSV Owner is supplied' {
+		$csv = Join-Path $script:testScriptRoot 'cloud-owner.csv'
+		"GroupId,Owner`n$script:groupId,$script:reviewId" | Set-Content $csv
+		$result = & $script:testScript -CsvPath $csv -ReviewerType ResourceOwner -Confirm:$false
+		$result.StageNames | Should -Be 'Resource owners (group owners)'
+		$script:fixture.Bodies[0].reviewers.query | Should -Be @("/users/$script:groupOwnerId")
+		Should -Invoke Get-MgGroupOwner -Times 1 -Exactly
+	}
+
+	It 'applies application-row CSV owners only to discovered synced groups' {
+		$script:fixture.Synced = $true
+		$script:fixture.Assignments += [pscustomobject]@{ PrincipalType = 'User'; PrincipalId = $script:ownerId }
+		$script:fixture.ApplicationOwners = @(
+			[pscustomobject]@{ Id = $script:ownerId; AdditionalProperties = @{ '@odata.type' = '#microsoft.graph.user' } }
+		)
+		$csv = Join-Path $script:testScriptRoot 'application-owner.csv'
+		"ServicePrincipalId,ReviewerType,Owner`n$script:groupId,ResourceOwner,$script:reviewId" | Set-Content $csv
+		$results = @(& $script:testScript -CsvPath $csv -Confirm:$false -WarningAction SilentlyContinue)
+		$reviews = @($results | Where-Object TargetType -in @('GroupMembership', 'ApplicationDirectUsers'))
+		$reviews.Status | Should -Be @('Created', 'Created')
+		$script:fixture.Bodies[0].reviewers.query | Should -Be @("/users/$script:reviewId")
+		$script:fixture.Bodies[1].reviewers.query | Should -Be @("/users/$script:ownerId")
+	}
+
+	It 'fails an invalid CSV Owner instead of using a fallback (value: <Value>)' -TestCases @(
+		@{ Value = 'not-a-guid' },
+		@{ Value = '00000000-0000-0000-0000-000000000000' },
+		@{ Value = '66666666-6666-6666-6666-666666666666;bad-id' }
+	) {
+		param($Value)
+		$script:fixture.Synced = $true
+		$csv = Join-Path $script:testScriptRoot 'invalid-owner.csv'
+		"GroupId,Owner`n$script:groupId,$Value" | Set-Content $csv
+		$result = & $script:testScript -CsvPath $csv -ReviewerType ResourceOwner -FallbackReviewerUserId $script:ownerId -Confirm:$false
+		$result.Status | Should -Be 'Failed'
+		$result.Reason | Should -Match 'CSV Owner contains an invalid user object GUID'
+		Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times 0 -Exactly
+	}
+
+	It 'rejects duplicate CSV targets with conflicting Owner values' {
+		$csv = Join-Path $script:testScriptRoot 'conflicting-owners.csv'
+		"GroupId,Owner`n$script:groupId,$script:groupOwnerId`n$script:groupId,$script:reviewId" | Set-Content $csv
+		{ & $script:testScript -CsvPath $csv -ReviewerType ResourceOwner -Confirm:$false } |
+			Should -Throw '*conflicting settings*'
+		Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times 0 -Exactly
+	}
+
+	It 'isolates per-row CSV owners and continues after an invalid owner' {
+		$second = '44444444-4444-4444-4444-444444444444'
+		$third = '55555555-5555-5555-5555-555555555555'
+		$script:fixture.Synced = $true
+		$csv = Join-Path $script:testScriptRoot 'owner-batch.csv'
+		"GroupId,ReviewName,Owner`n$script:groupId,Invalid,bad-id`n$second,Second,$script:groupOwnerId`n$third,Third,$script:reviewId" |
+			Set-Content $csv
+		$results = @(& $script:testScript -CsvPath $csv -ReviewerType ResourceOwner -Confirm:$false -WarningAction SilentlyContinue)
+		$results.Status | Should -Be @('Failed', 'Created', 'Created')
+		$results[0].Reason | Should -Match 'CSV Owner contains an invalid user object GUID'
+		$script:fixture.Bodies[0].reviewers.query | Should -Be @("/users/$script:groupOwnerId")
+		$script:fixture.Bodies[1].reviewers.query | Should -Be @("/users/$script:reviewId")
+		Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times 2 -Exactly
+	}
+
 	It 'uses multiple manager fallbacks without replacing owners of a cloud group' {
 		$script:fixture.Count = 151
 		$null = & $script:testScript -GroupId $script:groupId -ReviewerType ResourceOwner `
