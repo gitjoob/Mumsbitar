@@ -8,7 +8,8 @@ It retains group-membership reviews and creates a separate application-access
 review for direct users. It also reports service-principal owners and non-user
 assignments (including service principals/managed identities) as Manual review
 required; these are not silently skipped or automatically revoked.
-Dynamic/empty groups and existing review names are skipped.
+Existing review names are skipped in all modes. Application mode also skips
+dynamic groups; empty groups are skipped in all modes.
 Application mode requires explicit AppOwnerIds for final sign-off.
 All modes use the same stage policy and application-owner sign-off.
 Connect to Microsoft Graph first.
@@ -303,11 +304,7 @@ if ($PSCmdlet.ParameterSetName -eq 'Application') {
 				AppOwnerIds = $null
 			}
 		}
-		if ($targets.Count) {
-			$existingReviewNames = @(Get-MgIdentityGovernanceAccessReviewDefinition -All -Property id, displayName |
-				ForEach-Object { $_.DisplayName })
-		}
-		else {
+		if (-not $targets.Count) {
 			Write-Warning "Application '$($servicePrincipal.DisplayName)' has no assigned groups or users."
 		}
 		$manualItems = @(
@@ -368,6 +365,17 @@ if ($PSCmdlet.ParameterSetName -eq 'Application') {
 	catch {
 		Write-AccessReviewLog -Log $creationLog -Entry @{ Event = 'RunFailed'; Reason = $_.Exception.Message }
 		throw
+	}
+}
+
+if ($targets.Count) {
+	try {
+		$existingReviewNames = @(Get-MgIdentityGovernanceAccessReviewDefinition -All -Property id, displayName -ErrorAction Stop |
+			ForEach-Object { $_.DisplayName })
+	}
+	catch {
+		Write-AccessReviewLog -Log $creationLog -Entry @{ Event = 'RunFailed'; Reason = $_.Exception.Message }
+		throw "Unable to check existing access review names; no reviews were created. $($_.Exception.Message)"
 	}
 }
 
@@ -483,11 +491,11 @@ foreach ($target in $targets) {
 				$result.Reason = 'Dynamic membership group'
 				continue
 			}
-			if ($existingReviewNames -contains $reviewDisplayName) {
-				$result.Status = 'Skipped'
-				$result.Reason = 'Access review with the same name already exists'
-				continue
-			}
+		}
+		if ($existingReviewNames -contains $reviewDisplayName) {
+			$result.Status = 'Skipped'
+			$result.Reason = 'Access review with the same name already exists'
+			continue
 		}
 		if ($isSyncedGroup) {
 			Write-Warning "Group '$($group.displayName)' is synchronized from on-premises Active Directory. Decisions will be recorded but not applied; remove denied access in Active Directory."
@@ -698,6 +706,7 @@ foreach ($target in $targets) {
 		}
 		else {
 			$result.Status = if ($WhatIfPreference) { 'Would be created' } else { 'Not created' }
+			if ($WhatIfPreference) { $existingReviewNames += $reviewDisplayName }
 		}
 
 		$result.ReviewName = $reviewDisplayName

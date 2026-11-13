@@ -247,10 +247,13 @@ instead of querying group owners. Without an explicit fallback, the effective
 `AppOwnerIds` are used. Identical reviewer stages still merge unless
 `-ForceTwoStage` is set. The below-150 default and empty-group skips are unchanged.
 
-Application-discovery mode skips dynamic groups, empty groups regardless of
-owners, and existing review names.
-Existing reviews are not updated. Direct-group/CSV modes do not skip existing
-names; check results before retrying to avoid duplicate reviews.
+All modes skip an existing review with the same display name (case-insensitive),
+including completed reviews; existing reviews are not updated. The script stops
+without creating reviews if it cannot retrieve existing names. A preview also
+skips duplicate names within the batch. Matching is by name, not resource ID, so
+renaming a review or changing its prefix can allow another review for the same
+resource. Concurrent runs can still create duplicates.
+Application-discovery mode also skips dynamic groups; all modes skip empty groups.
 
 ## Results and private logs
 

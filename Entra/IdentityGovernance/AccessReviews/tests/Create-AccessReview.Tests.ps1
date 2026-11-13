@@ -307,6 +307,9 @@ Describe 'Unified access review creation and local logging' {
 		Mock Get-MgGroupTransitiveMemberCount { 75 } -ParameterFilter {
 			"$GroupId" -eq '44444444-4444-4444-4444-444444444444'
 		}
+		Mock Get-MgGroup {
+			[pscustomobject]@{ DisplayName = 'Second group'; OnPremisesSyncEnabled = $false; GroupTypes = @() }
+		} -ParameterFilter { "$GroupId" -eq '44444444-4444-4444-4444-444444444444' }
 		$csv = Join-Path $script:testScriptRoot 'member-counts.csv'
 		"GroupId`n$script:groupId`n$second`n$script:groupId" | Set-Content $csv
 		$results = @(& $script:testScript -CsvPath $csv -WhatIf:$Preview -Confirm:$false)
@@ -316,6 +319,86 @@ Describe 'Unified access review creation and local logging' {
 		$script:fixture.HostMessages[-2] | Should -Be "2 group(s): 2 $label, 0 skipped, 0 failed."
 		$script:fixture.HostMessages[-1] | Should -Match ': 225$'
 		Should -Invoke Get-MgGroupTransitiveMemberCount -Times 2 -Exactly
+	}
+
+	It 'skips an existing review in <Mode> mode (preview: <Preview>)' -TestCases @(
+		@{ Mode = 'Single'; Preview = $false }, @{ Mode = 'Single'; Preview = $true },
+		@{ Mode = 'Csv'; Preview = $false }, @{ Mode = 'Csv'; Preview = $true }
+	) {
+		param($Mode, $Preview)
+		$script:fixture.ExistingNames = @('ar demo group')
+		if ($Mode -eq 'Single') {
+			$parameters = @{ GroupId = $script:groupId }
+		}
+		else {
+			$csv = Join-Path $script:testScriptRoot 'existing.csv'
+			"GroupId`n$script:groupId" | Set-Content $csv
+			$parameters = @{ CsvPath = $csv }
+		}
+		$result = & $script:testScript @parameters -WhatIf:$Preview -Confirm:$false
+		$result.Status | Should -Be 'Skipped'
+		$result.Reason | Should -Match 'already exists'
+		Should -Invoke Get-MgIdentityGovernanceAccessReviewDefinition -Times 1 -Exactly
+		Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times 0 -Exactly
+	}
+
+	It 'skips duplicate names within a CSV batch (preview: <Preview>)' -TestCases @(
+		@{ Preview = $false }, @{ Preview = $true }
+	) {
+		param($Preview)
+		$csv = Join-Path $script:testScriptRoot 'same-name.csv'
+		"GroupId`n$script:groupId`n44444444-4444-4444-4444-444444444444" | Set-Content $csv
+		$results = @(& $script:testScript -CsvPath $csv -WhatIf:$Preview -Confirm:$false)
+		$results[0].Status | Should -Be $(if ($Preview) { 'Would be created' } else { 'Created' })
+		$results[1].Status | Should -Be 'Skipped'
+		$results[1].Reason | Should -Match 'already exists'
+		Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times $(if ($Preview) { 0 } else { 1 }) -Exactly
+	}
+
+	It 'does not create another review when a <Mode> run is repeated' -TestCases @(
+		@{ Mode = 'Single' }, @{ Mode = 'Csv' }, @{ Mode = 'Application' }
+	) {
+		param($Mode)
+		$fixture = $script:fixture
+		Mock New-MgIdentityGovernanceAccessReviewDefinition ({
+			param($BodyParameter)
+			$fixture.ExistingNames += $BodyParameter.displayName
+			[pscustomobject]@{ Id = $fixture.ReviewId }
+		}.GetNewClosure())
+		$parameters = switch ($Mode) {
+			'Single' { @{ GroupId = $script:groupId } }
+			'Csv' {
+				$csv = Join-Path $script:testScriptRoot 'rerun.csv'
+				"GroupId`n$script:groupId" | Set-Content $csv
+				@{ CsvPath = $csv }
+			}
+			'Application' { @{ ServicePrincipalId = $script:groupId } }
+		}
+		$first = & $script:testScript @parameters -Confirm:$false -WarningAction SilentlyContinue
+		$second = & $script:testScript @parameters -Confirm:$false -WarningAction SilentlyContinue
+		$first.Status | Should -Be 'Created'
+		$second.Status | Should -Be 'Skipped'
+		$second.Reason | Should -Match 'already exists'
+		Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times 1 -Exactly
+	}
+
+	It 'stops without creating reviews if the existing review lookup fails (mode: <Mode>)' -TestCases @(
+		@{ Mode = 'Single' }, @{ Mode = 'Csv' }, @{ Mode = 'Application' }
+	) {
+		param($Mode)
+		Mock Get-MgIdentityGovernanceAccessReviewDefinition { throw 'Review lookup forbidden.' }
+		$parameters = switch ($Mode) {
+			'Single' { @{ GroupId = $script:groupId } }
+			'Csv' {
+				$csv = Join-Path $script:testScriptRoot 'lookup-failure.csv'
+				"GroupId`n$script:groupId" | Set-Content $csv
+				@{ CsvPath = $csv }
+			}
+			'Application' { @{ ServicePrincipalId = $script:groupId } }
+		}
+		{ & $script:testScript @parameters -Confirm:$false } | Should -Throw '*Unable to check existing access review names*'
+		(Get-LogEntries)[-1].Event | Should -Be 'RunFailed'
+		Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times 0 -Exactly
 	}
 
 	It 'excludes failed and skipped application groups from the member total' {
