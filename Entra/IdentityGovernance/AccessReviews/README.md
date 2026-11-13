@@ -167,17 +167,25 @@ Applications without direct users do not get a direct-user review.
 | 500+ | Self-review -> line managers -> application owners |
 
 `ResourceOwner` selects group user owners or, for direct-user application reviews,
-service-principal user owners. If no usable user owners exist, the target fails
-even if a fallback is configured. For synchronized groups, `ResourceOwner`
-fails below 500 because this script cannot use group-owner routing for them.
-At 500+ the owner selection is ignored and application owners are required.
+service-principal user owners. If no usable user owners exist on a non-synchronized
+resource, the target fails even if a fallback is configured. For synchronized
+groups below 500 members, explicitly supplied fallback users review instead of
+group owners; without them the target fails. At 500+ the owner selection is
+ignored and application owners are required.
 Group counts include transitive directory members, not only users; direct-user
 application reviews count distinct directly assigned users.
 
-Missing managers use `-FallbackReviewerUserId` when supplied, otherwise the
-effective application owners, or the selected resource owners when no
-application owners were supplied. Fallback IDs are GUID-validated, not checked
-for user existence. Lookup failures fail explicitly.
+`-FallbackReviewerUserId` accepts one or more user object IDs, for example:
+
+```powershell
+.\Create-AccessReview.ps1 -CsvPath '.\groups.csv' -ReviewerType ResourceOwner `
+    -FallbackReviewerUserId '11111111-1111-1111-1111-111111111111','22222222-2222-2222-2222-222222222222' -WhatIf
+```
+
+Missing managers use these fallback users when supplied, otherwise the effective
+application owners, or the selected resource owners when no application owners
+were supplied. Duplicate IDs are removed. Fallback IDs are GUID-validated, not
+checked for user existence. Lookup failures fail explicitly.
 `-ReviewerType LineManager` is deprecated and maps to `ApplicationOwner` with
 a warning; manager stages now depend on size. `-ForceTwoStage` is rejected,
 because it conflicts with the required stage policy.
@@ -218,8 +226,8 @@ notification recipients (user/group IDs), or leave it empty.
 
 Synchronized groups are report-only: decisions are recorded but removal must
 be performed in on-premises Active Directory. Automatic apply is disabled.
-For `ResourceOwner` routing below 500 members, synchronized groups fail rather
-than substitute another reviewer.
+For `ResourceOwner` routing below 500 members, synchronized groups require
+explicit fallback users as described above.
 
 All modes skip an existing review with the same display name (case-insensitive),
 including completed reviews; existing reviews are not updated. The script stops

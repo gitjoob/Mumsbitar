@@ -21,12 +21,13 @@ the owner; for 500+ the stages are self-review, managers and application owners.
 Group counts include transitive directory members, not only users. Direct-user
 reviews count distinct directly assigned users. Empty groups are skipped.
 ResourceOwner uses the group's user owners, or service-principal user owners for
-direct-user application reviews below 500 members. If no usable user owners are
-available, or a group is synchronized from on-premises, that ResourceOwner
-target fails rather than substituting reviewers. The owner stage for 500+
-always uses AppOwnerIds.
+direct-user application reviews below 500 members. For synchronized groups,
+explicit FallbackReviewerUserId users review instead of group owners; without
+them the target fails. Other resources without usable user owners still fail.
+The owner stage for 500+ always uses AppOwnerIds.
 Missing managers use FallbackReviewerUserId, or the effective application owners,
 or the selected resource owners when no application owners are supplied.
+FallbackReviewerUserId accepts one or more user object IDs.
 AppOwnerIds supplies application-owner user object IDs and is required whenever
 application owners review. CSV AppOwnerIds and ReviewerType override their
 run-wide parameters per row; blank cells use the parameters. Multiple owner IDs
@@ -115,7 +116,7 @@ param(
 	[ValidateRange(1, [int]::MaxValue)]
 	[int]$ApplicationOwnerDurationInDays = 5,
 	[guid[]]$AppOwnerIds = @(),
-	[guid]$FallbackReviewerUserId = [guid]::Empty,
+	[guid[]]$FallbackReviewerUserId = @(),
 	[ValidateSet('OneTime', 'Weekly', 'Monthly', 'Quarterly', 'SemiAnnual', 'Annual')]
 	[string]$Frequency = 'OneTime',
 	[datetime]$StartDate = (Get-Date).Date,
@@ -171,9 +172,11 @@ if ($missingScopes.Count -gt 0) {
 if ($AppOwnerIds -contains [guid]::Empty) {
 	throw 'AppOwnerIds must contain nonempty user object GUIDs.'
 }
-if ($PSBoundParameters.ContainsKey('FallbackReviewerUserId') -and $FallbackReviewerUserId -eq [guid]::Empty) {
-	throw 'FallbackReviewerUserId must be a nonempty user object GUID.'
+if ($PSBoundParameters.ContainsKey('FallbackReviewerUserId') -and
+	(-not $FallbackReviewerUserId.Count -or $FallbackReviewerUserId -contains [guid]::Empty)) {
+	throw 'FallbackReviewerUserId must be a nonempty list of nonempty user object GUIDs.'
 }
+$FallbackReviewerUserId = @($FallbackReviewerUserId | Select-Object -Unique)
 if ($PSCmdlet.ParameterSetName -ne 'Csv' -and $ReviewerType -eq 'ApplicationOwner' -and -not $AppOwnerIds.Count) {
 	throw 'Application-owner sign-off is required. Supply -AppOwnerIds.'
 }
@@ -308,7 +311,9 @@ $creationLog = Start-AccessReviewLog -ScriptPath $PSCommandPath -Parameters $inv
 	SelfReviewDurationInDays = $SelfReviewDurationInDays
 	SelectedReviewerDurationInDays = $SelectedReviewerDurationInDays
 	ApplicationOwnerDurationInDays = $ApplicationOwnerDurationInDays
-	FallbackReviewerUserId = if ($FallbackReviewerUserId -ne [guid]::Empty) { "$FallbackReviewerUserId" } else { $null }
+	FallbackReviewerUserId = if ($FallbackReviewerUserId.Count -eq 1) { "$($FallbackReviewerUserId[0])" }
+		elseif ($FallbackReviewerUserId.Count -gt 1) { @($FallbackReviewerUserId | ForEach-Object { "$_" }) }
+		else { $null }
 	StartDate = $StartDate.ToString('o')
 	EndDate = $EndDate.ToString('o')
 	Frequency = $Frequency
@@ -491,8 +496,10 @@ foreach ($target in $targets) {
 		$applicationOwnerReviewers = @(foreach ($ownerId in $targetOwnerIds) {
 			@{ query = "/users/$ownerId"; queryType = 'MicrosoftGraph' }
 		})
-		$fallbackReviewers = @(if ($FallbackReviewerUserId -ne [guid]::Empty) {
-			@{ query = "/users/$FallbackReviewerUserId"; queryType = 'MicrosoftGraph' }
+		$fallbackReviewers = @(if ($FallbackReviewerUserId.Count) {
+			foreach ($fallbackId in $FallbackReviewerUserId) {
+				@{ query = "/users/$fallbackId"; queryType = 'MicrosoftGraph' }
+			}
 		}
 		else { $applicationOwnerReviewers })
 		if ($isApplicationReview) {
@@ -578,24 +585,32 @@ foreach ($target in $targets) {
 		}
 		if ($targetReviewerType -eq 'ResourceOwner' -and $memberCount -lt $SelfReviewStageThreshold) {
 			if ($isSyncedGroup) {
-				throw "The $resourceDescription is synchronized from on-premises; group owners are not available for ResourceOwner routing."
-			}
-			$userOwners = @(if ($isApplicationReview) {
-				$applicationOwners | Where-Object { $_.AdditionalProperties['@odata.type'] -eq '#microsoft.graph.user' }
+				if (-not $FallbackReviewerUserId.Count) {
+					throw "The $resourceDescription is synchronized from on-premises; group owners are not available for ResourceOwner routing. Supply -FallbackReviewerUserId."
+				}
+				Write-Warning "The $resourceDescription is synchronized from on-premises. Using the specified fallback reviewers instead of group owners."
+				$ownerReviewers = @($fallbackReviewers)
 			}
 			else {
-				Get-MgGroupOwner -GroupId $GroupId -All -Property id |
-					Where-Object { $_.AdditionalProperties['@odata.type'] -eq '#microsoft.graph.user' }
-			})
-			$ownerReviewers = @(foreach ($owner in $userOwners) {
-				@{ query = "/users/$($owner.Id)"; queryType = 'MicrosoftGraph' }
-			})
+				$userOwners = @(if ($isApplicationReview) {
+					$applicationOwners | Where-Object { $_.AdditionalProperties['@odata.type'] -eq '#microsoft.graph.user' }
+				}
+				else {
+					Get-MgGroupOwner -GroupId $GroupId -All -Property id |
+						Where-Object { $_.AdditionalProperties['@odata.type'] -eq '#microsoft.graph.user' }
+				})
+				$ownerReviewers = @(foreach ($owner in $userOwners) {
+					@{ query = "/users/$($owner.Id)"; queryType = 'MicrosoftGraph' }
+				})
+			}
 			if (-not $ownerReviewers.Count) {
 				throw "The $resourceDescription has no user owners for ResourceOwner routing."
 			}
 			if (-not $fallbackReviewers.Count) { $fallbackReviewers = @($ownerReviewers) }
 			$ownerStage = @{
-				name = if ($isApplicationReview) { 'Resource owners (service-principal owners)' } else { 'Resource owners (group owners)' }
+				name = if ($isSyncedGroup) { 'Fallback reviewers (synced group)' }
+					elseif ($isApplicationReview) { 'Resource owners (service-principal owners)' }
+					else { 'Resource owners (group owners)' }
 				durationInDays = $ApplicationOwnerDurationInDays
 				reviewers = $ownerReviewers
 				fallbackReviewers = $fallbackReviewers

@@ -137,8 +137,85 @@ Describe 'Unified access review creation and local logging' {
 	It 'fails ResourceOwner routing for synchronized groups without silently substituting reviewers' {
 		$script:fixture.Synced = $true
 		{ & $script:testScript -GroupId $script:groupId -ReviewerType ResourceOwner -Confirm:$false } |
-			Should -Throw '*group owners are not available*'
+			Should -Throw '*Supply -FallbackReviewerUserId*'
 		Should -Invoke Get-MgGroupOwner -Times 0 -Exactly
+		Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times 0 -Exactly
+	}
+
+	It 'uses explicit fallback users for synced groups in <Mode> mode at <Count> members (preview: <Preview>)' -TestCases @(
+		@{ Mode = 'Single'; Count = 150; Preview = $false },
+		@{ Mode = 'Single'; Count = 151; Preview = $false },
+		@{ Mode = 'Single'; Count = 500; Preview = $false },
+		@{ Mode = 'Csv'; Count = 150; Preview = $false },
+		@{ Mode = 'Application'; Count = 151; Preview = $false },
+		@{ Mode = 'Csv'; Count = 151; Preview = $true }
+	) {
+		param($Mode, $Count, $Preview)
+		$script:fixture.Synced = $true
+		$script:fixture.Count = $Count
+		$parameters = switch ($Mode) {
+			'Single' { @{ GroupId = $script:groupId } }
+			'Csv' {
+				$csv = Join-Path $script:testScriptRoot 'synced.csv'
+				"GroupId`n$script:groupId" | Set-Content $csv
+				@{ CsvPath = $csv }
+			}
+			'Application' { @{ ServicePrincipalId = $script:groupId } }
+		}
+		$fallbackIds = @($script:reviewId, $script:groupOwnerId, $script:reviewId)
+		$result = & $script:testScript @parameters -ReviewerType ResourceOwner -FallbackReviewerUserId $fallbackIds `
+			-WhatIf:$Preview -Confirm:$false -WarningAction SilentlyContinue
+		$result.Status | Should -Be $(if ($Preview) { 'Would be created' } else { 'Created' })
+		$result.StageNames | Should -Be $(if ($Count -ge 500) { 'Self-review -> Line managers -> Application owners' }
+			elseif ($Count -gt 150) { 'Line managers -> Fallback reviewers (synced group)' }
+			else { 'Fallback reviewers (synced group)' })
+		$result.Reason | Should -Match 'decisions recorded only'
+		Should -Invoke Get-MgGroupOwner -Times 0 -Exactly
+		if ($Preview) {
+			Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times 0 -Exactly
+		}
+		else {
+			$body = $script:fixture.Bodies[0]
+			$expectedFallback = @("/users/$script:reviewId", "/users/$script:groupOwnerId")
+			$body.settings.autoApplyDecisionsEnabled | Should -BeFalse
+			$body.settings.ContainsKey('applyActions') | Should -BeFalse
+			if ($Count -le 150) {
+				$body.reviewers.query | Should -Be $expectedFallback
+			}
+			else {
+				$body.stageSettings[-2].reviewers[0].query | Should -Be './manager'
+				$body.stageSettings[-2].fallbackReviewers.query | Should -Be $expectedFallback
+				$body.stageSettings[-1].reviewers.query | Should -Be $(if ($Count -ge 500) { @("/users/$script:ownerId") } else { $expectedFallback })
+			}
+			(Get-LogEntries)[0].FallbackReviewerUserId | Should -Be @($script:reviewId, $script:groupOwnerId)
+			(Get-LogEntries)[0].Syntax | Should -Match '-FallbackReviewerUserId @\('
+		}
+	}
+
+	It 'accepts a single fallback user for a synced group without application owners' {
+		$script:fixture.Synced = $true
+		$result = & $script:testScript -GroupId $script:groupId -ReviewerType ResourceOwner -AppOwnerIds @() `
+			-FallbackReviewerUserId $script:reviewId -Confirm:$false -WarningAction SilentlyContinue
+		$result.Status | Should -Be 'Created'
+		$script:fixture.Bodies[0].reviewers.query | Should -Be @("/users/$script:reviewId")
+		(Get-LogEntries)[0].FallbackReviewerUserId | Should -Be $script:reviewId
+	}
+
+	It 'uses multiple manager fallbacks without replacing owners of a cloud group' {
+		$script:fixture.Count = 151
+		$null = & $script:testScript -GroupId $script:groupId -ReviewerType ResourceOwner `
+			-FallbackReviewerUserId @($script:reviewId, $script:ownerId) -Confirm:$false
+		$body = $script:fixture.Bodies[0]
+		$body.stageSettings[0].fallbackReviewers.query | Should -Be @("/users/$script:reviewId", "/users/$script:ownerId")
+		$body.stageSettings[1].reviewers.query | Should -Be @("/users/$script:groupOwnerId")
+	}
+
+	It 'rejects invalid entries in a multi-user fallback list before creation' -TestCases @(
+		@{ Fallbacks = @() }, @{ Fallbacks = @('33333333-3333-3333-3333-333333333333', '00000000-0000-0000-0000-000000000000') }
+	) {
+		param($Fallbacks)
+		{ & $script:testScript -GroupId $script:groupId -FallbackReviewerUserId $Fallbacks -Confirm:$false } |
+			Should -Throw '*FallbackReviewerUserId must be a nonempty*'
 		Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times 0 -Exactly
 	}
 
