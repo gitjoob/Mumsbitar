@@ -5,10 +5,14 @@ Create a read-only HTML status report for all instances of prefix-matched review
 Requires an existing Microsoft Graph connection. Uses GET requests only.
 Keep AccessReview.Reporting.ps1 beside this script. Current configuration,
 runtime reviewer evidence and current resource owners are reported separately.
+Includes every historical instance returned by Graph. The report and returned
+object contain private user identities. No tenant data is changed.
 .PARAMETER Prefixes
 Literal, case-insensitive display-name prefixes. The first matching prefix wins.
 .PARAMETER HtmlReportPath
 New HTML output file. Existing files are never overwritten.
+.PARAMETER OpenReport
+Open the completed local HTML report in the default browser.
 .EXAMPLE
 .\Get-AccessReviewStatusReport.ps1 -Prefixes @('AR ', 'Quarterly ') -OpenReport
 #>
@@ -56,9 +60,9 @@ function Get-AccessReviewStatusCollection {
 }
 
 function Get-AccessReviewStatusUser {
-	param([hashtable]$State, [string]$Id, [string]$DisplayName, [string]$UserPrincipalName)
+	param([hashtable]$State, [string]$Id, [string]$DisplayName, [string]$UserPrincipalName, [string]$RecordSource = 'Graph review record')
 	if ($DisplayName -and $UserPrincipalName) {
-		return [pscustomobject]@{ Id = $Id; DisplayName = $DisplayName; UserPrincipalName = $UserPrincipalName; ProfileSource = 'Review record'; Error = $null }
+		return [pscustomobject]@{ Id = $Id; DisplayName = $DisplayName; UserPrincipalName = $UserPrincipalName; ProfileSource = $RecordSource; Error = $null }
 	}
 	if (-not $State.Users.ContainsKey($Id)) {
 		$user = $null
@@ -80,7 +84,9 @@ function Get-AccessReviewStatusUser {
 		Id = $Id
 		DisplayName = if ($DisplayName) { $DisplayName } elseif ($lookup.User.displayName) { $lookup.User.displayName } else { 'Name unavailable' }
 		UserPrincipalName = if ($UserPrincipalName) { $UserPrincipalName } else { $lookup.User.userPrincipalName }
-		ProfileSource = if ($lookup.Error) { 'Directory lookup unavailable; any supplied name is from the review record' } else { 'Current directory profile; supplied review-record names retained' }
+		ProfileSource = if ($lookup.Error) { "Directory lookup unavailable; supplied name source: $RecordSource" }
+			elseif ($DisplayName) { "$RecordSource name; current directory sign-in address" }
+			else { 'Current directory profile' }
 		Error = $lookup.Error
 	}
 }
@@ -108,7 +114,7 @@ function Get-AccessReviewStatusResource {
 			$resource.Owners = @(
 				foreach ($owner in $owners) {
 					if ($owner.'@odata.type' -eq '#microsoft.graph.user') {
-						Get-AccessReviewStatusUser $State $owner.id $owner.displayName
+						Get-AccessReviewStatusUser $State $owner.id $owner.displayName '' 'Current directory owner record'
 					}
 				}
 			)
@@ -141,6 +147,7 @@ function Get-AccessReviewStatusResources {
 
 function Get-AccessReviewStatusReviewers {
 	param([hashtable]$State, [object[]]$Scopes, [object[]]$Resources, [bool]$Available = $true)
+	$Scopes = @($Scopes | Where-Object { $null -ne $_ })
 	if (-not $Available) {
 		return [pscustomobject]@{ Mode = 'Reviewer scopes unavailable'; Query = ''; Users = @(); Note = 'No reviewer type or users inferred.' }
 	}
@@ -164,13 +171,30 @@ function Get-AccessReviewStatusReviewers {
 			$mode = 'Line managers'
 			$note = 'Per-subject manager rule. No historical manager assignment inferred from current directory managers.'
 		}
+		elseif ($query -match '^/groups/([0-9a-fA-F-]{36})/(transitiveMembers|members)$') {
+			$mode = 'Reviewer group members'
+			if (-not $State.ReviewerGroups.ContainsKey($query)) {
+				try {
+					$members = @(Get-AccessReviewStatusCollection $State "$($State.Base)$query/microsoft.graph.user?`$select=id,displayName,userPrincipalName")
+					$State.ReviewerGroups[$query] = @($members | ForEach-Object {
+						Get-AccessReviewStatusUser $State $_.id $_.displayName $_.userPrincipalName 'Current reviewer-group membership'
+					})
+				}
+				catch {
+					$State.ReviewerGroups[$query] = @()
+					Add-AccessReviewStatusIssue $State "Reviewer group $query" $_.Exception.Message
+				}
+			}
+			$users = @($State.ReviewerGroups[$query])
+			$note = 'Current human members of this reviewer group, not proof of historical stage assignments. Consult collection issues if identities are unavailable.'
+		}
 		elseif ($query -eq './owners' -or $query -match '^/(groups|servicePrincipals)/([0-9a-fA-F-]{36})/owners$') {
 			$mode = 'Resource owners'
 			$ownerResources = if ($query -eq './owners') { @($Resources) }
 				else { @(Get-AccessReviewStatusResource $State $Matches[1] $Matches[2]) }
 			$users = @($ownerResources | ForEach-Object { $_.Owners })
 			$note = 'Dynamic owner rule: users below are current human owners, not proof of past stage assignment. See recorded reviewers and decision actors.'
-			if (-not @($ownerResources).Count -or @($ownerResources | Where-Object OwnersError).Count) {
+			if (-not @($ownerResources | Where-Object { $_ }).Count -or @($ownerResources | Where-Object OwnersError).Count) {
 				$note += ' Owner resolution is unavailable or partial.'
 			}
 		}
@@ -178,7 +202,7 @@ function Get-AccessReviewStatusReviewers {
 			$mode = 'Filtered owner rule'
 			$note = 'Filter retained verbatim; eligibility is not inferred from the unfiltered current owner list shown separately.'
 		}
-		[pscustomobject]@{ Mode = $mode; Query = $query; Users = @($users); Note = $note }
+		[pscustomobject]@{ Mode = $mode; Query = $query; Users = @($users); Note = $note; RawScope = $scope }
 	}
 }
 
@@ -245,7 +269,7 @@ $report = [pscustomobject]@{
 }
 $state = @{
 	Base = "$($environment.GraphEndpoint.TrimEnd('/'))/v1.0"; Report = $report
-	Users = @{}; Resources = @{}; DefinitionId = $null; InstanceId = $null
+	Users = @{}; Resources = @{}; ReviewerGroups = @{}; DefinitionId = $null; InstanceId = $null
 }
 try {
 	$definitions = @(Get-AccessReviewStatusCollection $state "$($state.Base)/identityGovernance/accessReviews/definitions")
@@ -257,7 +281,7 @@ try {
 		Write-Host "Reading all instances: $($definition.displayName)"
 		$item = [pscustomobject]@{
 			Prefix = $matched[0]; Id = $definition.id; DisplayName = $definition.displayName; Status = $definition.status
-			Description = $definition.descriptionForReviewers; Configuration = @()
+			Description = $definition.descriptionForReviewers; Configuration = @(); Scope = $definition.scope
 			CurrentResources = @(Get-AccessReviewStatusResources $state @($definition.scope.query))
 			Instances = [System.Collections.Generic.List[object]]::new(); Error = $null
 		}
@@ -274,7 +298,7 @@ try {
 				[pscustomobject]@{
 					Id = $setting.stageId; DurationInDays = $setting.durationInDays; DependsOn = @($setting.dependsOn)
 					Reviewers = @(Get-AccessReviewStatusReviewers $state @($setting.reviewers) $item.CurrentResources)
-					Fallbacks = if (@($setting.fallbackReviewers).Count) { @(Get-AccessReviewStatusReviewers $state @($setting.fallbackReviewers) $item.CurrentResources) } else { @() }
+					Fallbacks = if (@($setting.fallbackReviewers | Where-Object { $_ }).Count) { @(Get-AccessReviewStatusReviewers $state @($setting.fallbackReviewers) $item.CurrentResources) } else { @() }
 				}
 			}
 		)
@@ -289,7 +313,7 @@ try {
 			$state.InstanceId = $instance.id
 			$instanceUri = "$definitionUri/instances/$([uri]::EscapeDataString($instance.id))"
 			$row = [pscustomobject]@{
-				Id = $instance.id; Status = $instance.status; Start = $instance.startDateTime; End = $instance.endDateTime
+				Id = $instance.id; Status = $instance.status; Start = $instance.startDateTime; End = $instance.endDateTime; Scope = $instance.scope
 				Summary = $null; DecisionError = $null; StageError = $null; ContactError = $null
 				Resources = @(); Reviewers = @(); Fallbacks = @(); ContactedReviewers = @()
 				Stages = [System.Collections.Generic.List[object]]::new()
@@ -302,7 +326,7 @@ try {
 			}
 			$row.Resources = @(Get-AccessReviewStatusResources $state (@($instance.scope.query) + @($row.Summary.ResourceLinks)))
 			$row.Reviewers = @(Get-AccessReviewStatusReviewers $state @($instance.reviewers) $row.Resources ($instance.PSObject.Properties.Name -contains 'reviewers'))
-			if (@($instance.fallbackReviewers).Count) { $row.Fallbacks = @(Get-AccessReviewStatusReviewers $state @($instance.fallbackReviewers) $row.Resources) }
+			if (@($instance.fallbackReviewers | Where-Object { $_ }).Count) { $row.Fallbacks = @(Get-AccessReviewStatusReviewers $state @($instance.fallbackReviewers) $row.Resources) }
 			try {
 				$row.ContactedReviewers = @(
 					Get-AccessReviewStatusCollection $state "$instanceUri/contactedReviewers" |
@@ -323,7 +347,7 @@ try {
 				$stageRow = [pscustomobject]@{
 					Id = $stage.id; Status = $stage.status; Start = $stage.startDateTime; End = $stage.endDateTime
 					Reviewers = @(Get-AccessReviewStatusReviewers $state @($stage.reviewers) $row.Resources ($stage.PSObject.Properties.Name -contains 'reviewers'))
-					Fallbacks = if (@($stage.fallbackReviewers).Count) { @(Get-AccessReviewStatusReviewers $state @($stage.fallbackReviewers) $row.Resources) } else { @() }
+					Fallbacks = if (@($stage.fallbackReviewers | Where-Object { $_ }).Count) { @(Get-AccessReviewStatusReviewers $state @($stage.fallbackReviewers) $row.Resources) } else { @() }
 					Summary = $null; Error = $null
 				}
 				$row.Stages.Add($stageRow)

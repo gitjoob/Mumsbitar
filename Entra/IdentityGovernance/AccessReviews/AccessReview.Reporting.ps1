@@ -41,6 +41,69 @@ function New-AccessReviewGroupLink {
 	}
 }
 
+function Get-AccessReviewReportStyle {
+	@'
+:root{color-scheme:light;--bg:#f8f3f3;--panel:#fff;--ink:#302327;--muted:#715e65;--line:#e7d8dc;--accent:#b51f3b;--soft:#fbe9ed;--warning:#775015;--warn-bg:#fff3dc}
+:root[data-theme=dark]{color-scheme:dark;--bg:#171315;--panel:#241d20;--ink:#f7edef;--muted:#c9b5bd;--line:#4c3941;--accent:#ff8da3;--soft:#472832;--warning:#ffda90;--warn-bg:#392e1c}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.6 system-ui,sans-serif}
+main{max-width:1250px;margin:auto;padding:28px 24px 60px}header{display:flex;justify-content:space-between;align-items:start;gap:14px}
+h1{font-size:32px;letter-spacing:-.7px;margin:2px 0 12px}h2{font-size:23px;margin-top:0}h3{font-size:21px}h4{font-size:16px}
+.eyebrow{font-size:11px;letter-spacing:1.5px;text-transform:uppercase;font-weight:750;color:var(--accent);margin-bottom:0}
+.theme-control{display:flex;flex-direction:column;align-items:flex-end;max-width:240px}#theme-notice{font-size:11px}
+button,input,select{font:inherit;color:var(--ink);background:var(--panel);border:1px solid var(--line);border-radius:7px;padding:8px 12px}
+button{cursor:pointer}button:disabled{opacity:.5;cursor:default}#theme{border-color:var(--accent);white-space:nowrap}#theme[aria-checked=true]{background:var(--soft)}
+a,.link{color:var(--accent)}.link{border:0;background:transparent;padding:0;text-align:left;text-decoration:underline;overflow-wrap:anywhere}
+button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible{outline:3px solid var(--accent);outline-offset:3px}
+.notice{border-left:4px solid var(--accent);background:var(--soft);border-radius:5px;padding:12px 16px}
+.warning{color:var(--warning);background:var(--warn-bg);border-color:var(--warning)}
+.muted,small,footer{color:var(--muted)}small{display:block}.metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin:22px 0}
+.metric,.panel{background:var(--panel);border:1px solid var(--line);border-radius:10px}.metric{padding:12px 16px}.metric strong{display:block;font-size:26px;color:var(--accent)}.metric span{font-size:12px}
+.panel{padding:24px;margin-top:22px;scroll-margin-top:15px}nav{display:flex;gap:22px;flex-wrap:wrap}
+.entra-link{display:block;font-size:12px;margin-top:6px}.topology-controls{display:flex;align-items:end;justify-content:space-between;gap:14px;flex-wrap:wrap}.topology-controls label{font-size:12px;max-width:100%}.topology-controls select{display:block;max-width:100%;margin-top:5px}.topology-controls button{padding:6px 10px}
+#topology-viewport{max-height:700px;overflow:auto;border:1px solid var(--line);border-radius:8px;background:var(--bg)}#topology-space{position:relative}#topology-canvas{position:relative;transform-origin:top left}#topology-lines{position:absolute;inset:0;pointer-events:none;overflow:visible}.topology-edge{stroke:var(--accent);stroke-width:2;fill:none}#topology-arrow path{fill:var(--accent)}
+.topology-node{width:260px;max-width:100%;min-height:180px;padding:14px;margin:12px;background:var(--panel);border:1px solid var(--line);border-top:4px solid var(--accent);border-radius:9px;display:flex;flex-direction:column;gap:6px;overflow-wrap:anywhere}.topology-node.positioned{position:absolute;margin:0}.topology-node .eyebrow{font-size:10px;letter-spacing:.5px}.topology-name{font-weight:700;font-size:15px}.topology-stages{font-size:12px}.topology-name,.topology-stages{display:-webkit-box;-webkit-box-orient:vertical;overflow:hidden;-webkit-line-clamp:3}.topology-node .entra-link{margin-top:auto}
+.relationships{display:grid;grid-template-columns:1fr 1fr 1fr;gap:15px;padding:12px;border:1px solid var(--line);border-radius:7px}.relationships>div{min-width:0;overflow-wrap:anywhere}.selected-group{display:flex;flex-direction:column;justify-content:center;gap:8px;padding:15px;background:var(--soft);border:1px solid var(--accent);border-radius:7px}
+.timeline{display:flex;gap:3px;margin:18px 0}.stage{flex-basis:0;min-width:0;background:var(--soft);border-top:4px solid var(--accent);padding:12px;border-radius:6px;overflow-wrap:anywhere}
+.stage strong,.stage span{display:block}.stage small{font-size:11px}details{margin:14px 0}summary{cursor:pointer;color:var(--accent);font-weight:600}
+dl{display:grid;grid-template-columns:minmax(110px,1fr) 3fr;gap:5px 15px}dt{font-weight:600}dd{margin:0;overflow-wrap:anywhere}
+pre,code{white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px}.filters{display:flex;gap:14px;flex-wrap:wrap}.filters label{flex:1;min-width:170px;font-size:12px;font-weight:600}.filters input,.filters select{display:block;width:100%;margin-top:5px}
+.table-wrap{overflow:auto}table{width:100%;border-collapse:collapse;font-size:13px}th,td{text-align:left;padding:13px 10px;border-bottom:1px solid var(--line);vertical-align:top}th{font-size:11px;text-transform:uppercase;color:var(--muted)}td{overflow-wrap:anywhere;max-width:350px}.badge{display:inline-block;background:var(--soft);color:var(--accent);padding:3px 9px;border-radius:18px;font-size:12px}
+#pagination{display:flex;justify-content:center;gap:18px;align-items:center;margin-top:18px}footer{margin-top:24px;font-size:12px}[hidden]{display:none!important}
+@media(prefers-color-scheme:dark){:root:not([data-theme]){color-scheme:dark;--bg:#171315;--panel:#241d20;--ink:#f7edef;--muted:#c9b5bd;--line:#4c3941;--accent:#ff8da3;--soft:#472832;--warning:#ffda90;--warn-bg:#392e1c}}
+@media(max-width:650px){main{padding:18px 12px}h1{font-size:25px}.panel{padding:15px}.metrics{grid-template-columns:1fr 1fr}.timeline{flex-direction:column}.relationships{grid-template-columns:1fr}.theme-control{max-width:130px}dl{grid-template-columns:1fr}#pagination{gap:10px}}
+@media print{:root,:root[data-theme=dark]{color-scheme:light;--bg:#fff;--panel:#fff;--ink:#222;--muted:#555;--line:#ccc;--accent:#931b30;--soft:#fff;--warning:#604000;--warn-bg:#fff}body{background:white}main{max-width:none;padding:0}.theme-control,.filters,#pagination,nav,.topology-controls{display:none}.panel{border:0}.table-wrap{overflow:visible}tr[hidden]{display:table-row!important}.review-detail[hidden]{display:none!important}#topology-viewport{max-height:none;overflow:visible}#topology-space,#topology-canvas{width:auto!important;height:auto!important;transform:none!important}#topology-lines{display:none}.topology-node.positioned{position:static;display:inline-flex;vertical-align:top;margin:6px;break-inside:avoid}h2,h3{break-after:avoid}}
+'@
+}
+
+function Get-AccessReviewReportThemeScript {
+	@'
+  const root = document.documentElement;
+  const toggle = document.getElementById('theme');
+  const notice = document.getElementById('theme-notice');
+  const system = matchMedia('(prefers-color-scheme: dark)');
+  const key = 'access-review-report-theme';
+  let choice = null;
+  const storageProblem = error => {
+    if (error.name !== 'SecurityError' && error.name !== 'QuotaExceededError') throw error;
+    notice.textContent = 'Theme preference cannot be saved in this browser context.';
+  };
+  try { const saved = localStorage.getItem(key); if (saved === 'light' || saved === 'dark') choice = saved; }
+  catch (error) { storageProblem(error); }
+  function applyTheme() {
+    const dark = choice ? choice === 'dark' : system.matches;
+    root.dataset.theme = dark ? 'dark' : 'light';
+    toggle.setAttribute('aria-checked', String(dark));
+  }
+  applyTheme();
+  system.addEventListener('change', () => { if (!choice) applyTheme(); });
+  toggle.addEventListener('click', () => {
+    choice = root.dataset.theme === 'dark' ? 'light' : 'dark';
+    applyTheme();
+    try { localStorage.setItem(key, choice); } catch (error) { storageProblem(error); }
+  });
+'@
+}
+
 function New-AccessReviewHtml {
 	param(
 		[AllowEmptyCollection()][object[]]$Results = @(),
@@ -266,63 +329,12 @@ function New-AccessReviewHtml {
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
 <title>Access review campaign</title>
 <style>
-:root{color-scheme:light;--bg:#f8f3f3;--panel:#fff;--ink:#302327;--muted:#715e65;--line:#e7d8dc;--accent:#b51f3b;--soft:#fbe9ed;--warning:#775015;--warn-bg:#fff3dc}
-:root[data-theme=dark]{color-scheme:dark;--bg:#171315;--panel:#241d20;--ink:#f7edef;--muted:#c9b5bd;--line:#4c3941;--accent:#ff8da3;--soft:#472832;--warning:#ffda90;--warn-bg:#392e1c}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.6 system-ui,sans-serif}
-main{max-width:1250px;margin:auto;padding:28px 24px 60px}header{display:flex;justify-content:space-between;align-items:start;gap:14px}
-h1{font-size:32px;letter-spacing:-.7px;margin:2px 0 12px}h2{font-size:23px;margin-top:0}h3{font-size:21px}h4{font-size:16px}
-.eyebrow{font-size:11px;letter-spacing:1.5px;text-transform:uppercase;font-weight:750;color:var(--accent);margin-bottom:0}
-.theme-control{display:flex;flex-direction:column;align-items:flex-end;max-width:240px}#theme-notice{font-size:11px}
-button,input,select{font:inherit;color:var(--ink);background:var(--panel);border:1px solid var(--line);border-radius:7px;padding:8px 12px}
-button{cursor:pointer}button:disabled{opacity:.5;cursor:default}#theme{border-color:var(--accent);white-space:nowrap}#theme[aria-checked=true]{background:var(--soft)}
-a,.link{color:var(--accent)}.link{border:0;background:transparent;padding:0;text-align:left;text-decoration:underline;overflow-wrap:anywhere}
-button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible{outline:3px solid var(--accent);outline-offset:3px}
-.notice{border-left:4px solid var(--accent);background:var(--soft);border-radius:5px;padding:12px 16px}
-.warning{color:var(--warning);background:var(--warn-bg);border-color:var(--warning)}
-.muted,small,footer{color:var(--muted)}small{display:block}.metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin:22px 0}
-.metric,.panel{background:var(--panel);border:1px solid var(--line);border-radius:10px}.metric{padding:12px 16px}.metric strong{display:block;font-size:26px;color:var(--accent)}.metric span{font-size:12px}
-.panel{padding:24px;margin-top:22px;scroll-margin-top:15px}nav{display:flex;gap:22px;flex-wrap:wrap}
-.entra-link{display:block;font-size:12px;margin-top:6px}.topology-controls{display:flex;align-items:end;justify-content:space-between;gap:14px;flex-wrap:wrap}.topology-controls label{font-size:12px;max-width:100%}.topology-controls select{display:block;max-width:100%;margin-top:5px}.topology-controls button{padding:6px 10px}
-#topology-viewport{max-height:700px;overflow:auto;border:1px solid var(--line);border-radius:8px;background:var(--bg)}#topology-space{position:relative}#topology-canvas{position:relative;transform-origin:top left}#topology-lines{position:absolute;inset:0;pointer-events:none;overflow:visible}.topology-edge{stroke:var(--accent);stroke-width:2;fill:none}#topology-arrow path{fill:var(--accent)}
-.topology-node{width:260px;max-width:100%;min-height:180px;padding:14px;margin:12px;background:var(--panel);border:1px solid var(--line);border-top:4px solid var(--accent);border-radius:9px;display:flex;flex-direction:column;gap:6px;overflow-wrap:anywhere}.topology-node.positioned{position:absolute;margin:0}.topology-node .eyebrow{font-size:10px;letter-spacing:.5px}.topology-name{font-weight:700;font-size:15px}.topology-stages{font-size:12px}.topology-name,.topology-stages{display:-webkit-box;-webkit-box-orient:vertical;overflow:hidden;-webkit-line-clamp:3}.topology-node .entra-link{margin-top:auto}
-.relationships{display:grid;grid-template-columns:1fr 1fr 1fr;gap:15px;padding:12px;border:1px solid var(--line);border-radius:7px}.relationships>div{min-width:0;overflow-wrap:anywhere}.selected-group{display:flex;flex-direction:column;justify-content:center;gap:8px;padding:15px;background:var(--soft);border:1px solid var(--accent);border-radius:7px}
-.timeline{display:flex;gap:3px;margin:18px 0}.stage{flex-basis:0;min-width:0;background:var(--soft);border-top:4px solid var(--accent);padding:12px;border-radius:6px;overflow-wrap:anywhere}
-.stage strong,.stage span{display:block}.stage small{font-size:11px}details{margin:14px 0}summary{cursor:pointer;color:var(--accent);font-weight:600}
-dl{display:grid;grid-template-columns:minmax(110px,1fr) 3fr;gap:5px 15px}dt{font-weight:600}dd{margin:0;overflow-wrap:anywhere}
-pre,code{white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px}.filters{display:flex;gap:14px;flex-wrap:wrap}.filters label{flex:1;min-width:170px;font-size:12px;font-weight:600}.filters input,.filters select{display:block;width:100%;margin-top:5px}
-.table-wrap{overflow:auto}table{width:100%;border-collapse:collapse;font-size:13px}th,td{text-align:left;padding:13px 10px;border-bottom:1px solid var(--line);vertical-align:top}th{font-size:11px;text-transform:uppercase;color:var(--muted)}td{overflow-wrap:anywhere;max-width:350px}.badge{display:inline-block;background:var(--soft);color:var(--accent);padding:3px 9px;border-radius:18px;font-size:12px}
-#pagination{display:flex;justify-content:center;gap:18px;align-items:center;margin-top:18px}footer{margin-top:24px;font-size:12px}[hidden]{display:none!important}
-@media(prefers-color-scheme:dark){:root:not([data-theme]){color-scheme:dark;--bg:#171315;--panel:#241d20;--ink:#f7edef;--muted:#c9b5bd;--line:#4c3941;--accent:#ff8da3;--soft:#472832;--warning:#ffda90;--warn-bg:#392e1c}}
-@media(max-width:650px){main{padding:18px 12px}h1{font-size:25px}.panel{padding:15px}.metrics{grid-template-columns:1fr 1fr}.timeline{flex-direction:column}.relationships{grid-template-columns:1fr}.theme-control{max-width:130px}dl{grid-template-columns:1fr}#pagination{gap:10px}}
-@media print{:root,:root[data-theme=dark]{color-scheme:light;--bg:#fff;--panel:#fff;--ink:#222;--muted:#555;--line:#ccc;--accent:#931b30;--soft:#fff;--warning:#604000;--warn-bg:#fff}body{background:white}main{max-width:none;padding:0}.theme-control,.filters,#pagination,nav,.topology-controls{display:none}.panel{border:0}.table-wrap{overflow:visible}tr[hidden]{display:table-row!important}.review-detail[hidden]{display:none!important}#topology-viewport{max-height:none;overflow:visible}#topology-space,#topology-canvas{width:auto!important;height:auto!important;transform:none!important}#topology-lines{display:none}.topology-node.positioned{position:static;display:inline-flex;vertical-align:top;margin:6px;break-inside:avoid}h2,h3{break-after:avoid}}
+<!--STYLE-->
 </style></head><body>
 <!--REPORT-->
 <script>
 (() => {
-  const root = document.documentElement;
-  const toggle = document.getElementById('theme');
-  const notice = document.getElementById('theme-notice');
-  const system = matchMedia('(prefers-color-scheme: dark)');
-  const key = 'access-review-report-theme';
-  let choice = null;
-  const storageProblem = error => {
-    if (error.name !== 'SecurityError' && error.name !== 'QuotaExceededError') throw error;
-    notice.textContent = 'Theme preference cannot be saved in this browser context.';
-  };
-  try { const saved = localStorage.getItem(key); if (saved === 'light' || saved === 'dark') choice = saved; }
-  catch (error) { storageProblem(error); }
-  function applyTheme() {
-    const dark = choice ? choice === 'dark' : system.matches;
-    root.dataset.theme = dark ? 'dark' : 'light';
-    toggle.setAttribute('aria-checked', String(dark));
-  }
-  applyTheme();
-  system.addEventListener('change', () => { if (!choice) applyTheme(); });
-  toggle.addEventListener('click', () => {
-    choice = root.dataset.theme === 'dark' ? 'light' : 'dark';
-    applyTheme();
-    try { localStorage.setItem(key, choice); } catch (error) { storageProblem(error); }
-  });
+  /*THEME*/
   function initializeTopology() {
     const nodes = [...document.querySelectorAll('.topology-node')];
     const edges = [...document.querySelectorAll('.topology-edge')];
@@ -501,7 +513,27 @@ pre,code{white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px}.filters{dis
 })();
 </script></body></html>
 '@
-	$template.Replace('<!--REPORT-->', $body.ToString())
+	$template.Replace('<!--STYLE-->', (Get-AccessReviewReportStyle)).Replace('/*THEME*/', (Get-AccessReviewReportThemeScript)).Replace('<!--REPORT-->', $body.ToString())
+}
+
+function Write-AccessReviewHtmlFile {
+	param(
+		[Parameter(Mandatory)][string]$Path,
+		[Parameter(Mandatory)][string]$Html
+	)
+
+	$fullPath = Resolve-AccessReviewReportPath -Path $Path
+	$directory = [System.IO.Path]::GetDirectoryName($fullPath)
+	$temporaryPath = Join-Path $directory ('.access-review-' + [guid]::NewGuid().ToString() + '.tmp')
+	try {
+		$null = [System.IO.Directory]::CreateDirectory($directory)
+		[System.IO.File]::WriteAllText($temporaryPath, $Html, [System.Text.UTF8Encoding]::new($false))
+		[System.IO.File]::Move($temporaryPath, $fullPath)
+	}
+	finally {
+		if ([System.IO.File]::Exists($temporaryPath)) { [System.IO.File]::Delete($temporaryPath) }
+	}
+	Write-Host "HTML report: $fullPath"
 }
 
 function Write-AccessReviewReport {
@@ -510,18 +542,210 @@ function Write-AccessReviewReport {
 		[AllowEmptyCollection()][object[]]$Results = @(),
 		[Parameter(Mandatory)][hashtable]$Context
 	)
-
 	$fullPath = Resolve-AccessReviewReportPath -Path $Path
-	$html = New-AccessReviewHtml -Results $Results -Context $Context
-	$directory = [System.IO.Path]::GetDirectoryName($fullPath)
-	$temporaryPath = Join-Path $directory ('.access-review-' + [guid]::NewGuid().ToString() + '.tmp')
-	try {
-		$null = [System.IO.Directory]::CreateDirectory($directory)
-		[System.IO.File]::WriteAllText($temporaryPath, $html, [System.Text.UTF8Encoding]::new($false))
-		[System.IO.File]::Move($temporaryPath, $fullPath)
+	Write-AccessReviewHtmlFile -Path $fullPath -Html (New-AccessReviewHtml -Results $Results -Context $Context)
+}
+
+function ConvertTo-AccessReviewStatusUsersHtml {
+	param([object[]]$Users)
+	$lines = @(
+		foreach ($user in @($Users | Where-Object { $_ })) {
+			"<li><strong>$(ConvertTo-AccessReviewHtmlText $user.DisplayName)</strong> $(ConvertTo-AccessReviewHtmlText $user.UserPrincipalName)<small>$(ConvertTo-AccessReviewHtmlText $user.Id) | $(ConvertTo-AccessReviewHtmlText $user.ProfileSource)</small>$(if ($user.Error) { '<span class="warning">' + (ConvertTo-AccessReviewHtmlText $user.Error) + '</span>' })</li>"
+		}
+	)
+	if (-not $lines.Count) { return '<p class="muted">No individual user identities returned in this list.</p>' }
+	'<ul>' + ($lines -join '') + '</ul>'
+}
+
+function ConvertTo-AccessReviewStatusScopesHtml {
+	param([object[]]$Scopes)
+	if (-not @($Scopes | Where-Object { $_ }).Count) { return '<p class="muted">None configured/returned.</p>' }
+	(@(foreach ($scope in $Scopes) {
+		"<p><strong>$(ConvertTo-AccessReviewHtmlText $scope.Mode)</strong><br><code>$(ConvertTo-AccessReviewHtmlText $scope.Query)</code><small>$(ConvertTo-AccessReviewHtmlText $scope.Note)</small></p>"
+		ConvertTo-AccessReviewStatusUsersHtml $scope.Users
+		if ($scope.RawScope) { "<details><summary>Raw reviewer rule</summary><pre>$(ConvertTo-AccessReviewHtmlText ($scope.RawScope | ConvertTo-Json -Depth 10))</pre></details>" }
+	}) -join '')
+}
+
+function ConvertTo-AccessReviewStatusOwnersHtml {
+	param([object[]]$Resources)
+	if (-not @($Resources | Where-Object { $_ }).Count) {
+		return '<p class="notice warning">Resource IDs could not be resolved from this scope. No owner identities inferred.</p>'
 	}
-	finally {
-		if ([System.IO.File]::Exists($temporaryPath)) { [System.IO.File]::Delete($temporaryPath) }
+	(@(foreach ($resource in $Resources) {
+		"<h4>$(ConvertTo-AccessReviewHtmlText $resource.DisplayName)</h4><small>$(ConvertTo-AccessReviewHtmlText $resource.Kind)/$(ConvertTo-AccessReviewHtmlText $resource.Id)</small>"
+		if ($resource.Kind -eq 'groups') { New-AccessReviewGroupLink $resource.Id }
+		if ($resource.MetadataError -or $resource.OwnersError) {
+			"<p class=`"notice warning`">Owner/resource lookup incomplete: $(ConvertTo-AccessReviewHtmlText $resource.MetadataError) $(ConvertTo-AccessReviewHtmlText $resource.OwnersError)</p>"
+		}
+		ConvertTo-AccessReviewStatusUsersHtml $resource.Owners
+		foreach ($other in $resource.OtherOwners) {
+			"<p class=`"muted`">Non-user/unclassified owner, not listed as a human reviewer: $(ConvertTo-AccessReviewHtmlText $other.displayName) <code>$(ConvertTo-AccessReviewHtmlText $other.id)</code> $(ConvertTo-AccessReviewHtmlText $other.'@odata.type')</p>"
+		}
+	}) -join '')
+}
+
+function ConvertTo-AccessReviewStatusSummaryHtml {
+	param([AllowNull()][object]$Summary)
+	if ($null -eq $Summary) { return '<p class="notice warning">Decision counts unavailable; no zero or completion percentage inferred.</p>' }
+	$percent = if ($null -ne $Summary.Completion) { "$($Summary.Completion)%" } else { 'n/a (no items)' }
+	$counts = ConvertTo-AccessReviewHtmlText ($Summary.DecisionCounts | ConvertTo-Json -Compress)
+	$apply = ConvertTo-AccessReviewHtmlText ($Summary.ApplyResults | ConvertTo-Json -Compress)
+	"<p><strong>$($Summary.Recorded) / $($Summary.Total)</strong> recorded outcomes ($percent). Approve: $($Summary.Approve); Deny: $($Summary.Deny); Don't know: $($Summary.DontKnow); Not reviewed: $($Summary.NotReviewed); Other: $($Summary.Other).</p><details><summary>Decision and application-result breakdown</summary><pre>$counts</pre><p>Application results are not all removals; successful application can also retain access.</p><pre>$apply</pre></details><h4>Recorded decision actors</h4>$(ConvertTo-AccessReviewStatusUsersHtml $Summary.Actors)"
+}
+
+function New-AccessReviewStatusHtml {
+	param([Parameter(Mandatory)][object]$Report)
+	$body = [System.Text.StringBuilder]::new()
+	$instances = @($Report.Definitions | ForEach-Object { $_.Instances })
+	$known = @($instances | Where-Object { $null -ne $_.Summary })
+	$total = [long](($known | ForEach-Object { $_.Summary.Total } | Measure-Object -Sum).Sum)
+	$recorded = [long](($known | ForEach-Object { $_.Summary.Recorded } | Measure-Object -Sum).Sum)
+	$notReviewed = [long](($known | ForEach-Object { $_.Summary.NotReviewed } | Measure-Object -Sum).Sum)
+	$dontKnow = [long](($known | ForEach-Object { $_.Summary.DontKnow } | Measure-Object -Sum).Sum)
+	$other = [long](($known | ForEach-Object { $_.Summary.Other } | Measure-Object -Sum).Sum)
+	$null = $body.AppendLine('<main><header><div><p class="eyebrow">Identity governance / read-only snapshot</p><h1>Access review status</h1></div><div class="theme-control"><button id="theme" type="button" role="switch" aria-checked="false" aria-label="Dark mode">Dark mode</button><small id="theme-notice" role="status"></small></div></header>')
+	$null = $body.AppendLine("<p>Tenant: $(ConvertTo-AccessReviewHtmlText $Report.TenantId)<br>Collected: $(ConvertTo-AccessReviewHtmlText $Report.StartedAt) to $(ConvertTo-AccessReviewHtmlText $Report.FinishedAt)<br>Literal prefixes: $(ConvertTo-AccessReviewHtmlText ($Report.Prefixes -join ', '))</p>")
+	$null = $body.AppendLine('<p class="notice">All historical instances returned by Graph. This is a read-only, non-transactional snapshot, not proof of certification or removal. Decision totals below count instance items only, not repeated stage tasks or unique people. Recorded outcomes include Approve, Deny and Don&#39;t know, and may include automatic/default decisions. Names, sign-in addresses and IDs are private.</p>')
+	if (-not $Report.Completed -or $Report.Issues.Count) {
+		$null = $body.AppendLine("<p class=`"notice warning`" role=`"alert`"><strong>Partial data / collection issues.</strong> $($Report.Issues.Count) issue(s). Unavailable data is not treated as zero. See collection issues below.</p>")
 	}
-	Write-Host "HTML report: $fullPath"
+	$null = $body.AppendLine('<section class="metrics" aria-label="Status summary">')
+	foreach ($metric in @(
+		@('Definitions', $Report.Definitions.Count), @('Historical instances', $instances.Count),
+		@('Available instance decision items', $total), @('Recorded outcomes', $recorded),
+		@('Not reviewed', $notReviewed), @("Don't know", $dontKnow),
+		@('Other / unknown outcomes', $other), @('Collection issues', $Report.Issues.Count)
+	)) {
+		$null = $body.AppendLine("<div class=`"metric`"><strong>$($metric[1])</strong><span>$(ConvertTo-AccessReviewHtmlText $metric[0])</span></div>")
+	}
+	$null = $body.AppendLine("</section><p class=`"muted`">Decision-count coverage: $($known.Count) of $($instances.Count) instances. Future/current configured stages and runtime stages are shown separately. Current configuration and directory owners are not historical assignment snapshots.</p>")
+	$null = $body.AppendLine('<section class="panel"><h2>Summary by prefix</h2><div class="table-wrap"><table><thead><tr><th>Prefix</th><th>Definitions</th><th>Instances</th><th>Known / all instances</th><th>Items</th><th>Recorded outcomes</th><th>Not reviewed</th></tr></thead><tbody>')
+	foreach ($group in @($Report.Definitions | Group-Object Prefix | Sort-Object Name)) {
+		$groupInstances = @($group.Group | ForEach-Object { $_.Instances })
+		$groupKnown = @($groupInstances | Where-Object { $null -ne $_.Summary })
+		$sum = [long](($groupKnown | ForEach-Object { $_.Summary.Total } | Measure-Object -Sum).Sum)
+		$done = [long](($groupKnown | ForEach-Object { $_.Summary.Recorded } | Measure-Object -Sum).Sum)
+		$pending = [long](($groupKnown | ForEach-Object { $_.Summary.NotReviewed } | Measure-Object -Sum).Sum)
+		$null = $body.AppendLine("<tr><td>$(ConvertTo-AccessReviewHtmlText $group.Name)</td><td>$($group.Count)</td><td>$($groupInstances.Count)</td><td>$($groupKnown.Count) / $($groupInstances.Count)</td><td>$sum</td><td>$done</td><td>$pending</td></tr>")
+	}
+	$null = $body.AppendLine('</tbody></table></div></section><section id="inventory" class="panel"><h2>Review and instance inventory</h2><div class="filters"><label>Search reviews, owners or reviewers<input id="search" type="search"></label><label>Prefix<select id="prefix"><option value="">All prefixes</option>')
+	foreach ($prefix in @($Report.Definitions.Prefix | Sort-Object -Unique)) {
+		$text = ConvertTo-AccessReviewHtmlText $prefix
+		$null = $body.AppendLine("<option value=`"$text`">$text</option>")
+	}
+	$null = $body.AppendLine('</select></label><label>Instance status<select id="instance-status"><option value="">All instance statuses</option>')
+	foreach ($status in @(@($instances.Status) + @('No instances / unavailable') | Where-Object { $_ } | Sort-Object -Unique)) {
+		$text = ConvertTo-AccessReviewHtmlText $status
+		$null = $body.AppendLine("<option value=`"$text`">$text</option>")
+	}
+	$null = $body.AppendLine('</select></label><label>Definition status<select id="definition-status"><option value="">All definition statuses</option>')
+	foreach ($status in @($Report.Definitions.Status | Where-Object { $_ } | Sort-Object -Unique)) {
+		$text = ConvertTo-AccessReviewHtmlText $status
+		$null = $body.AppendLine("<option value=`"$text`">$text</option>")
+	}
+	$null = $body.AppendLine('</select></label></div><p id="inventory-count" role="status"></p><div class="table-wrap"><table><thead><tr><th>Review / prefix</th><th>Definition status</th><th>Instance status</th><th>Instance dates (UTC)</th><th>Recorded / items</th><th>Runtime stages</th></tr></thead><tbody id="status-rows">')
+	$details = [System.Text.StringBuilder]::new()
+	$detailPages = [System.Collections.Generic.List[string]]::new()
+	$index = 0
+	foreach ($definition in $Report.Definitions) {
+		$entries = @($definition.Instances)
+		if (-not $entries.Count) { $entries = @($null) }
+		foreach ($instance in $entries) {
+			$status = if ($instance) { $instance.Status } else { 'No instances / unavailable' }
+			$search = ConvertTo-AccessReviewHtmlText (@{ Review = $definition.DisplayName; Configuration = $definition.Configuration; Owners = $definition.CurrentResources; Instance = $instance } | ConvertTo-Json -Depth 15 -Compress)
+			$progress = if ($null -ne $instance.Summary) { "$($instance.Summary.Recorded) / $($instance.Summary.Total)" } else { 'Unavailable / not materialized' }
+			$stageCount = if ($instance.StageError) { 'Unavailable' } elseif ($instance) { "$($instance.Stages.Count)" } else { 'Not materialized' }
+			$null = $body.AppendLine("<tr data-prefix=`"$(ConvertTo-AccessReviewHtmlText $definition.Prefix)`" data-instance=`"$(ConvertTo-AccessReviewHtmlText $status)`" data-definition=`"$(ConvertTo-AccessReviewHtmlText $definition.Status)`" data-search=`"$search`"><td><button class=`"link view`" data-target=`"status-$index`">$(ConvertTo-AccessReviewHtmlText $definition.DisplayName)</button><small>$(ConvertTo-AccessReviewHtmlText $definition.Prefix)</small></td><td>$(ConvertTo-AccessReviewHtmlText $definition.Status)</td><td><span class=`"badge`">$(ConvertTo-AccessReviewHtmlText $status)</span></td><td>$(ConvertTo-AccessReviewHtmlText $instance.Start)<br>$(ConvertTo-AccessReviewHtmlText $instance.End)</td><td>$progress</td><td>$stageCount</td></tr>")
+			$null = $details.AppendLine("<article id=`"status-$index`" class=`"review-detail`" hidden><h3 tabindex=`"-1`">$(ConvertTo-AccessReviewHtmlText $definition.DisplayName)</h3><p>Definition: <code>$(ConvertTo-AccessReviewHtmlText $definition.Id)</code> | $(ConvertTo-AccessReviewHtmlText $definition.Status)<br>Instance: <code>$(ConvertTo-AccessReviewHtmlText $instance.Id)</code> | $(ConvertTo-AccessReviewHtmlText $status)</p><p>$(ConvertTo-AccessReviewHtmlText $definition.Description)</p>")
+			if ($definition.Error) { $null = $details.AppendLine("<p class=`"notice warning`">Instance listing unavailable: $(ConvertTo-AccessReviewHtmlText $definition.Error)</p>") }
+			$null = $details.AppendLine('<details open><summary>All configured stages (current definition, not historical evidence)</summary><p class="notice">These stages include future stages not returned by the runtime API. Settings may have changed since older instances ran. Named users may be captured owners or fallbacks; their original policy label cannot be inferred from user IDs alone.</p>')
+			foreach ($setting in $definition.Configuration) {
+				$null = $details.AppendLine("<h4>Configured stage $(ConvertTo-AccessReviewHtmlText $setting.Id)</h4><p>Duration: $(ConvertTo-AccessReviewHtmlText $setting.DurationInDays) days. Depends on: $(ConvertTo-AccessReviewHtmlText ($setting.DependsOn -join ', '))</p>$(ConvertTo-AccessReviewStatusScopesHtml $setting.Reviewers)<h4>Configured fallbacks</h4>$(ConvertTo-AccessReviewStatusScopesHtml $setting.Fallbacks)")
+			}
+			$null = $details.AppendLine("<details><summary>Current definition resource scope</summary><pre>$(ConvertTo-AccessReviewHtmlText ($definition.Scope | ConvertTo-Json -Depth 10))</pre></details><h4>Current definition resource owners (directory snapshot)</h4>$(ConvertTo-AccessReviewStatusOwnersHtml $definition.CurrentResources)</details>")
+			if ($instance) {
+				$null = $details.AppendLine("<details><summary>Recorded instance resource scope</summary><pre>$(ConvertTo-AccessReviewHtmlText ($instance.Scope | ConvertTo-Json -Depth 10))</pre></details>")
+				$null = $details.AppendLine("<h4>Instance-level outcomes</h4>$(ConvertTo-AccessReviewStatusSummaryHtml $instance.Summary)")
+				foreach ($field in @('DecisionError', 'ContactError', 'StageError')) {
+					if ($instance.$field) { $null = $details.AppendLine("<p class=`"notice warning`">$(ConvertTo-AccessReviewHtmlText $field): $(ConvertTo-AccessReviewHtmlText $instance.$field)</p>") }
+				}
+				$null = $details.AppendLine("<details open><summary>Recorded instance reviewers (instance-wide, not mapped to stages)</summary><p>Graph's contactedReviewers collection includes reviewers irrespective of notification delivery. This is not a per-stage roster.</p>$(ConvertTo-AccessReviewStatusUsersHtml $instance.ContactedReviewers)</details><h4>Instance reviewer scopes</h4>$(ConvertTo-AccessReviewStatusScopesHtml $instance.Reviewers)<h4>Instance fallbacks</h4>$(ConvertTo-AccessReviewStatusScopesHtml $instance.Fallbacks)<details><summary>Current owners of resources recorded for this instance</summary>$(ConvertTo-AccessReviewStatusOwnersHtml $instance.Resources)</details>")
+				$null = $details.AppendLine('<h4>Runtime stages</h4><p class="muted">Sorted by recorded start time and ID; runtime GUIDs are not assumed to map to current configured stage IDs.</p>')
+				if (-not $instance.Stages.Count -and -not $instance.StageError) { $null = $details.AppendLine('<p>No runtime stages returned. Instance-level decisions remain separate; no stage count or future stage status is invented.</p>') }
+				foreach ($stage in $instance.Stages) {
+					$null = $details.AppendLine("<details open class=`"runtime-stage`"><summary>Runtime stage <code>$(ConvertTo-AccessReviewHtmlText $stage.Id)</code> - $(ConvertTo-AccessReviewHtmlText $stage.Status)</summary><p>Start: $(ConvertTo-AccessReviewHtmlText $stage.Start)<br>End: $(ConvertTo-AccessReviewHtmlText $stage.End)</p><h4>Stage reviewer scopes</h4>$(ConvertTo-AccessReviewStatusScopesHtml $stage.Reviewers)<h4>Stage fallbacks</h4>$(ConvertTo-AccessReviewStatusScopesHtml $stage.Fallbacks)$(ConvertTo-AccessReviewStatusSummaryHtml $stage.Summary)")
+					if ($stage.Error) { $null = $details.AppendLine("<p class=`"notice warning`">$(ConvertTo-AccessReviewHtmlText $stage.Error)</p>") }
+					$null = $details.AppendLine('</details>')
+				}
+			}
+			$null = $details.AppendLine('</article>')
+			$detailPages.Add($details.ToString())
+			$null = $details.Clear()
+			$index++
+		}
+	}
+	$null = $body.AppendLine('</tbody></table></div><div id="pagination"><button id="previous" type="button">Previous</button><span id="page"></span><button id="next" type="button">Next</button></div><noscript>JavaScript enables filtering, paging, theme switching and detail selection. Inventory rows remain visible without JavaScript.</noscript></section><section class="panel" id="review-details"><h2>Stages, reviewers and owners</h2><p id="selection-hint">Choose a review instance above. Search also matches reviewer and owner names, sign-in addresses and IDs.</p>')
+	$null = $body.AppendLine('<div id="selected-status-detail"></div>')
+	$null = $body.AppendLine('</section><section class="panel"><h2>Collection issues</h2><p>Permission errors, deleted users and unavailable APIs remain visible. Missing data is never proof that no reviewers or owners exist.</p><ul>')
+	foreach ($issue in $Report.Issues) {
+		$null = $body.AppendLine("<li><strong>$(ConvertTo-AccessReviewHtmlText $issue.Source)</strong>: $(ConvertTo-AccessReviewHtmlText $issue.Message)<small>Definition: $(ConvertTo-AccessReviewHtmlText $issue.DefinitionId) | Instance: $(ConvertTo-AccessReviewHtmlText $issue.InstanceId)</small></li>")
+	}
+	$null = $body.AppendLine('</ul></section><footer>Read-only report. No reviews, decisions, notifications, owners or memberships were changed. Directory profiles and owners are current lookups, not guaranteed historical identities or assignments.</footer></main>')
+	$template = @'
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
+<title>Access review status</title><style><!--STYLE--></style></head><body><!--REPORT--><script type="application/json" id="status-details"><!--DETAILS--></script><script>
+(() => {
+/*THEME*/
+const rows = [...document.querySelectorAll('#status-rows tr')];
+const search = document.getElementById('search');
+const prefix = document.getElementById('prefix');
+const instanceStatus = document.getElementById('instance-status');
+const definitionStatus = document.getElementById('definition-status');
+const detailPages = JSON.parse(document.getElementById('status-details').textContent);
+const detailHost = document.getElementById('selected-status-detail');
+let filtered = rows, current = 0;
+function render() {
+  const pages = Math.max(1, Math.ceil(filtered.length / 50));
+  current = Math.max(0, Math.min(current, pages - 1));
+  const visible = new Set(filtered.slice(current * 50, current * 50 + 50));
+  for (const row of rows) row.hidden = !visible.has(row);
+  document.getElementById('inventory-count').textContent = `${filtered.length} of ${rows.length} inventory entries (one per instance, or a definition without instances).`;
+  document.getElementById('page').textContent = `Page ${current + 1} of ${pages}`;
+  document.getElementById('previous').disabled = current === 0;
+  document.getElementById('next').disabled = current + 1 === pages;
+}
+function filter() {
+  const term = search.value.toLocaleLowerCase();
+  filtered = rows.filter(row => (!prefix.value || row.dataset.prefix === prefix.value)
+    && (!instanceStatus.value || row.dataset.instance === instanceStatus.value)
+    && (!definitionStatus.value || row.dataset.definition === definitionStatus.value)
+    && row.dataset.search.toLocaleLowerCase().includes(term));
+  current = 0;
+  detailHost.replaceChildren();
+  document.getElementById('selection-hint').hidden = false;
+  render();
+}
+search.addEventListener('input', filter);
+for (const select of [prefix, instanceStatus, definitionStatus]) select.addEventListener('change', filter);
+document.getElementById('previous').addEventListener('click', () => { current--; render(); });
+document.getElementById('next').addEventListener('click', () => { current++; render(); });
+document.addEventListener('click', event => {
+  const button = event.target.closest('button.view');
+  if (!button) return;
+  detailHost.innerHTML = detailPages[Number(button.dataset.target.slice('status-'.length))];
+  document.getElementById('selection-hint').hidden = true;
+  const detail = document.getElementById(button.dataset.target);
+  detail.hidden = false;
+  detail.querySelector('h3').focus();
+  detail.scrollIntoView({block:'start'});
+});
+render();
+})();
+</script></body></html>
+'@
+	$detailJson = ConvertTo-Json -InputObject @($detailPages.ToArray()) -Compress
+	$detailJson = $detailJson.Replace('<', '\u003c').Replace('>', '\u003e').Replace('&', '\u0026')
+	$template.Replace('<!--STYLE-->', (Get-AccessReviewReportStyle)).Replace('/*THEME*/', (Get-AccessReviewReportThemeScript)).Replace('<!--DETAILS-->', $detailJson).Replace('<!--REPORT-->', $body.ToString())
 }

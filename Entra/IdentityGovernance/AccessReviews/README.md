@@ -592,6 +592,105 @@ Protect it before sharing. Only the theme choice is stored in browser storage.
 The local `reports/` and `logs/` directories are gitignored; exports elsewhere
 are your responsibility.
 
+## Read-only status report (separate script)
+
+[Get-AccessReviewStatusReport.ps1](./Get-AccessReviewStatusReport.ps1) reads
+existing reviews without running provisioning. Keep
+[AccessReview.Reporting.ps1](./AccessReview.Reporting.ps1) beside it.
+It uses only Graph **GET** requests: no creation, changes, reminders or application
+of decisions.
+
+```powershell
+Connect-MgGraph -Scopes 'AccessReview.Read.All','User.ReadBasic.All','GroupMember.Read.All','Application.Read.All'
+
+$status = .\Get-AccessReviewStatusReport.ps1 `
+    -Prefixes @('AR ', 'Quarterly ') `
+    -HtmlReportPath '.\reports\status.html' -OpenReport
+```
+
+Use your campaign prefixes. Matching is literal, case-insensitive, and uses the
+first matching prefix in the array; characters such as `[` and `*` are not
+wildcards. The default is `@('AR ')`. **Every historical instance returned by
+Graph** is included, not just the newest or currently running instance.
+Definitions with no instances and failed instance listings remain visible.
+Collection can take time for large histories because decisions are read for
+each instance and runtime stage.
+
+The script requires an existing Graph connection and the Authentication module.
+`AccessReview.Read.All` (or `AccessReview.ReadWrite.All`) permits review reads.
+`User.ReadBasic.All` resolves basic user identities; `GroupMember.Read.All`
+supports current group owners/reviewer-group membership; `Application.Read.All`
+supports current application owners. Additional permissions can be required for
+hidden membership or directory restrictions. The signed-in account also needs
+an appropriate Entra role for the reviews being read. App-only connections need
+the corresponding application grants and consent. The connected Graph cloud
+endpoint is used. Directory-read failures preserve IDs and appear as issues,
+rather than being silently treated as missing owners.
+
+### Stages, reviewers and owner identities
+
+The red/white report includes the same upper-right dark-mode switch as creation
+reports, prefix summaries, search (including names/UPNs/IDs), instance/definition
+status filters and pages of 50 inventory entries. Details are loaded into the
+page only when selected. The HTML has no external assets or background requests;
+JavaScript enables filtering and detail selection.
+
+For each review/instance, it separates:
+
+- **Current configured stages:** all stages, including future stages not yet
+  returned by the runtime API, with duration, dependencies, reviewer rules,
+  resolved named users and fallbacks.
+- **Runtime stages:** Graph's stage GUIDs, statuses, dates, reviewer/fallback
+  scopes, decision counts and recorded decision actors. Runtime stages are
+  sorted for display, **not guessed into a mapping to current configuration**.
+- **Recorded instance reviewers:** Graph's `contactedReviewers`, retaining
+  recorded names and UPNs where present. These are instance-wide, not a per-stage
+  assignment roster or proof of notification delivery.
+- **Current resource owners:** human owners with names, UPNs and IDs, separated
+  from service-principal/unclassified owners. These are **today's directory
+  owners**, not historical stage assignments. Group resources include safe
+  Entra links.
+
+For reviews created by this tool, resource-owner policies are resolved to
+explicit `/users/{id}` reviewer queries when created. Graph does not preserve
+an original “resource owner” policy label on those IDs. The status report
+resolves and shows these configured users, but cannot distinguish captured
+owners from manually selected users or infer an earlier owner roster.
+Current profiles may have changed; the report labels their evidence source.
+
+Simple dynamic owner rules are expanded to current human owners. Simple
+reviewer-group membership rules are expanded to current human members.
+Per-person manager/self-review rules cannot supply a complete historical
+per-stage roster from configuration alone; consult recorded instance reviewers
+and actual decision actors. Filtered/unsupported rules remain visible verbatim,
+without claiming the separate unfiltered current owner list is eligible.
+Raw resource/reviewer scopes are available in details.
+
+### Status interpretation and failures
+
+Overview and prefix decision totals use **instance-level** decision items only;
+stage tasks are not added again. People may appear in multiple instances or
+reviews. Approve, Deny and Don't know are recorded outcomes, not necessarily
+human actions: automation/default decisions can produce them. Unknown values
+(including NotEnabled) are shown as **Other**, not completed. No decision items
+means **n/a**, not 100%. Application-result breakdowns are separate: successful
+application is not proof of denied-access removal.
+
+Decision-count coverage states how many instance summaries were available.
+A failed page invalidates that summary rather than presenting partial counts
+as complete. Stage/contact/owner/profile failures produce warnings and visible
+issues without erasing other useful results. A global collection failure
+attempts a clearly partial HTML export, then rethrows the original error.
+Missing runtime stages never silently become a single-stage review.
+This is a non-transactional snapshot of what Graph exposes, not a live dashboard
+or proof of certification/remediation.
+
+Without `-HtmlReportPath`, a unique file is created under `reports/`. Existing
+output paths are rejected. Only `-OpenReport` opens a browser. The returned
+`$status` object contains structured definitions, instances, stages, summaries,
+owners and issues for further inspection. HTML and returned data contain
+private user identities: protect them before sharing.
+
 ## Contributor and agent guidance
 
 This tool already belongs to the Mumsbitar Git repository; it needs no separate

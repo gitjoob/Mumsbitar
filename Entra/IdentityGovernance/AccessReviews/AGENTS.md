@@ -8,6 +8,8 @@ This guidance applies to this tool and its tests, not the rest of the repository
 - [AccessReview.Logging.ps1](./AccessReview.Logging.ps1): private per-run JSONL events.
 - [AccessReview.Reporting.ps1](./AccessReview.Reporting.ps1): shared offline HTML renderer.
 - [Export-AccessReviewReport.ps1](./Export-AccessReviewReport.ps1): offline per-run JSONL export; no Graph dependency.
+- [Get-AccessReviewStatusReport.ps1](./Get-AccessReviewStatusReport.ps1): separate,
+  read-only Graph status collection covering all historical instances.
 - [README.md](./README.md): supported inputs, policy, permissions and examples.
 
 ## Preserve these invariants
@@ -29,11 +31,18 @@ This guidance applies to this tool and its tests, not the rest of the repository
   division, recurring-series semantics and configured decision progression.
 - Keep tenant writes behind ShouldProcess. WhatIf writes neither reviews nor
   logs; explicitly supplying HtmlReportPath permits only the requested report.
-- Reports describe computed/submitted settings and recorded outcomes, not live
-  progress/remediation. Never infer unavailable historical configuration or
-  treat an unmarked old member count as a direct-user count.
-- Keep logs/reports private, HTML-encode untrusted metadata, and keep reporting
-  offline without external assets or new Graph queries.
+- Creation/offline reports describe computed/submitted settings and recorded
+  outcomes, not live progress/remediation. Never infer unavailable historical
+  configuration or treat an unmarked old member count as a direct-user count.
+- Status collection uses GET only. Keep current configured stages, runtime
+  stages, recorded instance reviewers, decision actors and current directory
+  owners separate. Do not infer the original owner-policy label from named
+  user scopes or map runtime stage GUIDs to current configuration by position.
+  Count instance decisions once, never add stage totals to overview completion,
+  and distinguish unavailable data from zero.
+- Keep logs/reports private and HTML-encode untrusted metadata. Renderers and
+  creation/offline reporting make no new Graph queries; only the separate status
+  collector reads Graph. Generated HTML stays offline without external assets.
 - Surface failures explicitly; report-export errors must not obscure the original
   provisioning error or encourage blind retries after successful creation.
 
