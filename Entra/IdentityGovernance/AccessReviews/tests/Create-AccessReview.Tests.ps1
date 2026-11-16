@@ -137,7 +137,8 @@ Describe 'Unified access review creation and local logging' {
 		$results[1].ReviewConfiguration.Stages[1].Reviewers.query | Should -Be @("/users/$script:reviewId")
 		$results[1].ReviewConfiguration.Stages[1].StartDate | Should -Be $start.AddDays(6).ToString('yyyy-MM-dd')
 		$html = Get-Content -LiteralPath $path -Raw
-		$html | Should -Match 'AR Group 2 \[Nested\]'
+		$html | Should -Match 'AR Group 2'
+		$html | Should -Not -Match 'AR Group 2 \[Nested\]'
 		$html | Should -Match 'Group 1 -&gt; Group 2'
 		$html | Should -Match '50 direct users'
 		$html | Should -Match '470 direct users'
@@ -254,12 +255,22 @@ Describe 'Unified access review creation and local logging' {
 		$results.MemberCount | Should -Be @(50, 470)
 		$results.Stages | Should -Be @(1, 2)
 		$results[0].ReviewName | Should -Be $(if ($Mode -in @('Application', 'CsvApplication')) { 'AR Demo app - Group 1' } else { 'AR Group 1' })
-		$results[1].ReviewName | Should -Be 'AR Group 2 [Nested]'
+		$results[1].ReviewName | Should -Be 'AR Group 2'
 		$results[1].IsNested | Should -BeTrue
 		$results[1].RootGroupIds | Should -Be @($script:groupId)
 		$results[1].ParentGroupIds | Should -Be @($script:groupId)
 		$results[1].GroupPaths[0].GroupIds | Should -Be @($script:groupId, $child)
 		$results[1].GroupPaths[0].GroupNames | Should -Be @('Group 1', 'Group 2')
+		$results[1].ReviewConfiguration.DescriptionForReviewers | Should -Match "Member of 'Group 1'\."
+		$results[1].ReviewConfiguration.DescriptionForAdmins | Should -Match 'Group 1 -> Group 2'
+		if ($Mode -in @('Application', 'CsvApplication')) {
+			$results[1].GroupPaths[0].ServicePrincipalName | Should -Be 'Demo app'
+			$results[1].ReviewConfiguration.DescriptionForReviewers | Should -Match "Related application assignments: 'Demo app'\."
+			$results[1].ReviewConfiguration.DescriptionForAdmins | Should -Match "root assigned to application 'Demo app'"
+		}
+		else {
+			$results[1].ReviewConfiguration.DescriptionForReviewers | Should -Not -Match 'application assignments'
+		}
 		Should -Invoke Get-MgGroupMember -Times 2 -Exactly -ParameterFilter { $All }
 		if ($Preview) {
 			$results.Status | Should -Be @('Would be created', 'Would be created')
@@ -289,7 +300,7 @@ Describe 'Unified access review creation and local logging' {
 		$results = @(& $script:testScript -GroupId $script:groupId -ReviewerType ResourceOwner -Confirm:$false)
 		$results.Status | Should -Be @('Skipped', 'Created')
 		$script:fixture.Bodies | Should -HaveCount 1
-		$script:fixture.Bodies[0].displayName | Should -Be 'AR Group 2 [Nested]'
+		$script:fixture.Bodies[0].displayName | Should -Be 'AR Group 2'
 	}
 
 	It 'skips a nested review matching <Name> without changing that definition' -TestCases @(
@@ -315,6 +326,14 @@ Describe 'Unified access review creation and local logging' {
 		$script:fixture.Bodies | Should -HaveCount 2
 	}
 
+	It 'recognizes an old nested name when the child is now a standalone root' {
+		$script:fixture.ExistingNames = @('ar demo group [nested]')
+		$result = & $script:testScript -GroupId $script:groupId -Confirm:$false
+		$result.Status | Should -Be 'Skipped'
+		$result.MatchedReviewName | Should -Be 'ar demo group [nested]'
+		Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times 0 -Exactly
+	}
+
 	It 'retains every deep shared path while fetching and reviewing each group once' {
 		Set-NestedGroupFixture
 		$child = '44444444-4444-4444-4444-444444444444'
@@ -335,6 +354,9 @@ Describe 'Unified access review creation and local logging' {
 		$pathStrings = @($leafResult.GroupPaths | ForEach-Object { $_.GroupIds -join '/' })
 		$pathStrings | Should -Contain "$script:groupId/$child/$leaf"
 		$pathStrings | Should -Contain "$script:groupId/$other/$leaf"
+		$leafResult.ReviewConfiguration.DescriptionForReviewers | Should -Match "Member of 'Group 2', 'Other root'"
+		$leafResult.ReviewConfiguration.DescriptionForAdmins | Should -Match 'Group 1 -> Group 2 -> Group 3'
+		$leafResult.ReviewConfiguration.DescriptionForAdmins | Should -Match 'Group 1 -> Other root -> Group 3'
 		$script:fixture.Bodies | Should -HaveCount 3
 		Should -Invoke Get-MgGroup -Times 4 -Exactly
 		Should -Invoke Get-MgGroupMember -Times 4 -Exactly -ParameterFilter { $All }
@@ -366,7 +388,7 @@ Describe 'Unified access review creation and local logging' {
 		$results = @(& $script:testScript -CsvPath $csv -ReviewerType ResourceOwner -Confirm:$false)
 		$nested = @($results | Where-Object GroupId -eq $child)
 		$nested | Should -HaveCount 1
-		$nested[0].ReviewName | Should -Be 'AR Group 2 [Nested]'
+		$nested[0].ReviewName | Should -Be 'AR Group 2'
 		$nested[0].RootGroupIds | Should -Be @($script:groupId, $other)
 		$nested[0].GroupPaths | Should -HaveCount 2
 		Should -Invoke Get-MgGroupMember -Times 1 -Exactly -ParameterFilter { "$GroupId" -eq '44444444-4444-4444-4444-444444444444' }
@@ -406,7 +428,7 @@ Describe 'Unified access review creation and local logging' {
 			-FallbackReviewerUserId $script:reviewId -Confirm:$false -WarningAction SilentlyContinue)
 		$results | Should -HaveCount 2
 		$results[0].ReviewName | Should -Be 'Keep root name'
-		$results[1].ReviewName | Should -Be $(if ($Explicit) { 'Keep child name' } else { 'AR Group 2 [Nested]' })
+		$results[1].ReviewName | Should -Be $(if ($Explicit) { 'Keep child name' } else { 'AR Group 2' })
 		$results[1].CsvOwnerIds | Should -Be $(if ($Explicit) { @($script:groupOwnerId) } else { @() })
 		$script:fixture.Bodies[0].reviewers.query | Should -Be @("/users/$script:ownerId")
 		$script:fixture.Bodies[1].stageSettings[-1].reviewers.query | Should -Be $(if ($Explicit) { @("/users/$script:groupOwnerId") } else { @("/users/$script:reviewId") })
@@ -479,6 +501,8 @@ Describe 'Unified access review creation and local logging' {
 		$closure | Should -HaveCount 1
 		$closure[0].GroupIds | Should -Be @($script:groupId, $child, $script:groupId)
 		$closure[0].GroupNames | Should -Be @('Group 1', 'Group 2', 'Group 1')
+		$results[0].ReviewConfiguration.DescriptionForReviewers | Should -Match "Member of 'Group 2'"
+		$results[0].ReviewConfiguration.DescriptionForAdmins | Should -Match 'Group 1 -> Group 2 -> Group 1'
 		$cycleWarnings = @($warnings | Where-Object { "$_" -like '*Circular nested group membership detected*' })
 		$cycleWarnings | Should -HaveCount 1
 		"$($cycleWarnings[0])" | Should -Match "Group 1 \($script:groupId\) -> Group 2 \($child\) -> Group 1 \($script:groupId\)"
@@ -584,7 +608,7 @@ Describe 'Unified access review creation and local logging' {
 		$csv = Join-Path $script:testScriptRoot 'inherited-role.csv'
 		"GroupId,AppOwnerIds,Role,ReviewName`n$script:groupId,$script:reviewId,Payroll reader,Payroll parent" | Set-Content $csv
 		$results = @(& $script:testScript -CsvPath $csv -Confirm:$false)
-		$results.ReviewName | Should -Be @('Payroll parent', 'AR Group 2 [Nested]')
+		$results.ReviewName | Should -Be @('Payroll parent', 'AR Group 2')
 		$results[1].Role | Should -Be 'Payroll reader'
 		$script:fixture.Bodies[1].descriptionForReviewers | Should -Match 'Payroll reader'
 		$script:fixture.Bodies[1].stageSettings[-1].reviewers.query | Should -Be @("/users/$script:reviewId")
@@ -626,11 +650,16 @@ Describe 'Unified access review creation and local logging' {
 		$csv = Join-Path $script:testScriptRoot 'shared-apps.csv'
 		"ServicePrincipalId`n$script:groupId`n$secondApp" | Set-Content $csv
 		$results = @(& $script:testScript -CsvPath $csv -Confirm:$false -WarningAction SilentlyContinue)
-		$results.ReviewName | Should -Be @('AR Demo app - Group 1', 'AR Group 2 [Nested]', 'AR Demo app', 'AR Second app - Other root')
+		$results.ReviewName | Should -Be @('AR Demo app - Group 1', 'AR Group 2', 'AR Demo app', 'AR Second app - Other root')
 		$nested = @($results | Where-Object GroupId -eq $child)[0]
 		$nested.SourceServicePrincipalIds | Should -Be @($script:groupId, $secondApp)
 		$nested.GroupPaths.ServicePrincipalId | Should -Be @($script:groupId, $secondApp)
+		$nested.GroupPaths.ServicePrincipalName | Should -Be @('Demo app', 'Second app')
 		$nested.GroupPaths | Should -HaveCount 2
+		$nested.ReviewConfiguration.DescriptionForReviewers | Should -Match "Member of 'Group 1', 'Other root'"
+		$nested.ReviewConfiguration.DescriptionForReviewers | Should -Match "'Demo app', 'Second app'"
+		$nested.ReviewConfiguration.DescriptionForAdmins | Should -Match "Group 1 -> Group 2 \[root assigned to application 'Demo app'"
+		$nested.ReviewConfiguration.DescriptionForAdmins | Should -Match "Other root -> Group 2 \[root assigned to application 'Second app'"
 		Should -Invoke Get-MgGroupMember -Times 3 -Exactly
 		$script:fixture.Bodies | Should -HaveCount 4
 	}
@@ -1442,6 +1471,55 @@ Describe 'Unified access review creation and local logging' {
 		$result.Status | Should -Be 'Failed'
 		$result.Reason | Should -Match 'Shorten ReviewerMessage or Role'
 		Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times 0 -Exactly
+	}
+
+	It 'summarizes long membership context within 256 characters without losing explicit text or full paths' {
+		Set-NestedGroupFixture
+		$parentName = 'Department' * 8
+		$applicationName = 'Payroll' * 20
+		$role = 'Approver' * 8
+		(Get-Content -LiteralPath $script:testScript -Raw).Replace(
+			'$ReviewerMessage = ''''', '$ReviewerMessage = ''Contact IAM.'''
+		) | Set-Content -LiteralPath $script:testScript
+		$script:fixture.Groups[$script:groupId].DisplayName = $parentName
+		Mock Get-MgServicePrincipal ({ [pscustomobject]@{ DisplayName = $applicationName } }.GetNewClosure())
+		$csv = Join-Path $script:testScriptRoot 'long-context.csv'
+		"ServicePrincipalId,Role`n$script:groupId,$role" | Set-Content $csv
+		$warnings = @()
+		$results = @(& $script:testScript -CsvPath $csv -Confirm:$false -WarningAction SilentlyContinue -WarningVariable warnings)
+		$results.Status | Should -Be @('Created', 'Created')
+		foreach ($result in $results) {
+			$result.ReviewConfiguration.DescriptionForReviewers.Length | Should -BeLessOrEqual 256
+			$result.ReviewConfiguration.DescriptionForReviewers | Should -Match "Role: $role\."
+			$result.ReviewConfiguration.DescriptionForReviewers | Should -Match 'Contact IAM\.'
+		}
+		$results[1].ReviewConfiguration.DescriptionForReviewers | Should -Match 'Parent groups: 1\. Related app assignments: 1\.'
+		$results[1].ReviewConfiguration.DescriptionForAdmins | Should -Match "$parentName -> Group 2"
+		$results[1].ReviewConfiguration.DescriptionForAdmins | Should -Match $applicationName
+		@($warnings | Where-Object { "$_" -like '*relationship summary*Group 2*' }) | Should -HaveCount 1
+		Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times 2 -Exactly
+	}
+
+	It 'honors the 256-character membership context boundary without dropping Role (length: <RoleLength>)' -TestCases @(
+		@{ RoleLength = 164; Fits = $true },
+		@{ RoleLength = 170; Fits = $false }
+	) {
+		param($RoleLength, $Fits)
+		Set-NestedGroupFixture
+		$csv = Join-Path $script:testScriptRoot 'context-cannot-fit.csv'
+		"GroupId,Role`n$script:groupId,$('x' * $RoleLength)" | Set-Content $csv
+		$results = @(& $script:testScript -CsvPath $csv -Confirm:$false -WarningAction SilentlyContinue)
+		if ($Fits) {
+			$results.Status | Should -Be @('Created', 'Created')
+			$results[1].ReviewConfiguration.DescriptionForReviewers.Length | Should -Be 256
+			$results[1].ReviewConfiguration.DescriptionForReviewers | Should -Match "Role: $('x' * $RoleLength)\."
+			Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times 2 -Exactly
+		}
+		else {
+			$results.Status | Should -Be @('Created', 'Failed')
+			$results[1].Reason | Should -Match 'cannot fit membership context within 256 characters.*Shorten ReviewerMessage or Role'
+			Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times 1 -Exactly
+		}
 	}
 
 	It 'accepts mixed group and application CSV rows without leaking their role settings' {

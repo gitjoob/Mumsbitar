@@ -183,6 +183,12 @@ function New-AccessReviewHtml {
 		if ($config -and @($config.Stages).Count) {
 			$label = if ($result.Status -eq 'Created') { 'Submitted configuration (not fetched live)' } else { 'Computed configuration (not evidence of creation)' }
 			$null = $body.AppendLine("<h4>$label</h4><p>Frequency: $(ConvertTo-AccessReviewHtmlText $config.Frequency). First planned instance: $(ConvertTo-AccessReviewHtmlText $config.StartDate), $([int]$config.InstanceDurationInDays) days.</p>")
+			if ($config.DescriptionForReviewers) {
+				$null = $body.AppendLine("<p><strong>Reviewer description:</strong> $(ConvertTo-AccessReviewHtmlText $config.DescriptionForReviewers)</p>")
+			}
+			if ($config.DescriptionForAdmins) {
+				$null = $body.AppendLine("<p><strong>Administrator description:</strong> $(ConvertTo-AccessReviewHtmlText $config.DescriptionForAdmins)</p>")
+			}
 			if ($config.SeriesEndDate) {
 				$null = $body.AppendLine("<p>Recurring series expires: $(ConvertTo-AccessReviewHtmlText $config.SeriesEndDate). This is not an individual instance's end date.</p>")
 			}
@@ -211,7 +217,8 @@ function New-AccessReviewHtml {
 		}
 		$null = $body.AppendLine('<details><summary>All recorded discovery paths</summary><ul>')
 		foreach ($path in @($result.GroupPaths)) {
-			$null = $body.AppendLine("<li>$(ConvertTo-AccessReviewHtmlText (@($path.GroupNames) -join ' -> '))<br><code>$(ConvertTo-AccessReviewHtmlText (@($path.GroupIds) -join ' -> '))</code> | Application: $(ConvertTo-AccessReviewHtmlText $path.ServicePrincipalId)</li>")
+			$applicationLabel = if ($path.ServicePrincipalName) { "$($path.ServicePrincipalName) ($($path.ServicePrincipalId))" } else { $path.ServicePrincipalId }
+			$null = $body.AppendLine("<li>$(ConvertTo-AccessReviewHtmlText (@($path.GroupNames) -join ' -> '))<br><code>$(ConvertTo-AccessReviewHtmlText (@($path.GroupIds) -join ' -> '))</code> | Application: $(ConvertTo-AccessReviewHtmlText $applicationLabel)</li>")
 		}
 		if (-not @($result.GroupPaths).Count) { $null = $body.AppendLine('<li>Unavailable or not applicable.</li>') }
 		$null = $body.AppendLine('</ul></details><details><summary>Recorded IDs and diagnostics</summary><dl>')

@@ -64,6 +64,21 @@ Describe 'Offline access review reporting' {
 		$html | Should -Not -Match '<img'
 	}
 
+	It 'shows recorded descriptions and application names without interpreting markup' {
+		$result = New-ReportFixture
+		$result.ReviewConfiguration | Add-Member DescriptionForReviewers "Member of 'Finance <Readers>'."
+		$result.ReviewConfiguration | Add-Member DescriptionForAdmins 'Parent -> Finance <Readers>'
+		$result.GroupPaths = @(@{
+			GroupIds = @('parent', $result.GroupId); GroupNames = @('Parent', 'Finance <Readers>')
+			ServicePrincipalId = 'application-id'; ServicePrincipalName = 'Payroll <Application>'
+		})
+		$html = New-AccessReviewHtml -Results @($result) -Context $script:context
+		$html | Should -Match 'Reviewer description:</strong> Member of &#39;Finance &lt;Readers&gt;&#39;'
+		$html | Should -Match 'Administrator description:</strong> Parent -&gt; Finance &lt;Readers&gt;'
+		$html | Should -Match 'Payroll &lt;Application&gt; \(application-id\)'
+		$html | Should -Not -Match '<Readers>|<Application>'
+	}
+
 	It 'adds safe Entra navigation only for a valid group Object ID (<Id>)' -TestCases @(
 		@{ Id = 'AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE'; Valid = $true },
 		@{ Id = 'javascript:alert(1)'; Valid = $false },

@@ -12,9 +12,9 @@ Existing review names are skipped in all modes. Application mode and nested-only
 targets skip dynamic groups; groups with no direct users are skipped in all modes.
 All group inputs recursively discover nested groups before any review creation.
 Each group is reviewed once per run, including shared children. Nested-only
-reviews use '<prefix> <group> [Nested]'; root review names remain unchanged.
-Known legacy unmarked child names also prevent duplicates. Existing parent
-reviews do not prevent discovering or creating missing child reviews.
+reviews use '<prefix> <group>'; descriptions explain membership relationships.
+Known legacy names, including '[Nested]' names, also prevent duplicates.
+Existing parent reviews do not prevent discovering or creating missing child reviews.
 All modes use the same stage policy.
 Connect to Microsoft Graph first.
 Requires AccessReview.ReadWrite.All, access to read the group and its member count,
@@ -267,7 +267,7 @@ function Add-DiscoveredGroup {
 	$name = if ($isRoot -and $Source.ReviewName) { $Source.ReviewName.Trim() }
 		elseif ($isRoot -and $Source.ServicePrincipalId) { "$ReviewNamePrefix $($Source.ServicePrincipal.DisplayName) - $($snapshot.Group.DisplayName)".Trim() }
 		elseif ($isRoot) { $baseName }
-		else { "$baseName [Nested]" }
+		else { $baseName }
 	$entry.Sources.Add([pscustomobject]@{
 		Source = $Source
 		GroupIds = $path
@@ -275,6 +275,7 @@ function Add-DiscoveredGroup {
 		Priority = if (-not $isRoot) { 3 } elseif ($Source.ReviewName) { 0 } elseif (-not $Source.ServicePrincipalId) { 1 } else { 2 }
 	})
 	$null = $entry.Aliases.Add($name)
+	$null = $entry.Aliases.Add("$baseName [Nested]")
 	if (-not $isRoot) {
 		$null = $entry.Aliases.Add($baseName)
 		if ($Source.ServicePrincipalId) {
@@ -664,6 +665,7 @@ try {
 		$properties.GroupPaths = @($origins | ForEach-Object {
 			[pscustomobject]@{
 				ServicePrincipalId = if ($_.Source.ServicePrincipalId) { "$($_.Source.ServicePrincipalId)" } else { $null }
+				ServicePrincipalName = if ($_.Source.ServicePrincipalId) { $_.Source.ServicePrincipal.DisplayName } else { $null }
 				GroupIds = @($_.GroupIds)
 				GroupNames = @($_.GroupIds | ForEach-Object { $discovery.Snapshots[$_].Group.DisplayName })
 			}
@@ -954,17 +956,55 @@ foreach ($target in $targets) {
 			throw "descriptionForReviewers is $($descriptionForReviewers.Length) characters; reviewer emails support up to 256. Shorten ReviewerMessage or Role."
 		}
 
+		$relationshipPaths = @()
+		if (-not $isApplicationReview) {
+			$parentNames = @($target.GroupPaths | Where-Object { $_.GroupIds.Count -gt 1 } |
+				ForEach-Object { $_.GroupNames[-2] } | Sort-Object -Unique)
+			$applicationNames = @($target.GroupPaths | Where-Object ServicePrincipalId |
+				ForEach-Object { if ($_.ServicePrincipalName) { $_.ServicePrincipalName } else { $_.ServicePrincipalId } } |
+				Sort-Object -Unique)
+			$contextParts = @(
+				if ($parentNames.Count) { "Member of '$($parentNames -join "', '")'." }
+				if ($applicationNames.Count) { "Related application assignments: '$($applicationNames -join "', '")'." }
+			)
+			if ($contextParts.Count) {
+				$relationshipText = $contextParts -join ' '
+				if ("$descriptionForReviewers $relationshipText".Length -gt 256) {
+					$relationshipText = @(
+						if ($parentNames.Count) { "Parent groups: $(@($target.ParentGroupIds).Count)." }
+						if ($applicationNames.Count) { "Related app assignments: $(@($target.SourceServicePrincipalIds).Count)." }
+					) -join ' '
+					if ("$descriptionForReviewers $relationshipText".Length -gt 256) {
+						throw 'descriptionForReviewers cannot fit membership context within 256 characters. Shorten ReviewerMessage or Role, or the group display name.'
+					}
+					Write-Warning "Using a relationship summary in the reviewer message for group '$($group.DisplayName)' to stay within 256 characters. Full membership paths are retained in the administrator description, results/logs and requested HTML report."
+				}
+				$descriptionForReviewers = "$descriptionForReviewers $relationshipText"
+				$relationshipPaths = @($target.GroupPaths | ForEach-Object {
+					$pathDescription = @($_.GroupNames) -join ' -> '
+					if ($_.ServicePrincipalId) {
+						$pathDescription += " [root assigned to application '$($_.ServicePrincipalName)' ($($_.ServicePrincipalId))]"
+					}
+					$pathDescription
+				})
+			}
+		}
+		$descriptionForAdmins = if ($isApplicationReview) {
+			"Review direct user assignments to the application $($servicePrincipal.DisplayName) ($stageCount stage(s), $countDescription). Denied access removes the user's application assignment, not group membership or ownership."
+		}
+		elseif ($isSyncedGroup) {
+			"Review direct membership of the group $($group.displayName) ($stageCount stage(s), $memberCount direct users). The group is synchronized from on-premises Active Directory; apply denied access in Active Directory."
+		}
+		else {
+			"Review direct membership of the group $($group.displayName) ($stageCount stage(s), $memberCount direct users). Removal affects every resource granted by this group."
+		}
+		if ($relationshipPaths.Count) {
+			$descriptionForAdmins += " Recorded membership paths (parent -> child): $($relationshipPaths -join '; '). Membership paths alone do not prove effective application access."
+		}
+
 		$params = @{
 			displayName = $reviewDisplayName
-			descriptionForAdmins = if ($isApplicationReview) {
-				"Review direct user assignments to the application $($servicePrincipal.DisplayName) ($stageCount stage(s), $countDescription). Denied access removes the user's application assignment, not group membership or ownership."
-			}
-			elseif ($isSyncedGroup) {
-				"Review direct membership of the group $($group.displayName) ($stageCount stage(s), $memberCount direct users). The group is synchronized from on-premises Active Directory; apply denied access in Active Directory."
-			}
-			else {
-				"Review direct membership of the group $($group.displayName) ($stageCount stage(s), $memberCount direct users). Removal affects every resource granted by this group."
-			}
+			descriptionForAdmins = $descriptionForAdmins
 			descriptionForReviewers = $descriptionForReviewers
 			scope = $reviewScope
 			settings = @{
@@ -1050,6 +1090,8 @@ foreach ($target in $targets) {
 			Scope = $reviewScope
 			AutoApplyDecisionsEnabled = $params.settings.autoApplyDecisionsEnabled
 			DefaultDecision = $params.settings.defaultDecision
+			DescriptionForReviewers = $params.descriptionForReviewers
+			DescriptionForAdmins = $params.descriptionForAdmins
 			Stages = @(
 				for ($i = 0; $i -lt $stages.Count; $i++) {
 					$stageEnd = $stageStart.AddDays($stages[$i].durationInDays)

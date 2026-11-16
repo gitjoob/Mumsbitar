@@ -77,20 +77,50 @@ Counts used for stage selection are a discovery-time snapshot.
 
 Root names remain unchanged, including explicit `ReviewName` values and
 `AR <application> - <group>` for application-assigned root groups.
-Automatically discovered nested-only groups use `AR <child> [Nested]` (or your
+Automatically discovered nested-only groups use `AR <child>` (or your
 `ReviewNamePrefix`), independent of the order or number of parents.
+The technical `[Nested]` suffix is no longer added. Explicit custom names are
+preserved, and existing/running reviews are never renamed or updated.
 
 If a child is also an explicit root in the current input, its root name takes
 precedence. When several application roots reference the same group, an existing
 root naming candidate is chosen deterministically. All discovery paths are
 retained regardless of the name chosen.
 
-The existing case-insensitive name guard also checks known legacy unmarked child
-names: `<prefix> <child>` and applicable `<prefix> <application> - <child>`,
+The existing case-insensitive name guard also checks legacy
+`<prefix> <child> [Nested]` names, including when that child is now a standalone
+root, and applicable `<prefix> <application> - <child>` names,
 plus explicit names supplied for that group in the current input. A match skips
 creation, even for completed reviews. Unknown historical custom names cannot be
 inferred. Name collisions between different groups still cause a skip; naming
 has not been changed to resource-ID matching.
+
+### Reviewer-friendly membership context
+
+Group reviewer descriptions identify the immediate parent group(s) and related
+application assignments discovered from the current input. For example:
+
+> Confirm whether each user still needs access to the group Finance Readers.
+> Member of 'Finance Access'. Related application assignments: 'Payroll'.
+
+This describes recorded membership and assignment relationships, not guaranteed
+effective application access. A group-only run cannot infer application
+assignments that it has not discovered. Each review still covers only the
+group's direct users; denying access removes that user's membership in that
+group, not the group-to-group relationship.
+
+Administrator descriptions retain every discovered membership path, including
+shared parents and circular closing connections, and associate each path with
+its originating application's name and ID where available. Descriptions are
+captured in the result's `ReviewConfiguration`, JSONL and requested HTML report.
+Historical descriptions/application names are not invented when exporting old logs.
+
+Reviewer emails support 256 characters. Explicit `Role` and `ReviewerMessage`
+text is preserved; if the full relationship names do not fit, a warning is
+emitted and the reviewer description uses relationship counts instead. Full
+paths remain in administrator descriptions and the report. If even that summary
+cannot fit, the target fails explicitly with a request to shorten the supplied
+text or group name; context and explicit role text are not silently discarded.
 
 ### Inherited settings and removal impact
 
@@ -412,7 +442,8 @@ group direct-user totals.
 All result shapes include `IsNested`, `RootGroupIds`, `ParentGroupIds`,
 `SourceServicePrincipalIds`, `GroupPaths`, and `MatchedReviewName` (empty where
 not applicable). `GroupPaths` retains group IDs and display names from each root
-to the reviewed group, along with its originating application ID where applicable.
+to the reviewed group, along with its originating application ID and
+`ServicePrincipalName` where applicable.
 Shared children retain every discovery path while producing one review.
 `MatchedReviewName` identifies the canonical/legacy name causing a duplicate skip.
 JSONL preserves these structured arrays; flatten them explicitly when exporting

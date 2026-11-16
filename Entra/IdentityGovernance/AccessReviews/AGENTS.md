@@ -19,6 +19,10 @@ This guidance applies to this tool and its tests, not the rest of the repository
   failures and policy conflicts still fail closed before creation.
 - Preserve case-insensitive existing-name guards and aliases. Do not repair,
   stop, delete or recreate existing/running reviews as a side effect of a rerun.
+- New nested-only names omit `[Nested]`; preserve that suffix as a legacy alias.
+  Explain recorded parent/application relationships in descriptions without
+  claiming nested assignments prove effective application access. Preserve
+  explicit Role/ReviewerMessage text within the reviewer email limit.
 - Resource-owner routing uses each group's human owners. Synced children do not
   inherit parent CSV Owner; use group-specific Owner or explicit fallback users.
 - Preserve ForceTwoStage, selected final owner, explicit one-time date-window
