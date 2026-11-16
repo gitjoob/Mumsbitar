@@ -21,6 +21,25 @@ BeforeAll {
 		@(Get-Content -LiteralPath $Path |
 			ForEach-Object { $_ | ConvertFrom-Json })
 	}
+	function Set-NestedGroupFixture {
+		$child = '44444444-4444-4444-4444-444444444444'
+		$script:fixture.Children[$script:groupId] = @($child)
+		$script:fixture.MemberCounts[$script:groupId] = 50
+		$script:fixture.MemberCounts[$child] = 470
+		foreach ($item in @(
+			@{ Id = $script:groupId; Name = 'Group 1' },
+			@{ Id = $child; Name = 'Group 2' },
+			@{ Id = '55555555-5555-5555-5555-555555555555'; Name = 'Group 3' },
+			@{ Id = '77777777-7777-7777-7777-777777777777'; Name = 'Other root' }
+		)) {
+			$script:fixture.Groups[$item.Id] = [pscustomobject]@{
+				Id = $item.Id; DisplayName = $item.Name; OnPremisesSyncEnabled = $false; GroupTypes = @()
+			}
+		}
+		$script:fixture.GroupOwners[$child] = @(
+			[pscustomobject]@{ Id = $script:reviewId; AdditionalProperties = @{ '@odata.type' = '#microsoft.graph.user' } }
+		)
+	}
 }
 
 Describe 'Unified access review creation and local logging' {
@@ -30,9 +49,15 @@ Describe 'Unified access review creation and local logging' {
 		$script:testScript = Join-Path $script:testScriptRoot 'Create-AccessReview.ps1'
 		Copy-Item $script:sourcePath $script:testScript
 		Copy-Item (Join-Path $PSScriptRoot '../AccessReview.Logging.ps1') $script:testScriptRoot
+		Copy-Item (Join-Path $PSScriptRoot '../AccessReview.Reporting.ps1') $script:testScriptRoot
 		$PSDefaultParameterValues['Create-AccessReview.ps1:AppOwnerIds'] = @($script:ownerId)
 		$script:fixture = @{
 			Count = 150
+			MemberCounts = @{}
+			Children = @{}
+			ExtraMembers = @{}
+			Groups = @{}
+			GroupOwners = @{}
 			Synced = $false
 			Owners = @(
 				[pscustomobject]@{ Id = $script:groupOwnerId; AdditionalProperties = @{ '@odata.type' = '#microsoft.graph.user' } },
@@ -56,14 +81,27 @@ Describe 'Unified access review creation and local logging' {
 		Mock Get-MgContext { @{ Scopes = @('AccessReview.ReadWrite.All', 'Application.Read.All') } }
 		Mock Get-MgGroup ({
 			param($GroupId)
+			if ($fixture.Groups.ContainsKey("$GroupId")) { return $fixture.Groups["$GroupId"] }
 			[pscustomobject]@{
 				Id = "$GroupId"; DisplayName = 'Demo group'; OnPremisesSyncEnabled = $fixture.Synced
 				GroupTypes = $(if ($fixture.Dynamic) { @('DynamicMembership') } else { @() })
 			}
 		}.GetNewClosure())
-		Mock Get-MgGroupTransitiveMemberCount ({ $fixture.Count }.GetNewClosure())
+		Mock Get-MgGroupMember ({
+			param($GroupId)
+			$count = if ($fixture.MemberCounts.ContainsKey("$GroupId")) { $fixture.MemberCounts["$GroupId"] } else { $fixture.Count }
+			for ($i = 1; $i -le $count; $i++) {
+				[pscustomobject]@{ Id = ('00000000-0000-0000-0001-{0:d12}' -f $i); AdditionalProperties = @{ '@odata.type' = '#microsoft.graph.user' } }
+			}
+			foreach ($childId in $fixture.Children["$GroupId"]) {
+				[pscustomobject]@{ Id = $childId; AdditionalProperties = @{ '@odata.type' = '#microsoft.graph.group' } }
+			}
+			if ($fixture.ExtraMembers.ContainsKey("$GroupId")) { $fixture.ExtraMembers["$GroupId"] }
+		}.GetNewClosure())
 		Mock Get-MgGroupOwner ({
+			param($GroupId)
 			if ($fixture.OwnerFailure) { throw 'Owner read forbidden.' }
+			if ($fixture.GroupOwners.ContainsKey("$GroupId")) { return $fixture.GroupOwners["$GroupId"] }
 			$fixture.Owners
 		}.GetNewClosure())
 		Mock Get-MgServicePrincipal { [pscustomobject]@{ DisplayName = 'Demo app' } }
@@ -78,6 +116,407 @@ Describe 'Unified access review creation and local logging' {
 			$fixture.Bodies.Add($BodyParameter)
 			[pscustomobject]@{ Id = $fixture.ReviewId }
 		}.GetNewClosure())
+	}
+
+	It 'exports an explicitly requested HTML report without adding pipeline items (preview: <Preview>, inherited: <Inherited>)' -TestCases @(
+		@{ Preview = $false; Inherited = $false }, @{ Preview = $true; Inherited = $false }, @{ Preview = $true; Inherited = $true }
+	) {
+		param($Preview, $Inherited)
+		Set-NestedGroupFixture
+		$path = Join-Path $script:testScriptRoot 'reports/campaign.html'
+		$start = (Get-Date).Date.AddDays(1)
+		$previewOptions = @{}
+		if ($Inherited) { $WhatIfPreference = $true }
+		else { $previewOptions.WhatIf = $Preview }
+		$results = @(& $script:testScript -GroupId $script:groupId -ReviewerType ResourceOwner `
+			-StartDate $start -EndDate $start.AddDays(11) -HtmlReportPath $path @previewOptions -Confirm:$false)
+		$results | Should -HaveCount 2
+		$results.GroupCountBasis | Should -Be @('DirectUsers', 'DirectUsers')
+		$results[0].ReviewConfiguration.Stages.DurationInDays | Should -Be @(11)
+		$results[1].ReviewConfiguration.Stages.DurationInDays | Should -Be @(6, 5)
+		$results[1].ReviewConfiguration.Stages[1].Reviewers.query | Should -Be @("/users/$script:reviewId")
+		$results[1].ReviewConfiguration.Stages[1].StartDate | Should -Be $start.AddDays(6).ToString('yyyy-MM-dd')
+		$html = Get-Content -LiteralPath $path -Raw
+		$html | Should -Match 'AR Group 2 \[Nested\]'
+		$html | Should -Match 'Group 1 -&gt; Group 2'
+		$html | Should -Match '50 direct users'
+		$html | Should -Match '470 direct users'
+		$html | Should -Match $(if ($Preview) { 'Preview \(WhatIf\)' } else { 'Submitted configuration' })
+		if ($Preview) {
+			Test-Path (Join-Path $script:testScriptRoot 'logs') | Should -BeFalse
+			Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times 0 -Exactly
+		}
+		else {
+			$entry = @(Get-LogEntries | Where-Object Event -eq 'GroupResult')[1]
+			$entry.Result.ReviewConfiguration.Stages.DurationInDays | Should -Be @(6, 5)
+			(Get-LogEntries)[0].ReportSchemaVersion | Should -Be 1
+		}
+	}
+
+	It 'records the exact <Durations> window with ForceTwoStage <Forced> at <Count> users' -TestCases @(
+		@{ Count = 50; Forced = $false; Durations = @(11) },
+		@{ Count = 50; Forced = $true; Durations = @(6, 5) },
+		@{ Count = 650; Forced = $true; Durations = @(4, 4, 3) }
+	) {
+		param($Count, $Forced, $Durations)
+		$script:fixture.Count = $Count
+		$start = (Get-Date).Date.AddDays(1)
+		$result = & $script:testScript -GroupId $script:groupId -ForceTwoStage:$Forced -StartDate $start -EndDate $start.AddDays(11) -Confirm:$false
+		$result.ReviewConfiguration.Stages.DurationInDays | Should -Be $Durations
+		$result.ReviewConfiguration.Stages[-1].EndDate | Should -Be $start.AddDays(11).ToString('yyyy-MM-dd')
+		$result.ReviewConfiguration.AutoApplyDecisionsEnabled | Should -BeTrue
+		if ($Durations.Count -gt 1) {
+			$result.ReviewConfiguration.Stages.DurationInDays | Should -Be $script:fixture.Bodies[0].stageSettings.durationInDays
+			$result.ReviewConfiguration.Stages[0].DecisionsThatWillMoveToNextStage | Should -Be @('Approve', 'NotReviewed')
+		}
+	}
+
+	It 'rejects a report destination blocked by <Blocker> before creation' -TestCases @(
+		@{ Blocker = 'an existing file' }, @{ Blocker = 'a directory' }, @{ Blocker = 'a parent file' }
+	) {
+		param($Blocker)
+		$path = Join-Path $script:testScriptRoot 'campaign.html'
+		switch ($Blocker) {
+			'an existing file' { Set-Content -LiteralPath $path -Value 'Keep me' }
+			'a directory' { $null = New-Item -ItemType Directory -Path $path }
+			'a parent file' {
+				Set-Content -LiteralPath $path -Value 'Keep me'
+				$path = Join-Path $path 'child.html'
+			}
+		}
+		{ & $script:testScript -GroupId $script:groupId -HtmlReportPath $path -Confirm:$false } | Should -Throw '*Report output*'
+		Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times 0 -Exactly
+		Should -Invoke Get-MgGroup -Times 0 -Exactly
+		Test-Path (Join-Path $script:testScriptRoot 'logs') | Should -BeFalse
+	}
+
+	It 'writes a failed discovery report without pretending any reviews were created' {
+		Mock Get-MgGroupMember { throw 'Discovery forbidden.' }
+		$path = Join-Path $script:testScriptRoot 'failed.html'
+		{ & $script:testScript -GroupId $script:groupId -HtmlReportPath $path -Confirm:$false } | Should -Throw '*Discovery forbidden*'
+		$html = Get-Content -LiteralPath $path -Raw
+		$html | Should -Match 'Partial or failed run'
+		$html | Should -Match 'Discovery forbidden'
+		$html | Should -Not -Match '<tr data-status="Created"'
+		Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times 0 -Exactly
+	}
+
+	It 'preserves original creation errors when export fails and warnings normally terminate' {
+		$path = Join-Path $script:testScriptRoot 'race.html'
+		Mock New-MgIdentityGovernanceAccessReviewDefinition ({
+			[System.IO.File]::WriteAllText($path, 'Do not overwrite')
+			throw 'Original Graph failure.'
+		}.GetNewClosure())
+		{ & $script:testScript -GroupId $script:groupId -HtmlReportPath $path -Confirm:$false -WarningAction Stop } |
+			Should -Throw '*Original Graph failure*'
+		Get-Content -LiteralPath $path -Raw | Should -Be 'Do not overwrite'
+		Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times 1 -Exactly
+	}
+
+	It 'reports export failure after successful creation without retrying Graph' {
+		$path = Join-Path $script:testScriptRoot 'late-collision.html'
+		Mock New-MgIdentityGovernanceAccessReviewDefinition ({
+			[System.IO.File]::WriteAllText($path, 'Another writer')
+			[pscustomobject]@{ Id = '33333333-3333-3333-3333-333333333333' }
+		}.GetNewClosure())
+		$captured = [System.Collections.Generic.List[object]]::new()
+		{ & $script:testScript -GroupId $script:groupId -HtmlReportPath $path -Confirm:$false | ForEach-Object { $captured.Add($_) } } |
+			Should -Throw '*Reviews may already have been created*'
+		$captured[0].Status | Should -Be 'Created'
+		(Get-LogEntries)[1].Result.Status | Should -Be 'Created'
+		Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times 1 -Exactly
+	}
+
+	It 'reviews 50 parent users and 470 child users independently in <Mode> mode (preview: <Preview>)' -TestCases @(
+		@{ Mode = 'Single'; Preview = $false },
+		@{ Mode = 'Single'; Preview = $true },
+		@{ Mode = 'Csv'; Preview = $false },
+		@{ Mode = 'CsvApplication'; Preview = $false },
+		@{ Mode = 'Application'; Preview = $false },
+		@{ Mode = 'Application'; Preview = $true }
+	) {
+		param($Mode, $Preview)
+		Set-NestedGroupFixture
+		$child = '44444444-4444-4444-4444-444444444444'
+		$parameters = switch ($Mode) {
+			'Single' { @{ GroupId = $script:groupId } }
+			'Application' { @{ ServicePrincipalId = $script:groupId } }
+			default {
+				$csv = Join-Path $script:testScriptRoot 'nested.csv'
+				$column = if ($Mode -eq 'Csv') { 'GroupId' } else { 'ServicePrincipalId' }
+				"$column`n$script:groupId" | Set-Content $csv
+				@{ CsvPath = $csv }
+			}
+		}
+		$start = (Get-Date).Date.AddDays(1)
+		$results = @(& $script:testScript @parameters -ReviewerType ResourceOwner -AppOwnerIds @() `
+			-StartDate $start -EndDate $start.AddDays(11) -WhatIf:$Preview -Confirm:$false -WarningAction SilentlyContinue)
+		$results.MemberCount | Should -Be @(50, 470)
+		$results.Stages | Should -Be @(1, 2)
+		$results[0].ReviewName | Should -Be $(if ($Mode -in @('Application', 'CsvApplication')) { 'AR Demo app - Group 1' } else { 'AR Group 1' })
+		$results[1].ReviewName | Should -Be 'AR Group 2 [Nested]'
+		$results[1].IsNested | Should -BeTrue
+		$results[1].RootGroupIds | Should -Be @($script:groupId)
+		$results[1].ParentGroupIds | Should -Be @($script:groupId)
+		$results[1].GroupPaths[0].GroupIds | Should -Be @($script:groupId, $child)
+		$results[1].GroupPaths[0].GroupNames | Should -Be @('Group 1', 'Group 2')
+		Should -Invoke Get-MgGroupMember -Times 2 -Exactly -ParameterFilter { $All }
+		if ($Preview) {
+			$results.Status | Should -Be @('Would be created', 'Would be created')
+			Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times 0 -Exactly
+			Test-Path (Join-Path $script:testScriptRoot 'logs') | Should -BeFalse
+		}
+		else {
+			$script:fixture.Bodies | Should -HaveCount 2
+			$script:fixture.Bodies[0].scope.AdditionalProperties.query | Should -Be "/groups/$script:groupId/members"
+			$script:fixture.Bodies[1].scope.AdditionalProperties.query | Should -Be "/groups/$child/members"
+			$script:fixture.Bodies[0].reviewers.query | Should -Be @("/users/$script:groupOwnerId")
+			$script:fixture.Bodies[1].stageSettings[1].reviewers.query | Should -Be @("/users/$script:reviewId")
+			$script:fixture.Bodies[0].settings.instanceDurationInDays | Should -Be 11
+			$script:fixture.Bodies[1].stageSettings.durationInDays | Should -Be @(6, 5)
+			$entries = @(Get-LogEntries | Where-Object Event -eq 'GroupResult')
+			$entries[1].Result.GroupPaths[0].GroupIds | Should -Be @($script:groupId, $child)
+		}
+	}
+
+	It 'discovers children even when the parent is <State>' -TestCases @(
+		@{ State = 'already reviewed' }, @{ State = 'without direct users' }
+	) {
+		param($State)
+		Set-NestedGroupFixture
+		if ($State -eq 'already reviewed') { $script:fixture.ExistingNames = @('ar group 1') }
+		else { $script:fixture.MemberCounts[$script:groupId] = 0 }
+		$results = @(& $script:testScript -GroupId $script:groupId -ReviewerType ResourceOwner -Confirm:$false)
+		$results.Status | Should -Be @('Skipped', 'Created')
+		$script:fixture.Bodies | Should -HaveCount 1
+		$script:fixture.Bodies[0].displayName | Should -Be 'AR Group 2 [Nested]'
+	}
+
+	It 'skips a nested review matching <Name> without changing that definition' -TestCases @(
+		@{ Name = 'ar group 2 [nested]' },
+		@{ Name = 'ar group 2' },
+		@{ Name = 'AR Demo app - Group 2' }
+	) {
+		param($Name)
+		Set-NestedGroupFixture
+		$script:fixture.ExistingNames = @($Name)
+		$results = @(& $script:testScript -ServicePrincipalId $script:groupId -ReviewerType ResourceOwner -Confirm:$false -WarningAction SilentlyContinue)
+		$results.Status | Should -Be @('Created', 'Skipped')
+		$results[1].MatchedReviewName | Should -Be $Name
+		$script:fixture.Bodies | Should -HaveCount 1
+	}
+
+	It 'does not recreate root or nested reviews on a rerun' {
+		Set-NestedGroupFixture
+		$null = & $script:testScript -GroupId $script:groupId -ReviewerType ResourceOwner -Confirm:$false
+		$script:fixture.ExistingNames = @($script:fixture.Bodies.displayName)
+		$results = @(& $script:testScript -GroupId $script:groupId -ReviewerType ResourceOwner -Confirm:$false)
+		$results.Status | Should -Be @('Skipped', 'Skipped')
+		$script:fixture.Bodies | Should -HaveCount 2
+	}
+
+	It 'retains every deep shared path while fetching and reviewing each group once' {
+		Set-NestedGroupFixture
+		$child = '44444444-4444-4444-4444-444444444444'
+		$leaf = '55555555-5555-5555-5555-555555555555'
+		$other = '77777777-7777-7777-7777-777777777777'
+		$script:fixture.Children[$script:groupId] = @($child, $other)
+		$script:fixture.Children[$child] = @($leaf)
+		$script:fixture.Children[$other] = @($leaf)
+		$script:fixture.MemberCounts[$other] = 0
+		$script:fixture.MemberCounts[$leaf] = 500
+		$results = @(& $script:testScript -GroupId $script:groupId -ReviewerType ResourceOwner -ForceTwoStage -Confirm:$false)
+		$results | Should -HaveCount 4
+		$results[0].Stages | Should -Be 2
+		$leafResult = @($results | Where-Object GroupId -eq $leaf)[0]
+		$leafResult.Stages | Should -Be 3
+		$leafResult.ParentGroupIds | Should -Be @($child, $other)
+		$leafResult.GroupPaths | Should -HaveCount 2
+		$pathStrings = @($leafResult.GroupPaths | ForEach-Object { $_.GroupIds -join '/' })
+		$pathStrings | Should -Contain "$script:groupId/$child/$leaf"
+		$pathStrings | Should -Contain "$script:groupId/$other/$leaf"
+		$script:fixture.Bodies | Should -HaveCount 3
+		Should -Invoke Get-MgGroup -Times 4 -Exactly
+		Should -Invoke Get-MgGroupMember -Times 4 -Exactly -ParameterFilter { $All }
+	}
+
+	It 'deduplicates users and excludes non-user objects from the direct-user count' {
+		Set-NestedGroupFixture
+		$script:fixture.ExtraMembers[$script:groupId] = @(
+			[pscustomobject]@{ Id = '00000000-0000-0000-0001-000000000001'; AdditionalProperties = @{ '@odata.type' = '#microsoft.graph.user' } },
+			[pscustomobject]@{ Id = $script:reviewId; AdditionalProperties = @{ '@odata.type' = '#microsoft.graph.device' } },
+			[pscustomobject]@{ Id = $script:ownerId; AdditionalProperties = @{ '@odata.type' = '#microsoft.graph.servicePrincipal' } }
+		)
+		$results = @(& $script:testScript -GroupId $script:groupId -ReviewerType ResourceOwner -Confirm:$false)
+		$results.MemberCount | Should -Be @(50, 470)
+	}
+
+	It 'merges shared children with equivalent effective settings regardless of input order (reverse: <Reverse>)' -TestCases @(
+		@{ Reverse = $false }, @{ Reverse = $true }
+	) {
+		param($Reverse)
+		Set-NestedGroupFixture
+		$other = '77777777-7777-7777-7777-777777777777'
+		$child = '44444444-4444-4444-4444-444444444444'
+		$script:fixture.Children[$other] = @($child)
+		$rows = @("$script:groupId,,$script:ownerId;$script:reviewId", "$other,ResourceOwner,$script:reviewId;$script:ownerId")
+		if ($Reverse) { [array]::Reverse($rows) }
+		$csv = Join-Path $script:testScriptRoot 'shared.csv'
+		(@('GroupId,ReviewerType,AppOwnerIds') + $rows) | Set-Content $csv
+		$results = @(& $script:testScript -CsvPath $csv -ReviewerType ResourceOwner -Confirm:$false)
+		$nested = @($results | Where-Object GroupId -eq $child)
+		$nested | Should -HaveCount 1
+		$nested[0].ReviewName | Should -Be 'AR Group 2 [Nested]'
+		$nested[0].RootGroupIds | Should -Be @($script:groupId, $other)
+		$nested[0].GroupPaths | Should -HaveCount 2
+		Should -Invoke Get-MgGroupMember -Times 1 -Exactly -ParameterFilter { "$GroupId" -eq '44444444-4444-4444-4444-444444444444' }
+		$script:fixture.Bodies | Should -HaveCount 3
+	}
+
+	It 'fails before any writes when shared-child <Field> settings conflict' -TestCases @(
+		@{ Field = 'ReviewerType' }, @{ Field = 'AppOwnerIds' }, @{ Field = 'Role' }
+	) {
+		param($Field)
+		Set-NestedGroupFixture
+		$other = '77777777-7777-7777-7777-777777777777'
+		$script:fixture.Children[$other] = @('44444444-4444-4444-4444-444444444444')
+		$type = if ($Field -eq 'ReviewerType') { 'ApplicationOwner' } else { 'ResourceOwner' }
+		$owners = if ($Field -eq 'AppOwnerIds') { $script:reviewId } else { $script:ownerId }
+		$role = if ($Field -eq 'Role') { 'Different role' } else { '' }
+		$csv = Join-Path $script:testScriptRoot 'conflicting-parents.csv'
+		"GroupId,ReviewerType,AppOwnerIds,Role`n$script:groupId,ResourceOwner,$script:ownerId,`n$other,$type,$owners,$role" | Set-Content $csv
+		{ & $script:testScript -CsvPath $csv -Confirm:$false } | Should -Throw '*Conflicting inherited review settings*44444444*'
+		Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times 0 -Exactly
+		(Get-LogEntries)[-1].Event | Should -Be 'RunFailed'
+	}
+
+	It 'does not inherit a synced parent CSV Owner and respects an explicit child Owner (explicit child: <Explicit>)' -TestCases @(
+		@{ Explicit = $false }, @{ Explicit = $true }
+	) {
+		param($Explicit)
+		Set-NestedGroupFixture
+		$child = '44444444-4444-4444-4444-444444444444'
+		$script:fixture.Groups[$script:groupId].OnPremisesSyncEnabled = $true
+		$script:fixture.Groups[$child].OnPremisesSyncEnabled = $true
+		$csv = Join-Path $script:testScriptRoot 'specific-owners.csv'
+		$rows = @("GroupId,Owner,ReviewName", "$script:groupId,$script:ownerId,Keep root name")
+		if ($Explicit) { $rows += "$child,$script:groupOwnerId,Keep child name" }
+		$rows | Set-Content $csv
+		$results = @(& $script:testScript -CsvPath $csv -ReviewerType ResourceOwner -AppOwnerIds @() `
+			-FallbackReviewerUserId $script:reviewId -Confirm:$false -WarningAction SilentlyContinue)
+		$results | Should -HaveCount 2
+		$results[0].ReviewName | Should -Be 'Keep root name'
+		$results[1].ReviewName | Should -Be $(if ($Explicit) { 'Keep child name' } else { 'AR Group 2 [Nested]' })
+		$results[1].CsvOwnerIds | Should -Be $(if ($Explicit) { @($script:groupOwnerId) } else { @() })
+		$script:fixture.Bodies[0].reviewers.query | Should -Be @("/users/$script:ownerId")
+		$script:fixture.Bodies[1].stageSettings[-1].reviewers.query | Should -Be $(if ($Explicit) { @("/users/$script:groupOwnerId") } else { @("/users/$script:reviewId") })
+		$script:fixture.Bodies.settings.autoApplyDecisionsEnabled | Should -Be @($false, $false)
+		Should -Invoke Get-MgGroupOwner -Times 0 -Exactly
+	}
+
+	It 'fails a synced child with no group-specific Owner or explicit fallback' {
+		Set-NestedGroupFixture
+		$child = '44444444-4444-4444-4444-444444444444'
+		$script:fixture.Groups[$script:groupId].OnPremisesSyncEnabled = $true
+		$script:fixture.Groups[$child].OnPremisesSyncEnabled = $true
+		$csv = Join-Path $script:testScriptRoot 'missing-child-owner.csv'
+		"GroupId,Owner`n$script:groupId,$script:ownerId" | Set-Content $csv
+		$results = @(& $script:testScript -CsvPath $csv -ReviewerType ResourceOwner -Confirm:$false -WarningAction SilentlyContinue)
+		$results.Status | Should -Be @('Created', 'Failed')
+		$results[1].Reason | Should -Match 'Supply -FallbackReviewerUserId or CSV Owner'
+	}
+
+	It 'reports child owner lookup failures against that child' {
+		Set-NestedGroupFixture
+		Mock Get-MgGroupOwner { throw 'Child owners forbidden.' } -ParameterFilter { "$GroupId" -eq '44444444-4444-4444-4444-444444444444' }
+		$csv = Join-Path $script:testScriptRoot 'child-owner-failure.csv'
+		"GroupId`n$script:groupId" | Set-Content $csv
+		$results = @(& $script:testScript -CsvPath $csv -ReviewerType ResourceOwner -Confirm:$false)
+		$results.Status | Should -Be @('Created', 'Failed')
+		$results[1].Reason | Should -Match 'Child owners forbidden'
+	}
+
+	It 'fails all discovery before writes for <Failure>' -TestCases @(
+		@{ Failure = 'cycle' }, @{ Failure = 'unreadable child' }, @{ Failure = 'unclassified member' }
+	) {
+		param($Failure)
+		Set-NestedGroupFixture
+		switch ($Failure) {
+			'cycle' { $script:fixture.Children['44444444-4444-4444-4444-444444444444'] = @($script:groupId) }
+			'unreadable child' {
+				Mock Get-MgGroupMember { throw 'Hidden membership denied.' } -ParameterFilter { "$GroupId" -eq '44444444-4444-4444-4444-444444444444' }
+			}
+			'unclassified member' {
+				$script:fixture.ExtraMembers[$script:groupId] = @([pscustomobject]@{ Id = $script:reviewId; AdditionalProperties = @{} })
+			}
+		}
+		{ & $script:testScript -GroupId $script:groupId -Confirm:$false } | Should -Throw '*Group discovery failed; no reviews were created*'
+		Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times 0 -Exactly
+		(Get-LogEntries)[-1].Event | Should -Be 'RunFailed'
+	}
+
+	It 'skips dynamic nested-group reviews explicitly' {
+		Set-NestedGroupFixture
+		$script:fixture.Groups['44444444-4444-4444-4444-444444444444'].GroupTypes = @('DynamicMembership')
+		$results = @(& $script:testScript -GroupId $script:groupId -Confirm:$false)
+		$results.Status | Should -Be @('Created', 'Skipped')
+		$results[1].Reason | Should -Be 'Dynamic membership group'
+	}
+
+	It 'inherits application-owner sign-off and Role without inheriting the parent name' {
+		Set-NestedGroupFixture
+		$csv = Join-Path $script:testScriptRoot 'inherited-role.csv'
+		"GroupId,AppOwnerIds,Role,ReviewName`n$script:groupId,$script:reviewId,Payroll reader,Payroll parent" | Set-Content $csv
+		$results = @(& $script:testScript -CsvPath $csv -Confirm:$false)
+		$results.ReviewName | Should -Be @('Payroll parent', 'AR Group 2 [Nested]')
+		$results[1].Role | Should -Be 'Payroll reader'
+		$script:fixture.Bodies[1].descriptionForReviewers | Should -Match 'Payroll reader'
+		$script:fixture.Bodies[1].stageSettings[-1].reviewers.query | Should -Be @("/users/$script:reviewId")
+	}
+
+	It 'uses multiple explicit fallback users for a child with <Kind> owners' -TestCases @(
+		@{ Kind = 'no' }, @{ Kind = 'service-principal-only' }
+	) {
+		param($Kind)
+		Set-NestedGroupFixture
+		$script:fixture.GroupOwners['44444444-4444-4444-4444-444444444444'] = if ($Kind -eq 'no') { @() }
+			else { @([pscustomobject]@{ Id = 'workload'; AdditionalProperties = @{ '@odata.type' = '#microsoft.graph.servicePrincipal' } }) }
+		$results = @(& $script:testScript -GroupId $script:groupId -ReviewerType ResourceOwner `
+			-FallbackReviewerUserId $script:ownerId, $script:groupOwnerId -Confirm:$false -WarningAction SilentlyContinue)
+		$results.Status | Should -Be @('Created', 'Created')
+		$script:fixture.Bodies[1].stageSettings[-1].reviewers.query | Should -Be @("/users/$script:ownerId", "/users/$script:groupOwnerId")
+	}
+
+	It 'merges equivalent duplicate CSV roots using effective policy and owner ID sets' {
+		Set-NestedGroupFixture
+		$csv = Join-Path $script:testScriptRoot 'equivalent-roots.csv'
+		"GroupId,ReviewerType,AppOwnerIds,Owner`n$script:groupId,,$script:ownerId;$script:reviewId,$script:ownerId;$script:reviewId`n$script:groupId,ApplicationOwner,$script:reviewId;$script:ownerId,$script:reviewId;$script:ownerId" | Set-Content $csv
+		$results = @(& $script:testScript -CsvPath $csv -Confirm:$false)
+		$results.Status | Should -Be @('Created', 'Created')
+		Should -Invoke Get-MgGroupMember -Times 2 -Exactly
+	}
+
+	It 'deduplicates shared application children and records both application origins' {
+		Set-NestedGroupFixture
+		$secondApp = '88888888-8888-8888-8888-888888888888'
+		$other = '77777777-7777-7777-7777-777777777777'
+		$child = '44444444-4444-4444-4444-444444444444'
+		$script:fixture.Children[$other] = @($child)
+		$script:fixture.Assignments += [pscustomobject]@{ PrincipalType = 'User'; PrincipalId = $script:ownerId; Id = 'direct'; AppRoleId = 'role' }
+		Mock Get-MgServicePrincipal { [pscustomobject]@{ DisplayName = 'Second app' } } -ParameterFilter { "$ServicePrincipalId" -eq '88888888-8888-8888-8888-888888888888' }
+		Mock Get-MgServicePrincipalAppRoleAssignedTo {
+			[pscustomobject]@{ PrincipalType = 'Group'; PrincipalId = '77777777-7777-7777-7777-777777777777' }
+		} -ParameterFilter { "$ServicePrincipalId" -eq '88888888-8888-8888-8888-888888888888' }
+		$csv = Join-Path $script:testScriptRoot 'shared-apps.csv'
+		"ServicePrincipalId`n$script:groupId`n$secondApp" | Set-Content $csv
+		$results = @(& $script:testScript -CsvPath $csv -Confirm:$false -WarningAction SilentlyContinue)
+		$results.ReviewName | Should -Be @('AR Demo app - Group 1', 'AR Group 2 [Nested]', 'AR Demo app', 'AR Second app - Other root')
+		$nested = @($results | Where-Object GroupId -eq $child)[0]
+		$nested.SourceServicePrincipalIds | Should -Be @($script:groupId, $secondApp)
+		$nested.GroupPaths.ServicePrincipalId | Should -Be @($script:groupId, $secondApp)
+		$nested.GroupPaths | Should -HaveCount 2
+		Should -Invoke Get-MgGroupMember -Times 3 -Exactly
+		$script:fixture.Bodies | Should -HaveCount 4
 	}
 
 	It 'uses the requested reviewers at <Count> members with <Type> owner routing' -TestCases @(
@@ -95,7 +534,7 @@ Describe 'Unified access review creation and local logging' {
 		$result = & $script:testScript -GroupId $script:groupId -ReviewerType $Type `
 			-SelfReviewDurationInDays 3 -SelectedReviewerDurationInDays 7 -ApplicationOwnerDurationInDays 4 -Confirm:$false
 		$body = $script:fixture.Bodies[0]
-		$expectedOwner = if ($Type -eq 'ResourceOwner' -and $Count -lt 500) { $script:groupOwnerId } else { $script:ownerId }
+		$expectedOwner = if ($Type -eq 'ResourceOwner') { $script:groupOwnerId } else { $script:ownerId }
 		if ($Count -le 150) {
 			$result.Stages | Should -Be 1
 			$body.reviewers.query | Should -Be @("/users/$expectedOwner")
@@ -111,7 +550,11 @@ Describe 'Unified access review creation and local logging' {
 		}
 	}
 
-	It 'fails a selected ownerless group without explicit fallback users' {
+	It 'fails a selected ownerless group without explicit fallback users at <Count> members' -TestCases @(
+		@{ Count = 150 }, @{ Count = 500 }
+	) {
+		param($Count)
+		$script:fixture.Count = $Count
 		$script:fixture.Owners = @()
 		{ & $script:testScript -GroupId $script:groupId -ReviewerType ResourceOwner -Confirm:$false } |
 			Should -Throw '*no user owners*'
@@ -123,6 +566,7 @@ Describe 'Unified access review creation and local logging' {
 		@{ SpOnly = $true; Count = 150; Preview = $false },
 		@{ SpOnly = $true; Count = 151; Preview = $false },
 		@{ SpOnly = $true; Count = 151; Preview = $true },
+		@{ SpOnly = $true; Count = 500; Preview = $false },
 		@{ SpOnly = $false; Count = 150; Preview = $false }
 	) {
 		param($SpOnly, $Count, $Preview)
@@ -133,7 +577,8 @@ Describe 'Unified access review creation and local logging' {
 		$result = & $script:testScript -GroupId $script:groupId -ReviewerType ResourceOwner -AppOwnerIds @() `
 			-FallbackReviewerUserId @($script:reviewId, $script:ownerId) -WhatIf:$Preview -Confirm:$false -WarningAction SilentlyContinue
 		$result.Status | Should -Be $(if ($Preview) { 'Would be created' } else { 'Created' })
-		$result.StageNames | Should -Be $(if ($Count -gt 150) { 'Line managers -> Fallback reviewers (no group user owners)' }
+		$result.StageNames | Should -Be $(if ($Count -ge 500) { 'Self-review -> Line managers -> Fallback reviewers (no group user owners)' }
+			elseif ($Count -gt 150) { 'Line managers -> Fallback reviewers (no group user owners)' }
 			else { 'Fallback reviewers (no group user owners)' })
 		if ($Preview) {
 			Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times 0 -Exactly
@@ -143,9 +588,9 @@ Describe 'Unified access review creation and local logging' {
 			$expected = @("/users/$script:reviewId", "/users/$script:ownerId")
 			if ($Count -le 150) { $body.reviewers.query | Should -Be $expected }
 			else {
-				$body.stageSettings[0].reviewers[0].query | Should -Be './manager'
-				$body.stageSettings[0].fallbackReviewers.query | Should -Be $expected
-				$body.stageSettings[1].reviewers.query | Should -Be $expected
+				$body.stageSettings[-2].reviewers[0].query | Should -Be './manager'
+				$body.stageSettings[-2].fallbackReviewers.query | Should -Be $expected
+				$body.stageSettings[-1].reviewers.query | Should -Be $expected
 			}
 			$body.settings.autoApplyDecisionsEnabled | Should -BeTrue
 			(Get-LogEntries)[1].Result.StageNames | Should -Be $result.StageNames
@@ -160,11 +605,19 @@ Describe 'Unified access review creation and local logging' {
 		$script:fixture.Bodies[0].stageSettings[1].reviewers.query | Should -Be @("/users/$script:groupOwnerId")
 	}
 
-	It 'requires application owners for 500 or more members even when ResourceOwner is selected' {
+	It 'uses group owners as the third stage without application owners and splits the date window' {
 		$script:fixture.Count = 500
-		{ & $script:testScript -GroupId $script:groupId -ReviewerType ResourceOwner -AppOwnerIds @() -Confirm:$false } |
-			Should -Throw '*Application-owner sign-off is required*'
-		Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times 0 -Exactly
+		$start = (Get-Date).Date.AddDays(1)
+		$result = & $script:testScript -GroupId $script:groupId -ReviewerType ResourceOwner -AppOwnerIds @() `
+			-StartDate $start -EndDate $start.AddDays(11) -Confirm:$false
+		$result.Status | Should -Be 'Created'
+		$result.StageNames | Should -Be 'Self-review -> Line managers -> Resource owners (group owners)'
+		$body = $script:fixture.Bodies[0]
+		$body.stageSettings[0].reviewers | Should -HaveCount 0
+		$body.stageSettings[1].reviewers[0].query | Should -Be './manager'
+		$body.stageSettings[1].fallbackReviewers.query | Should -Be @("/users/$script:groupOwnerId")
+		$body.stageSettings[2].reviewers.query | Should -Be @("/users/$script:groupOwnerId")
+		$body.stageSettings.durationInDays | Should -Be @(4, 4, 3)
 	}
 
 	It 'fails ResourceOwner routing for synchronized groups without silently substituting reviewers' {
@@ -199,7 +652,7 @@ Describe 'Unified access review creation and local logging' {
 		$result = & $script:testScript @parameters -ReviewerType ResourceOwner -FallbackReviewerUserId $fallbackIds `
 			-WhatIf:$Preview -Confirm:$false -WarningAction SilentlyContinue
 		$result.Status | Should -Be $(if ($Preview) { 'Would be created' } else { 'Created' })
-		$result.StageNames | Should -Be $(if ($Count -ge 500) { 'Self-review -> Line managers -> Application owners' }
+		$result.StageNames | Should -Be $(if ($Count -ge 500) { 'Self-review -> Line managers -> Fallback reviewers (synced group)' }
 			elseif ($Count -gt 150) { 'Line managers -> Fallback reviewers (synced group)' }
 			else { 'Fallback reviewers (synced group)' })
 		$result.Reason | Should -Match 'decisions recorded only'
@@ -218,7 +671,7 @@ Describe 'Unified access review creation and local logging' {
 			else {
 				$body.stageSettings[-2].reviewers[0].query | Should -Be './manager'
 				$body.stageSettings[-2].fallbackReviewers.query | Should -Be $expectedFallback
-				$body.stageSettings[-1].reviewers.query | Should -Be $(if ($Count -ge 500) { @("/users/$script:ownerId") } else { $expectedFallback })
+				$body.stageSettings[-1].reviewers.query | Should -Be $expectedFallback
 			}
 			(Get-LogEntries)[0].FallbackReviewerUserId | Should -Be @($script:reviewId, $script:groupOwnerId)
 			(Get-LogEntries)[0].Syntax | Should -Match '-FallbackReviewerUserId @\('
@@ -249,7 +702,7 @@ Describe 'Unified access review creation and local logging' {
 			-WhatIf:$Preview -Confirm:$false -WarningAction SilentlyContinue
 		$result.Status | Should -Be $(if ($Preview) { 'Would be created' } else { 'Created' })
 		$result.CsvOwnerIds | Should -Be @($script:groupOwnerId, $script:reviewId)
-		$result.StageNames | Should -Be $(if ($Count -ge 500) { 'Self-review -> Line managers -> Application owners' }
+		$result.StageNames | Should -Be $(if ($Count -ge 500) { 'Self-review -> Line managers -> CSV owners (synced group)' }
 			elseif ($Count -gt 150) { 'Line managers -> CSV owners (synced group)' }
 			else { 'CSV owners (synced group)' })
 		Should -Invoke Get-MgGroupOwner -Times 0 -Exactly
@@ -267,7 +720,7 @@ Describe 'Unified access review creation and local logging' {
 			else {
 				$body.stageSettings[-2].reviewers[0].query | Should -Be './manager'
 				$body.stageSettings[-2].fallbackReviewers.query | Should -Be @("/users/$script:ownerId")
-				$expected = if ($Count -ge 500) { @("/users/$script:ownerId") } else { @("/users/$script:groupOwnerId", "/users/$script:reviewId") }
+				$expected = @("/users/$script:groupOwnerId", "/users/$script:reviewId")
 				$body.stageSettings[-1].reviewers.query | Should -Be $expected
 			}
 			(Get-LogEntries)[1].Result.CsvOwnerIds | Should -Be @($script:groupOwnerId, $script:reviewId)
@@ -392,7 +845,7 @@ Describe 'Unified access review creation and local logging' {
 		$body.stageSettings.durationInDays | Should -Be $(if ($Count -ge 500) { @(3, 7, 4) } else { @(7, 4) })
 		$body.stageSettings[-2].reviewers[0].query | Should -Be './manager'
 		$body.stageSettings[-1].dependsOn | Should -Be @([string]($result.Stages - 1))
-		$expectedOwner = if ($Type -eq 'ResourceOwner' -and $Count -lt 500) { $script:groupOwnerId } else { $script:ownerId }
+		$expectedOwner = if ($Type -eq 'ResourceOwner') { $script:groupOwnerId } else { $script:ownerId }
 		$body.stageSettings[-1].reviewers.query | Should -Be @("/users/$expectedOwner")
 		$body.settings.instanceDurationInDays | Should -Be $(if ($Count -ge 500) { 14 } else { 11 })
 	}
@@ -614,9 +1067,9 @@ Describe 'Unified access review creation and local logging' {
 			(Get-LogEntries)[1].Result.MemberCount | Should -Be $Count
 		}
 		$label = if ($Preview) { 'reviews that would be created' } else { 'created reviews' }
-		$script:fixture.HostMessages[-1] | Should -Be "Total transitive members in ${label}: $Count"
-		Should -Invoke Get-MgGroupTransitiveMemberCount -Times 1 -Exactly -ParameterFilter {
-			"$GroupId" -eq $script:groupId -and $ConsistencyLevel -eq 'eventual'
+		$script:fixture.HostMessages[-1] | Should -Be "Total direct users in group ${label}: $Count"
+		Should -Invoke Get-MgGroupMember -Times 1 -Exactly -ParameterFilter {
+			"$GroupId" -eq $script:groupId -and $All
 		}
 		if ($Preview) {
 			Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times 0 -Exactly
@@ -628,9 +1081,7 @@ Describe 'Unified access review creation and local logging' {
 	) {
 		param($Preview)
 		$second = '44444444-4444-4444-4444-444444444444'
-		Mock Get-MgGroupTransitiveMemberCount { 75 } -ParameterFilter {
-			"$GroupId" -eq '44444444-4444-4444-4444-444444444444'
-		}
+		$script:fixture.MemberCounts[$second] = 75
 		Mock Get-MgGroup {
 			[pscustomobject]@{ DisplayName = 'Second group'; OnPremisesSyncEnabled = $false; GroupTypes = @() }
 		} -ParameterFilter { "$GroupId" -eq '44444444-4444-4444-4444-444444444444' }
@@ -642,7 +1093,7 @@ Describe 'Unified access review creation and local logging' {
 		$label = if ($Preview) { 'would be created' } else { 'created' }
 		$script:fixture.HostMessages[-2] | Should -Be "2 group(s): 2 $label, 0 skipped, 0 failed."
 		$script:fixture.HostMessages[-1] | Should -Match ': 225$'
-		Should -Invoke Get-MgGroupTransitiveMemberCount -Times 2 -Exactly
+		Should -Invoke Get-MgGroupMember -Times 2 -Exactly
 	}
 
 	It 'skips an existing review in <Mode> mode (preview: <Preview>)' -TestCases @(
@@ -725,7 +1176,7 @@ Describe 'Unified access review creation and local logging' {
 		Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times 0 -Exactly
 	}
 
-	It 'excludes failed and skipped application groups from the member total' {
+	It 'stops all creation if any application group membership discovery fails' {
 		$second = '44444444-4444-4444-4444-444444444444'
 		$third = '55555555-5555-5555-5555-555555555555'
 		$script:fixture.Assignments += @(
@@ -735,16 +1186,13 @@ Describe 'Unified access review creation and local logging' {
 		Mock Get-MgGroup {
 			[pscustomobject]@{ DisplayName = 'Dynamic group'; GroupTypes = @('DynamicMembership') }
 		} -ParameterFilter { "$GroupId" -eq '44444444-4444-4444-4444-444444444444' }
-		Mock Get-MgGroupTransitiveMemberCount { throw 'Count unavailable.' } -ParameterFilter {
+		Mock Get-MgGroupMember { throw 'Count unavailable.' } -ParameterFilter {
 			"$GroupId" -eq '55555555-5555-5555-5555-555555555555'
 		}
-		$results = @(& $script:testScript -ServicePrincipalId $script:groupId -Confirm:$false)
-		$results.Status | Should -Be @('Created', 'Skipped', 'Failed')
-		$results[1].MemberCount | Should -Be 150
-		$results[2].MemberCount | Should -BeNullOrEmpty
-		$results[2].Reason | Should -Match 'Count unavailable'
-		$script:fixture.HostMessages | Should -Contain '3 review target(s): 1 created, 1 skipped, 1 failed.'
-		$script:fixture.HostMessages | Should -Contain 'Total transitive members in created reviews: 150'
+		{ & $script:testScript -ServicePrincipalId $script:groupId -Confirm:$false } |
+			Should -Throw '*Group discovery failed; no reviews were created*Count unavailable*'
+		(Get-LogEntries)[-1].Event | Should -Be 'RunFailed'
+		Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times 0 -Exactly
 	}
 
 	It 'excludes groups whose review creation failed after retrieving a count' {
@@ -754,7 +1202,7 @@ Describe 'Unified access review creation and local logging' {
 		$result = & $script:testScript -CsvPath $csv -Confirm:$false
 		$result.Status | Should -Be 'Failed'
 		$result.MemberCount | Should -Be 150
-		$script:fixture.HostMessages[-1] | Should -Be 'Total transitive members in created reviews: 0'
+		$script:fixture.HostMessages[-1] | Should -Be 'Total direct users in group created reviews: 0'
 	}
 
 	It 'excludes a declined single-group review from the member total' {
@@ -771,7 +1219,7 @@ Describe 'Unified access review creation and local logging' {
 		$result = & $script:testScript -GroupId $script:groupId -Confirm:$false
 		$result.Status | Should -Be 'Not created'
 		$result.MemberCount | Should -Be 150
-		$script:fixture.HostMessages[-1] | Should -Be 'Total transitive members in created reviews: 0'
+		$script:fixture.HostMessages[-1] | Should -Be 'Total direct users in group created reviews: 0'
 		Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times 0 -Exactly
 	}
 
@@ -796,10 +1244,10 @@ Describe 'Unified access review creation and local logging' {
 		}
 		$result = & $script:testScript @parameters -ReviewerType ResourceOwner -WhatIf:$Preview -Confirm:$false -WarningAction SilentlyContinue
 		$result.Status | Should -Be 'Skipped'
-		$result.Reason | Should -Be 'No members; no access review needed'
+		$result.Reason | Should -Be 'No direct users; no access review needed'
 		$result.MemberCount | Should -Be 0
 		$result.Stages | Should -BeNullOrEmpty
-		$script:fixture.HostMessages | Should -Contain 'The group Demo group has no members; no access review needed.'
+		$script:fixture.HostMessages | Should -Contain 'The group Demo group has no direct users; no access review needed.'
 		if (-not $Preview) {
 			(Get-LogEntries)[1].Result.Status | Should -Be 'Skipped'
 			(Get-LogEntries)[-1].Skipped | Should -Be 1
@@ -845,7 +1293,11 @@ Describe 'Unified access review creation and local logging' {
 		}
 	}
 
-	It 'uses per-row reviewer selection and role text without changing group scope' {
+	It 'uses per-row reviewer selection and role text without changing group scope at <Count> members' -TestCases @(
+		@{ Count = 150 }, @{ Count = 500 }
+	) {
+		param($Count)
+		$script:fixture.Count = $Count
 		$second = '44444444-4444-4444-4444-444444444444'
 		$csv = Join-Path $script:testScriptRoot 'roles.csv'
 		"GroupId,ReviewName,ReviewerType,Role`n$script:groupId,First,ResourceOwner,Finance approver`n$second,Second,,Help desk" |
@@ -853,8 +1305,15 @@ Describe 'Unified access review creation and local logging' {
 		$results = @(& $script:testScript -CsvPath $csv -ReviewerType ApplicationOwner -Confirm:$false)
 		$results.Status | Should -Be @('Created', 'Created')
 		$results.ReviewerType | Should -Be @('ResourceOwner', 'ApplicationOwner')
-		$script:fixture.Bodies[0].reviewers.query | Should -Be @("/users/$script:groupOwnerId")
-		$script:fixture.Bodies[1].reviewers.query | Should -Be @("/users/$script:ownerId")
+		if ($Count -ge 500) {
+			$results.Stages | Should -Be @(3, 3)
+			$script:fixture.Bodies[0].stageSettings[-1].reviewers.query | Should -Be @("/users/$script:groupOwnerId")
+			$script:fixture.Bodies[1].stageSettings[-1].reviewers.query | Should -Be @("/users/$script:ownerId")
+		}
+		else {
+			$script:fixture.Bodies[0].reviewers.query | Should -Be @("/users/$script:groupOwnerId")
+			$script:fixture.Bodies[1].reviewers.query | Should -Be @("/users/$script:ownerId")
+		}
 		$script:fixture.Bodies[0].descriptionForReviewers | Should -Match 'Role: Finance approver\.'
 		$script:fixture.Bodies[1].descriptionForReviewers | Should -Match 'Role: Help desk\.'
 		$script:fixture.Bodies[0].scope.AdditionalProperties.query | Should -Be "/groups/$script:groupId/members"
@@ -1100,7 +1559,7 @@ Describe 'Unified access review creation and local logging' {
 		$results[0].MemberCount | Should -Be 150
 		Test-Path (Join-Path $script:testScriptRoot 'logs') | Should -BeFalse
 		($script:fixture.HostMessages -join "`n") | Should -Not -Match 'Creation log:'
-		$script:fixture.HostMessages | Should -Contain 'Total transitive members in reviews that would be created: 150'
+		$script:fixture.HostMessages | Should -Contain 'Total direct users in group reviews that would be created: 150'
 		Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times 0 -Exactly
 	}
 
@@ -1239,10 +1698,10 @@ Describe 'Unified access review creation and local logging' {
 		$entries[1].Event | Should -Be 'ApplicationResult'
 		$entries[1].Result.SubjectCount | Should -Be 2
 		$entries[1].Result.AssignmentIds | Should -Be $result.AssignmentIds
-		$script:fixture.HostMessages | Should -Contain 'Total transitive members in created reviews: 0'
+		$script:fixture.HostMessages | Should -Contain 'Total direct users in group created reviews: 0'
 		$script:fixture.HostMessages | Should -Contain 'Directly assigned users in created reviews: 2'
 		Should -Invoke Get-MgGroup -Times 0 -Exactly
-		Should -Invoke Get-MgGroupTransitiveMemberCount -Times 0 -Exactly
+		Should -Invoke Get-MgGroupMember -Times 0 -Exactly
 		Should -Invoke Get-MgServicePrincipalAppRoleAssignedTo -Times 1 -Exactly -ParameterFilter {
 			$All -and $Property -contains 'principalType' -and $Property -contains 'principalId' -and $Property -contains 'id'
 		}
@@ -1301,19 +1760,23 @@ Describe 'Unified access review creation and local logging' {
 		Should -Invoke Get-MgGroupOwner -Times 0 -Exactly
 	}
 
-	It 'uses service-principal user owners after managers for 151 direct users without application owners' {
+	It 'uses service-principal user owners after managers for <Count> direct users without application owners' -TestCases @(
+		@{ Count = 151 }, @{ Count = 500 }
+	) {
+		param($Count)
 		$script:fixture.ApplicationOwners = @(
 			[pscustomobject]@{ Id = $script:groupOwnerId; AdditionalProperties = @{ '@odata.type' = '#microsoft.graph.user' } }
 		)
-		$script:fixture.Assignments = @(1..151 | ForEach-Object {
+		$script:fixture.Assignments = @(1..$Count | ForEach-Object {
 			[pscustomobject]@{ PrincipalType = 'User'; PrincipalId = ([guid]::NewGuid().ToString()) }
 		})
 		$results = @(& $script:testScript -ServicePrincipalId $script:groupId -ReviewerType ResourceOwner `
 			-AppOwnerIds @() -Confirm:$false -WarningAction SilentlyContinue)
-		$results[-1].StageNames | Should -Be 'Line managers -> Resource owners (service-principal owners)'
-		$script:fixture.Bodies[0].stageSettings[0].reviewers[0].query | Should -Be './manager'
-		$script:fixture.Bodies[0].stageSettings[0].fallbackReviewers.query | Should -Be @("/users/$script:groupOwnerId")
-		$script:fixture.Bodies[0].stageSettings[1].reviewers.query | Should -Be @("/users/$script:groupOwnerId")
+		$results[-1].StageNames | Should -Be $(if ($Count -ge 500) { 'Self-review -> Line managers -> Resource owners (service-principal owners)' }
+			else { 'Line managers -> Resource owners (service-principal owners)' })
+		$script:fixture.Bodies[0].stageSettings[-2].reviewers[0].query | Should -Be './manager'
+		$script:fixture.Bodies[0].stageSettings[-2].fallbackReviewers.query | Should -Be @("/users/$script:groupOwnerId")
+		$script:fixture.Bodies[0].stageSettings[-1].reviewers.query | Should -Be @("/users/$script:groupOwnerId")
 	}
 
 	It 'previews mixed subjects without creating reviews or disk logs' {
@@ -1347,12 +1810,13 @@ Describe 'Unified access review creation and local logging' {
 		Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times 0 -Exactly
 	}
 
-	It 'does not let a failed group hide direct user assignments' {
+	It 'does not create direct-user reviews after incomplete group discovery' {
 		$script:fixture.Assignments += [pscustomobject]@{ PrincipalType = 'User'; PrincipalId = $script:ownerId }
 		Mock Get-MgGroup { throw 'Group unavailable.' }
-		$results = @(& $script:testScript -ServicePrincipalId $script:groupId -Confirm:$false)
-		$results.Status | Should -Be @('Failed', 'Created')
-		$results[-1].TargetType | Should -Be 'ApplicationDirectUsers'
+		{ & $script:testScript -ServicePrincipalId $script:groupId -Confirm:$false } |
+			Should -Throw '*Group discovery failed; no reviews were created*Group unavailable*'
+		(Get-LogEntries)[-1].Event | Should -Be 'RunFailed'
+		Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times 0 -Exactly
 	}
 
 	It 'does not confuse a group named Direct user assignments with the application review' {
@@ -1413,7 +1877,7 @@ Describe 'Unified access review creation and local logging' {
 		$results | Should -HaveCount 0
 		(Get-LogEntries)[1].Total | Should -Be 0
 		$script:fixture.HostMessages | Should -Contain '0 review target(s): 0 created, 0 skipped, 0 failed.'
-		$script:fixture.HostMessages | Should -Contain 'Total transitive members in created reviews: 0'
+		$script:fixture.HostMessages | Should -Contain 'Total direct users in group created reviews: 0'
 	}
 
 	It 'logs discovery errors and stops' {
@@ -1439,14 +1903,13 @@ Describe 'Unified access review creation and local logging' {
 		{ & $script:testScript -ServicePrincipalId $script:groupId -WhatIf } | Should -Throw '*Application.Read.All*'
 	}
 
-	It 'continues application discovery after a group fails' {
+	It 'stops before creating any application group reviews if group discovery fails' {
 		$second = '44444444-4444-4444-4444-444444444444'
 		$script:fixture.Assignments += [pscustomobject]@{ PrincipalType = 'Group'; PrincipalId = $second }
 		Mock Get-MgGroup { throw 'Group unavailable.' } -ParameterFilter { "$GroupId" -eq '11111111-1111-1111-1111-111111111111' }
-		$results = @(& $script:testScript -ServicePrincipalId $script:groupId -Confirm:$false)
-		$results | Should -HaveCount 2
-		$results[0].Status | Should -Be 'Failed'
-		$results[1].Status | Should -Be 'Created'
+		{ & $script:testScript -ServicePrincipalId $script:groupId -Confirm:$false } |
+			Should -Throw '*Group discovery failed; no reviews were created*Group unavailable*'
+		Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times 0 -Exactly
 	}
 
 	It 'preserves quarterly recurrence and three-stage duration' {

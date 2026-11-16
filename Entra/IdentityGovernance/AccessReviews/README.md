@@ -8,7 +8,7 @@ for direct group-membership and direct application-user access reviews. Keep
 
 Choose exactly one:
 
-- `-GroupId`: one group, optionally with `-ReviewName`.
+- `-GroupId`: one root group, optionally with `-ReviewName`, plus its nested groups.
 - `-CsvPath`: group and/or enterprise-application object IDs in CSV rows.
   Application rows use the same discovery as `-ServicePrincipalId`.
 - `-ServicePrincipalId`: discover assigned groups, direct user assignments,
@@ -26,9 +26,12 @@ Connect to Graph first. Requires `Microsoft.Graph.Authentication`,
 `Microsoft.Graph.Groups` and `Microsoft.Graph.Identity.Governance`;
 application discovery also requires `Microsoft.Graph.Applications`.
 Delegated sessions require `AccessReview.ReadWrite.All`, group read access
-(including owners and transitive counts), and `Application.Read.All` for
+(including owners and direct membership), and `Application.Read.All` for
 application discovery. App-only authorization is enforced by Graph. Appropriate
 Entra licensing and active administrator/resource roles are required as well.
+Hidden-membership groups also require `Member.Read.Hidden` and an appropriate
+directory role. A discovery/permission error stops the run before any reviews
+are created; it is never interpreted as an empty group.
 
 ```powershell
 Connect-MgGraph -Scopes 'AccessReview.ReadWrite.All','Group.Read.All','Application.Read.All'
@@ -46,6 +49,72 @@ Connect-MgGraph -Scopes 'AccessReview.ReadWrite.All','Group.Read.All','Applicati
 
 Replace example IDs with real object IDs. Remove `-WhatIf` after checking the
 preview; preview performs Graph reads but never creates reviews.
+
+## Nested groups and direct-user coverage
+
+All modes automatically discover nested groups recursively before creating any
+reviews. Each distinct group ID gets at most one group review per run, covering
+its **direct users**. Stage selection uses that group's distinct direct-user
+count, not its transitive membership or number of nested groups:
+
+| Group | Direct membership | Review |
+| --- | --- | --- |
+| Group 1 | 50 users and Group 2 | 1 stage for the 50 direct users |
+| Group 2 | 470 users | 2 stages for the 470 direct users |
+
+`-ForceTwoStage` still adds managers for groups with 1-150 direct users.
+With `-ReviewerType ResourceOwner`, each cloud group uses **its own human
+owners**, including child groups with three-stage reviews.
+
+Discovery continues through groups with zero direct users and groups whose
+review names already exist. A rerun therefore skips existing parents but can
+create missing child reviews. It does **not** correct the stages or duration of
+an existing review. Nested groups are discovered again on each script run;
+recurring review instances do not automatically discover new child groups.
+Counts used for stage selection are a discovery-time snapshot.
+
+### Names and shared children
+
+Root names remain unchanged, including explicit `ReviewName` values and
+`AR <application> - <group>` for application-assigned root groups.
+Automatically discovered nested-only groups use `AR <child> [Nested]` (or your
+`ReviewNamePrefix`), independent of the order or number of parents.
+
+If a child is also an explicit root in the current input, its root name takes
+precedence. When several application roots reference the same group, an existing
+root naming candidate is chosen deterministically. All discovery paths are
+retained regardless of the name chosen.
+
+The existing case-insensitive name guard also checks known legacy unmarked child
+names: `<prefix> <child>` and applicable `<prefix> <application> - <child>`,
+plus explicit names supplied for that group in the current input. A match skips
+creation, even for completed reviews. Unknown historical custom names cannot be
+inferred. Name collisions between different groups still cause a skip; naming
+has not been changed to resource-ID matching.
+
+### Inherited settings and removal impact
+
+Children inherit effective `ReviewerType`, `AppOwnerIds`, `Role`, and run-wide
+schedule/duration/fallback settings. Conflicting effective policies for a shared
+child stop the run before any creation; equivalent defaults and differently
+ordered equal owner-ID sets do not conflict.
+
+CSV `Owner` and `ReviewName` are **not inherited** from a parent. For a synced
+child, provide a separate CSV row with that child's `Owner`, or configure explicit
+fallback reviewers. Without either, the synced-child target fails. Cloud children
+continue to use their own Entra human owners. If no human owners exist, the
+existing explicit fallback rules apply.
+
+**A denial removes membership from the child group itself**, potentially affecting
+every application/resource it grants access to, not just the parent that led to
+discovery. Reviews do not certify or remove the child group's membership in the
+parent. Discovery of nested groups also does not imply nested group assignments
+grant access to an enterprise application.
+
+Cycles or failures reading any group's metadata/membership abort discovery
+before creation. Automatically discovered nested-only dynamic groups are
+explicitly skipped because membership is rule-managed. Existing application-mode
+dynamic-root skip behavior is unchanged.
 
 ## Application identity coverage
 
@@ -86,9 +155,9 @@ when instances start, including subsequent recurring instances.
 
 Direct-user reviews follow the same stage policy, schedule and notifications.
 For `ResourceOwner`, actual service-principal **user** owners are the owner
-stage for fewer than 500 direct users; non-user owners are never reviewers.
-Without usable user owners, the target fails. At 500 or more direct users,
-the final stage always uses explicit `AppOwnerIds`.
+stage at every size; non-user owners are never reviewers.
+Without usable user owners, the target fails. `ApplicationOwner` uses explicit
+`AppOwnerIds` for the final stage at every size.
 
 **Denied direct-user reviews automatically remove application access**, not group
 membership or ownership. This is separate from the existing group-membership
@@ -105,8 +174,8 @@ delegated consent grants, directory roles, or every possible access path.
 ## Application-owner sign-off and CSV
 
 `-AppOwnerIds` accepts one or more **user object IDs** as run-wide defaults.
-They are required whenever application owners review, including every target
-with 500 or more members. They are optional when a smaller target uses
+They are required whenever `ApplicationOwner` is selected. They are optional
+at every size when a target uses
 `ResourceOwner`; application-owner IDs are never inferred from discovery.
 
 CSV rows contain either `GroupId` or `ServicePrincipalId`. Optional columns
@@ -127,11 +196,11 @@ GroupId,ReviewerType,Owner
 11111111-1111-1111-1111-111111111111,ResourceOwner,"22222222-2222-2222-2222-222222222222,33333333-3333-3333-3333-333333333333"
 ```
 
-For a service-principal row, `Owner` applies to every synchronized group
-discovered from that application, not to its direct-user review. The column is
-used only for synchronized groups with `ResourceOwner` routing below 500
-members; cloud groups use their Entra owners and 500+ reviews use application
-owners. A populated `Owner` takes precedence over `-FallbackReviewerUserId`
+For a service-principal row, `Owner` applies to synchronized groups directly
+assigned to that application, not their nested children or its direct-user review.
+The column is
+used only for synchronized groups with `ResourceOwner` routing at any size;
+cloud groups use their Entra owners. A populated `Owner` takes precedence over `-FallbackReviewerUserId`
 for the owner stage. If `Owner` is blank, the explicit fallback users are used;
 if neither is available, the target fails.
 
@@ -172,15 +241,28 @@ The script does not prevalidate that each GUID identifies an existing user.
 `-ReviewerType` (`-ReviewType` alias) selects the owner stage and defaults to
 `ApplicationOwner`:
 
-Empty groups are skipped with `No members; no access review needed`, even when
-they have owners. This applies to single-group, CSV, and application discovery.
+Groups with zero direct users are skipped with `No direct users; no access review needed`,
+even when they have owners or nested groups. Nested groups are still discovered.
+This applies to single-group, CSV, and application discovery.
 Applications without direct users do not get a direct-user review.
 
-| Size | Stages |
+| Direct users | Stages |
 | --- | --- |
 | 1-150 | Selected owner |
 | 151-499 | Line managers -> selected owner |
-| 500+ | Self-review -> line managers -> application owners |
+| 500+ | Self-review -> line managers -> selected owner |
+
+`-ReviewerType ApplicationOwner` (the default) ends with the supplied
+`AppOwnerIds`. `-ReviewerType ResourceOwner` ends with the group's human owners,
+including the third stage for 500+ members. CSV `ReviewerType` overrides the
+run-wide selection per row. For example, a group with 500+ members can use:
+
+```powershell
+.\Create-AccessReview.ps1 -GroupId '<group Object ID>' -ReviewerType ResourceOwner -WhatIf
+```
+
+For new reviews, `ResourceOwner` now applies at every size; older versions
+always used application owners for 500+. Existing reviews are not updated.
 
 Use `-ForceTwoStage` to add line managers before the selected owner for targets
 with 1-150 members. Targets with 151-499 members still use two stages, and 500+
@@ -202,11 +284,10 @@ service-principal user owners. Non-synchronized groups with no user owners
 `-FallbackReviewerUserId` users instead; without them the target fails. If a
 group has both user and service-principal owners, only its user owners review.
 Direct-user application reviews without user owners still fail. For synchronized
-groups below 500 members, CSV `Owner` users review instead of group owners.
+groups at any size, CSV `Owner` users review instead of group owners.
 If `Owner` is blank or absent, explicitly supplied fallback users review
-instead; without either the target fails. At 500+ the owner selection is
-ignored and application owners are required.
-Group counts include transitive directory members, not only users; direct-user
+instead; without either the target fails.
+Group counts include distinct direct users only; direct-user
 application reviews count distinct directly assigned users.
 
 `-FallbackReviewerUserId` accepts one or more user object IDs, for example:
@@ -277,7 +358,7 @@ notification recipients (user/group IDs), or leave it empty.
 
 Synchronized groups are report-only: decisions are recorded but removal must
 be performed in on-premises Active Directory. Automatic apply is disabled.
-For `ResourceOwner` routing below 500 members, synchronized groups require CSV
+For `ResourceOwner` routing at any size, synchronized groups require CSV
 owners or explicit fallback users as described above.
 
 All modes skip an existing review with the same display name (case-insensitive),
@@ -286,20 +367,23 @@ without creating reviews if it cannot retrieve existing names. A preview also
 skips duplicate names within the batch. Matching is by name, not resource ID, so
 renaming a review or changing its prefix can allow another review for the same
 resource. Concurrent runs can still create duplicates.
-Application-discovery mode also skips dynamic groups; all modes skip empty groups.
+Application-discovery mode also skips dynamic root groups; nested-only dynamic
+groups are skipped in every mode. All modes skip a group's own review when it
+has no direct users, without skipping discovery of its descendants.
 
 ## Results and private logs
 
 Results include group/review IDs, `MemberCount`, effective application-owner IDs, stage names,
 reviewer type, status and failure reason. Batch summaries are written separately
-from result objects. A total transitive directory-member count appears directly
+from result objects. A total direct-user count for group reviews appears directly
 below the batch summary and is also printed for single-group runs. It includes
 only created reviews, or would-be-created reviews with `-WhatIf`; skipped,
 failed, and declined reviews are excluded. The total is zero if no reviews
-qualify. Shared members count separately for each group. Counts include nested
-membership and directory objects other than users; reviews themselves still
-cover direct membership. `MemberCount` is null if the count was not retrieved,
-and is also retained in per-group logs:
+qualify. Users directly in more than one group count separately for each review;
+this is not a tenant-wide distinct-user total. `MemberCount` now means the
+distinct direct-user count used for group stage selection, excluding nested
+membership and non-user objects. Older logs retain the previous transitive-count
+meaning. Counts are also retained in per-group logs:
 
 ```powershell
 $results = .\Create-AccessReview.ps1 -CsvPath '.\groups.csv' -ReviewerType ResourceOwner
@@ -313,7 +397,16 @@ Application-mode results also identify `TargetType` and `ServicePrincipalId`.
 `AssignmentId` and `AppRoleId`. All result types expose the same fields for
 mixed-result CSV exports. Application summaries count native review targets
 separately from manual-review items and print direct-user totals separately from
-group transitive-member totals.
+group direct-user totals.
+
+All result shapes include `IsNested`, `RootGroupIds`, `ParentGroupIds`,
+`SourceServicePrincipalIds`, `GroupPaths`, and `MatchedReviewName` (empty where
+not applicable). `GroupPaths` retains group IDs and display names from each root
+to the reviewed group, along with its originating application ID where applicable.
+Shared children retain every discovery path while producing one review.
+`MatchedReviewName` identifies the canonical/legacy name causing a duplicate skip.
+JSONL preserves these structured arrays; flatten them explicitly when exporting
+these fields to CSV.
 
 Every validated real run writes a separate JSON Lines file named
 `logs/Create-AccessReview_<UTC timestamp>_<RunId>.jsonl`, for example
@@ -332,7 +425,9 @@ CSV owner IDs and role text are logged in results.
 Authentication commands, credentials and tokens are not logged. Keep logs
 private because they contain tenant/group metadata.
 
-WhatIf creates no log files or directories and does not change existing logs.
+WhatIf creates no log files or log directories and does not change existing logs.
+It writes no files unless you explicitly request an HTML report using
+`-HtmlReportPath`, as described below.
 All real-run logs are kept until you remove them manually. The old combined
 `logs/Create-AccessReview.jsonl` is left untouched; it is not migrated or appended to.
 
@@ -345,8 +440,120 @@ Get-Content -LiteralPath $log.FullName | ConvertFrom-Json
 
 Logging errors stop real runs explicitly;
 check IDs already returned before retrying. Single-group failures are logged
-before rethrowing; batch failures are reported per group. Application-discovery
-failures are logged as `RunFailed`. Preflight errors occur before logging starts.
+before rethrowing; batch creation/reviewer failures are reported per group.
+Application/group discovery failures and shared-policy conflicts are logged as
+`RunFailed` and stop before creation. Preflight errors occur before logging starts.
+
+## Offline HTML reports
+
+Reports are opt-in. Combine group relationships, available stage timelines and
+a searchable, paginated inventory in one local HTML file:
+
+```powershell
+# Preview: writes only the requested report, not reviews or JSONL logs.
+.\Create-AccessReview.ps1 -CsvPath '.\groups.csv' -ReviewerType ResourceOwner `
+    -WhatIf -HtmlReportPath '.\reports\preview.html'
+
+# Real run: records actual creation outcomes plus the submitted configuration.
+.\Create-AccessReview.ps1 -CsvPath '.\groups.csv' -ReviewerType ResourceOwner `
+    -HtmlReportPath '.\reports\campaign.html'
+
+# Export an existing per-run log without Graph modules, permissions or a connection.
+.\Export-AccessReviewReport.ps1 -LogPath '.\logs\Create-AccessReview_<timestamp>_<runId>.jsonl' `
+    -OutputPath '.\reports\historical-campaign.html'
+```
+
+Use your actual input/reviewer settings; the examples do not change defaults.
+Open the printed HTML path in a browser. Reports need no server or external
+assets and make no background network calls. Nothing opens automatically.
+Explicit **Open group in Entra** links navigate online in a new tab; sign in
+to the correct directory with permission to view the group.
+Without `-HtmlReportPath`, provisioning does not create reports or report
+directories. Explicit report export can create its destination directory,
+including during WhatIf. Existing output paths are rejected rather than
+overwritten; use a new filename for each export.
+
+### Views and themes
+
+- **Summary:** recorded outcomes, with existing-name matches separated from other
+  skips, and separate group/direct-application populations. Totals cover all
+  recorded targets, not only created reviews; people can be counted in several
+  reviews. Manual ownership/workload items remain outside user-review coverage.
+- **Group topology:** visible group cards and directional parent-to-child arrows,
+  including multiple connections into a shared child without duplicating it.
+  Cards show recorded population, stages and outcome; select one for its details.
+  Zoom, fit-to-width and scrolling keep larger diagrams navigable. A hierarchy
+  selector switches between connected components or shows all groups. Above 50
+  groups, disconnected campaigns initially show the first component; no groups
+  or edges are discarded. The counter states how many are currently displayed.
+  Referenced parents without result records are shown with unavailable population
+  and stage information. Missing historical paths never imply no nesting.
+- **Group links:** topology cards, review details and inventory group rows include
+  **Open group in Entra**. Links are generated only from valid nonempty group
+  Object IDs and open the group's overview in a separate tab. Missing/invalid
+  historical IDs show an unavailable-link notice instead.
+- **Hierarchy and stages:** choose a review in the topology or inventory to see parent/child
+  links, all recorded paths and available stage durations, planned date boundaries,
+  resolved reviewer queries/IDs, fallback queries, scope and decision progression.
+  Shared groups link to the same recorded review. The view does not expand every
+  subtree or thousands of timelines at once.
+- **Inventory:** text search, outcome/type filters and pages of 50 targets.
+  Search includes available reviewer IDs, role text, paths and diagnostics.
+- **Theme:** red-and-white light styling and a dark theme. The upper-right
+  **Dark mode** switch initially follows the system setting, then remembers
+  your explicit choice locally. If browser/file privacy settings block storage,
+  switching still works and a notice explains that it cannot remember the choice.
+  Printing uses a light theme.
+
+### What a report does and does not prove
+
+New results/logs include `ReportSchemaVersion`, `GroupCountBasis`,
+`IsSyncedGroup` and nullable `ReviewConfiguration`, consistently across result
+types. Configuration captures the actual computed stage list, schedule and
+request settings. A Created outcome displays **submitted configuration**;
+other configured targets display **computed configuration**, not evidence of
+creation. Recurring series expiry is shown separately from the first planned
+instance window. Timeline dates are schedule boundaries, not inclusive day
+counts or live stage dates.
+
+An existing-name match does not fetch or verify the stored definition's stages,
+dates or scope. Older logs can lack durations, resolved reviewers, sync metadata
+or paths; those fields are **unavailable**, not reconstructed from names or
+today's defaults. Unmarked historical `MemberCount` values may be transitive
+counts and are labelled **recorded members (basis unknown)**, excluded from
+verified direct-user totals.
+
+Reports are not live dashboards or proof of completed certification/remediation.
+Synced groups remain report-only; denied access must be handled in on-premises AD.
+Removing a cloud child membership can affect every resource using that group.
+Current forwarding of decisions is unchanged.
+
+The offline exporter accepts one per-run JSONL file, including partial/failed
+runs. It reports malformed JSON with a line number and rejects identifiable
+mixed-run files. Do not feed the old combined log directly; separate it into
+per-run files first. Records without run identity cannot be safely attributed
+to a campaign by the exporter.
+
+Once a run starts, a requested report is also attempted for discovery/creation
+failures, labelled partial with available outcomes and diagnostics. Invalid
+input that prevents a run starting does not produce an empty success report.
+An export failure is explicit; if reviews were already created, check returned
+IDs and JSONL before retrying. If creation and export both fail, the original
+creation error is preserved and the export error is also reported.
+
+HTML contains private tenant/group metadata and reviewer IDs, like JSONL.
+Protect it before sharing. Only the theme choice is stored in browser storage.
+The local `reports/` and `logs/` directories are gitignored; exports elsewhere
+are your responsibility.
+
+## Contributor and agent guidance
+
+This tool already belongs to the Mumsbitar Git repository; it needs no separate
+repository. Tool-specific contributor/agent guidance is in
+[AGENTS.md](./AGENTS.md), with path-scoped Copilot guidance in
+[access-reviews.instructions.md](../../../.github/instructions/access-reviews.instructions.md).
+The scoped file avoids applying access-review policy to unrelated tools;
+`.github/copilot-instructions.md` would instead be repository-wide.
 
 ## Offline validation
 
