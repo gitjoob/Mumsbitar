@@ -53,7 +53,11 @@ Unanswered reviews default to Deny and denied access is automatically removed.
 Groups synchronized from on-premises Active Directory cannot be changed by the
 access review. For those groups, decisions are only recorded and must be
 applied in Active Directory.
-Stage durations default to five days each. Override SelfReviewDurationInDays,
+For one-time reviews, an explicitly supplied EndDate sets the total duration
+from StartDate to EndDate. Days are divided evenly across the included stages,
+with any extra days assigned to earlier stages. Each stage needs at least one day.
+EndDate takes priority over the stage-duration parameters.
+Otherwise, stage durations default to five days each. Override SelfReviewDurationInDays,
 SelectedReviewerDurationInDays (managers), and ApplicationOwnerDurationInDays
 (the final owner stage, including resource owners) independently.
 Frequency defaults to OneTime; use
@@ -220,8 +224,10 @@ $additionalNotificationRecipients = foreach ($recipient in $AdditionalNotificati
 	}
 }
 
-if ($Frequency -eq 'OneTime' -and $PSBoundParameters.ContainsKey('EndDate')) {
-	Write-Warning 'EndDate is ignored for one-time reviews. The review period is calculated from StartDate and the number of stages; use -Frequency for recurring reviews.'
+$useDateWindow = $Frequency -eq 'OneTime' -and $PSBoundParameters.ContainsKey('EndDate')
+if ($useDateWindow -and @('SelfReviewDurationInDays', 'SelectedReviewerDurationInDays', 'ApplicationOwnerDurationInDays' |
+	Where-Object { $PSBoundParameters.ContainsKey($_) }).Count) {
+	Write-Warning 'EndDate takes priority over stage-duration parameters for one-time reviews. The date window will be divided evenly across the included stages.'
 }
 
 if ($PSCmdlet.ParameterSetName -eq 'Csv') {
@@ -672,6 +678,17 @@ foreach ($target in $targets) {
 		)
 		$stageCount = $stages.Count
 		$result.Stages = $stageCount
+		if ($useDateWindow) {
+			$windowDurationInDays = ($EndDate.Date - $StartDate.Date).Days
+			if ($windowDurationInDays -lt $stageCount) {
+				throw "EndDate must allow at least $stageCount days for $stageCount stage(s), with at least one day per stage."
+			}
+			$daysPerStage = [int][math]::Floor($windowDurationInDays / $stageCount)
+			$extraDays = $windowDurationInDays % $stageCount
+			for ($i = 0; $i -lt $stageCount; $i++) {
+				$stages[$i].durationInDays = $daysPerStage + $(if ($i -lt $extraDays) { 1 } else { 0 })
+			}
+		}
 		$countDescription = if ($isApplicationReview) { "$memberCount directly assigned users" } else { "$memberCount transitive members" }
 		Write-Verbose "The $resourceDescription has $countDescription. Using $stageCount stage(s)."
 

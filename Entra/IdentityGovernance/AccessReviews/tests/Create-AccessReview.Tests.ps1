@@ -387,6 +387,68 @@ Describe 'Unified access review creation and local logging' {
 		$script:fixture.Bodies[0].settings.instanceDurationInDays | Should -Be 9
 	}
 
+	It 'uses the one-time date window instead of durations at <Count> members over <Days> days' -TestCases @(
+		@{ Count = 150; Days = 11; Durations = @(11) },
+		@{ Count = 151; Days = 11; Durations = @(6, 5) },
+		@{ Count = 500; Days = 11; Durations = @(4, 4, 3) },
+		@{ Count = 500; Days = 12; Durations = @(4, 4, 4) },
+		@{ Count = 500; Days = 3; Durations = @(1, 1, 1) }
+	) {
+		param($Count, $Days, $Durations)
+		$script:fixture.Count = $Count
+		$start = (Get-Date).Date.AddDays(1)
+		$end = $start.AddDays($Days)
+		$null = & $script:testScript -GroupId $script:groupId -StartDate $start -EndDate $end `
+			-SelfReviewDurationInDays 3 -SelectedReviewerDurationInDays 7 -ApplicationOwnerDurationInDays 4 `
+			-WarningAction SilentlyContinue -Confirm:$false
+		$body = $script:fixture.Bodies[0]
+		$body.settings.instanceDurationInDays | Should -Be $Days
+		if ($Count -gt 150) {
+			$body.stageSettings.durationInDays | Should -Be $Durations
+		}
+		$body.settings.recurrence.pattern.type | Should -BeNullOrEmpty
+		([datetime]$body.settings.recurrence.range.startDate).Date | Should -Be $start
+		([datetime]$body.settings.recurrence.range.endDate).Date | Should -Be $end
+	}
+
+	It 'rejects a one-time window too short for <Count> members over <Days> days' -TestCases @(
+		@{ Count = 150; Days = 0; Minimum = 1 },
+		@{ Count = 150; Days = -1; Minimum = 1 },
+		@{ Count = 500; Days = 2; Minimum = 3 }
+	) {
+		param($Count, $Days, $Minimum)
+		$script:fixture.Count = $Count
+		$start = (Get-Date).Date.AddDays(1)
+		{ & $script:testScript -GroupId $script:groupId -StartDate $start -EndDate $start.AddDays($Days) -Confirm:$false } |
+			Should -Throw "*at least $Minimum days*"
+		Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times 0 -Exactly
+		(Get-LogEntries)[1].Result.Status | Should -Be 'Failed'
+	}
+
+	It 'splits the date window independently for group and direct-user targets in <Mode> mode' -TestCases @(
+		@{ Mode = 'Csv' }, @{ Mode = 'Application' }
+	) {
+		param($Mode)
+		$script:fixture.Count = 500
+		$script:fixture.Assignments += [pscustomobject]@{ PrincipalType = 'User'; PrincipalId = $script:ownerId }
+		$parameters = @{ ServicePrincipalId = $script:groupId }
+		if ($Mode -eq 'Csv') {
+			$csv = Join-Path $script:testScriptRoot 'date-window.csv'
+			"ServicePrincipalId`n$script:groupId" | Set-Content -LiteralPath $csv
+			$parameters = @{ CsvPath = $csv }
+		}
+		$start = (Get-Date).Date.AddDays(1)
+		$results = @(& $script:testScript @parameters -StartDate $start -EndDate $start.AddDays(11) -Confirm:$false)
+		$results | Should -HaveCount 2
+		$results.Status | Should -Be @('Created', 'Created')
+		$groupBody = @($script:fixture.Bodies | Where-Object { $_.stageSettings.Count -eq 3 })[0]
+		$groupBody.stageSettings.durationInDays | Should -Be @(4, 4, 3)
+		$script:fixture.Bodies.settings.instanceDurationInDays | Should -Be @(11, 11)
+		foreach ($body in $script:fixture.Bodies) {
+			([datetime]$body.settings.recurrence.range.endDate).Date | Should -Be $start.AddDays(11)
+		}
+	}
+
 	It 'validates recurring schedules against the actual duration sum (days: <Days>)' -TestCases @(
 		@{ Days = 11; Valid = $false }, @{ Days = 12; Valid = $true }
 	) {

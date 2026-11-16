@@ -217,10 +217,28 @@ denied decisions do not advance.
 Defaults to `-Frequency OneTime` and `-StartDate` today. Recurring options:
 `Weekly`, `Monthly`, `Quarterly`, `SemiAnnual`, `Annual`. Recurring `-EndDate`
 defaults to the end of the current month and must allow all stages to finish.
-For one-time reviews, EndDate is ignored; duration is the sum of the included
-stages. Supply a later EndDate when needed for a recurring series.
+For one-time reviews, an explicitly supplied `-EndDate` sets the total duration
+from `StartDate` to `EndDate` and takes priority over stage-duration parameters.
+Dates are whole-day boundaries: November 16 to November 27 is 11 days.
+The window is divided evenly across the included stages, with any remaining
+days assigned to earlier stages:
 
-Each stage defaults to five days. Set independent positive whole-day durations:
+- One stage: 11 days.
+- Two stages: 6 + 5 days.
+- Three stages: 4 + 4 + 3 days.
+
+The window must allow at least one day per stage. For example:
+
+```powershell
+.\Create-AccessReview.ps1 -GroupId '<group Object ID>' -AppOwnerIds '<application-owner user Object ID>' `
+    -StartDate '2026-11-16' -EndDate '2026-11-27' -WhatIf
+```
+
+Without an explicit one-time `EndDate`, duration remains the sum of the included
+stages. For recurring reviews, `EndDate` remains the series end date, not the
+duration of each occurrence; supply a later date to allow subsequent occurrences.
+
+Each stage otherwise defaults to five days. Set independent positive whole-day durations:
 
 - `-SelfReviewDurationInDays`: self-review.
 - `-SelectedReviewerDurationInDays`: managers.
