@@ -24,7 +24,9 @@ ResourceOwner uses the group's user owners, or service-principal user owners for
 direct-user application reviews below 500 members. For synchronized groups,
 CSV Owner users review instead of group owners when supplied; otherwise explicit
 FallbackReviewerUserId users review. Without either, the target fails.
-Other resources without usable user owners still fail.
+Non-synchronized groups without user owners also use explicit fallback users,
+including groups owned only by service principals. Without fallbacks they fail.
+Direct-user application reviews without user owners still fail.
 The owner stage for 500+ always uses AppOwnerIds.
 Missing managers use FallbackReviewerUserId, or the effective application owners,
 or the selected resource owners when no application owners are supplied.
@@ -622,6 +624,7 @@ foreach ($target in $targets) {
 				}
 			}
 			else {
+				$ownerStageName = if ($isApplicationReview) { 'Resource owners (service-principal owners)' } else { 'Resource owners (group owners)' }
 				$userOwners = @(if ($isApplicationReview) {
 					$applicationOwners | Where-Object { $_.AdditionalProperties['@odata.type'] -eq '#microsoft.graph.user' }
 				}
@@ -632,15 +635,18 @@ foreach ($target in $targets) {
 				$ownerReviewers = @(foreach ($owner in $userOwners) {
 					@{ query = "/users/$($owner.Id)"; queryType = 'MicrosoftGraph' }
 				})
+				if (-not $isApplicationReview -and -not $ownerReviewers.Count -and $FallbackReviewerUserId.Count) {
+					Write-Warning "The $resourceDescription has no user owners. Using the specified fallback reviewers instead of group owners."
+					$ownerReviewers = @($fallbackReviewers)
+					$ownerStageName = 'Fallback reviewers (no group user owners)'
+				}
 			}
 			if (-not $ownerReviewers.Count) {
 				throw "The $resourceDescription has no user owners for ResourceOwner routing."
 			}
 			if (-not $fallbackReviewers.Count) { $fallbackReviewers = @($ownerReviewers) }
 			$ownerStage = @{
-				name = if ($isSyncedGroup) { $ownerStageName }
-					elseif ($isApplicationReview) { 'Resource owners (service-principal owners)' }
-					else { 'Resource owners (group owners)' }
+				name = $ownerStageName
 				durationInDays = $ApplicationOwnerDurationInDays
 				reviewers = $ownerReviewers
 				fallbackReviewers = $fallbackReviewers

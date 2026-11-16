@@ -111,12 +111,45 @@ Describe 'Unified access review creation and local logging' {
 		}
 	}
 
-	It 'fails a selected ownerless group instead of using a fallback' {
+	It 'fails a selected ownerless group without explicit fallback users' {
 		$script:fixture.Owners = @()
-		{ & $script:testScript -GroupId $script:groupId -ReviewerType ResourceOwner `
-			-FallbackReviewerUserId $script:reviewId -Confirm:$false } | Should -Throw '*no user owners*'
+		{ & $script:testScript -GroupId $script:groupId -ReviewerType ResourceOwner -Confirm:$false } |
+			Should -Throw '*no user owners*'
 		(Get-LogEntries)[1].Result.Status | Should -Be 'Failed'
 		Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times 0 -Exactly
+	}
+
+	It 'uses fallback users for groups without human owners (SP only: <SpOnly>, count: <Count>, preview: <Preview>)' -TestCases @(
+		@{ SpOnly = $true; Count = 150; Preview = $false },
+		@{ SpOnly = $true; Count = 151; Preview = $false },
+		@{ SpOnly = $true; Count = 151; Preview = $true },
+		@{ SpOnly = $false; Count = 150; Preview = $false }
+	) {
+		param($SpOnly, $Count, $Preview)
+		$script:fixture.Count = $Count
+		$script:fixture.Owners = @($script:fixture.Owners | Where-Object {
+			$SpOnly -and $_.AdditionalProperties['@odata.type'] -eq '#microsoft.graph.servicePrincipal'
+		})
+		$result = & $script:testScript -GroupId $script:groupId -ReviewerType ResourceOwner -AppOwnerIds @() `
+			-FallbackReviewerUserId @($script:reviewId, $script:ownerId) -WhatIf:$Preview -Confirm:$false -WarningAction SilentlyContinue
+		$result.Status | Should -Be $(if ($Preview) { 'Would be created' } else { 'Created' })
+		$result.StageNames | Should -Be $(if ($Count -gt 150) { 'Line managers -> Fallback reviewers (no group user owners)' }
+			else { 'Fallback reviewers (no group user owners)' })
+		if ($Preview) {
+			Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times 0 -Exactly
+		}
+		else {
+			$body = $script:fixture.Bodies[0]
+			$expected = @("/users/$script:reviewId", "/users/$script:ownerId")
+			if ($Count -le 150) { $body.reviewers.query | Should -Be $expected }
+			else {
+				$body.stageSettings[0].reviewers[0].query | Should -Be './manager'
+				$body.stageSettings[0].fallbackReviewers.query | Should -Be $expected
+				$body.stageSettings[1].reviewers.query | Should -Be $expected
+			}
+			$body.settings.autoApplyDecisionsEnabled | Should -BeTrue
+			(Get-LogEntries)[1].Result.StageNames | Should -Be $result.StageNames
+		}
 	}
 
 	It 'allows a group-owner review without application owners and uses group owners as manager fallback' {

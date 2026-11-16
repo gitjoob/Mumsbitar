@@ -183,8 +183,11 @@ Applications without direct users do not get a direct-user review.
 | 500+ | Self-review -> line managers -> application owners |
 
 `ResourceOwner` selects group user owners or, for direct-user application reviews,
-service-principal user owners. If no usable user owners exist on a non-synchronized
-resource, the target fails even if a fallback is configured. For synchronized
+service-principal user owners. Non-synchronized groups with no user owners
+(including groups owned only by service principals) use explicitly configured
+`-FallbackReviewerUserId` users instead; without them the target fails. If a
+group has both user and service-principal owners, only its user owners review.
+Direct-user application reviews without user owners still fail. For synchronized
 groups below 500 members, CSV `Owner` users review instead of group owners.
 If `Owner` is blank or absent, explicitly supplied fallback users review
 instead; without either the target fails. At 500+ the owner selection is
