@@ -376,8 +376,76 @@ Describe 'Unified access review creation and local logging' {
 		Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times 0 -Exactly
 	}
 
-	It 'rejects the obsolete ForceTwoStage override before creating reviews' {
-		{ & $script:testScript -GroupId $script:groupId -ForceTwoStage } | Should -Throw '*ForceTwoStage is no longer supported*'
+	It 'forces a manager stage at <Count> members with <Type> routing without reducing large reviews' -TestCases @(
+		@{ Count = 1; Type = 'ApplicationOwner' },
+		@{ Count = 150; Type = 'ApplicationOwner' },
+		@{ Count = 150; Type = 'ResourceOwner' },
+		@{ Count = 151; Type = 'ResourceOwner' },
+		@{ Count = 500; Type = 'ResourceOwner' }
+	) {
+		param($Count, $Type)
+		$script:fixture.Count = $Count
+		$result = & $script:testScript -GroupId $script:groupId -ReviewerType $Type -ForceTwoStage `
+			-SelfReviewDurationInDays 3 -SelectedReviewerDurationInDays 7 -ApplicationOwnerDurationInDays 4 -Confirm:$false
+		$body = $script:fixture.Bodies[0]
+		$result.Stages | Should -Be $(if ($Count -ge 500) { 3 } else { 2 })
+		$body.stageSettings.durationInDays | Should -Be $(if ($Count -ge 500) { @(3, 7, 4) } else { @(7, 4) })
+		$body.stageSettings[-2].reviewers[0].query | Should -Be './manager'
+		$body.stageSettings[-1].dependsOn | Should -Be @([string]($result.Stages - 1))
+		$expectedOwner = if ($Type -eq 'ResourceOwner' -and $Count -lt 500) { $script:groupOwnerId } else { $script:ownerId }
+		$body.stageSettings[-1].reviewers.query | Should -Be @("/users/$expectedOwner")
+		$body.settings.instanceDurationInDays | Should -Be $(if ($Count -ge 500) { 14 } else { 11 })
+	}
+
+	It 'preserves multiple fallbacks for a forced small resource-owner review (synced: <Synced>)' -TestCases @(
+		@{ Synced = $false }, @{ Synced = $true }
+	) {
+		param($Synced)
+		$script:fixture.Synced = $Synced
+		$script:fixture.Owners = @()
+		$result = & $script:testScript -GroupId $script:groupId -ReviewerType ResourceOwner -AppOwnerIds @() `
+			-ForceTwoStage -FallbackReviewerUserId @($script:ownerId, $script:reviewId) -Confirm:$false
+		$result.Stages | Should -Be 2
+		$body = $script:fixture.Bodies[0]
+		$body.stageSettings[0].fallbackReviewers.query | Should -Be @("/users/$script:ownerId", "/users/$script:reviewId")
+		$body.stageSettings[1].reviewers.query | Should -Be @("/users/$script:ownerId", "/users/$script:reviewId")
+		$body.settings.autoApplyDecisionsEnabled | Should -Be (-not $Synced)
+	}
+
+	It 'forces two stages and splits the date window for every target in <Mode> mode' -TestCases @(
+		@{ Mode = 'Csv' }, @{ Mode = 'Application' }
+	) {
+		param($Mode)
+		$script:fixture.Assignments += [pscustomobject]@{ PrincipalType = 'User'; PrincipalId = $script:ownerId }
+		$parameters = @{ ServicePrincipalId = $script:groupId }
+		if ($Mode -eq 'Csv') {
+			$csv = Join-Path $script:testScriptRoot 'forced-stages.csv'
+			"ServicePrincipalId`n$script:groupId" | Set-Content -LiteralPath $csv
+			$parameters = @{ CsvPath = $csv }
+		}
+		$start = (Get-Date).Date.AddDays(1)
+		$results = @(& $script:testScript @parameters -ForceTwoStage -StartDate $start -EndDate $start.AddDays(11) -Confirm:$false)
+		$results.Status | Should -Be @('Created', 'Created')
+		$results.Stages | Should -Be @(2, 2)
+		foreach ($body in $script:fixture.Bodies) {
+			$body.stageSettings.durationInDays | Should -Be @(6, 5)
+			$body.stageSettings[0].reviewers[0].query | Should -Be './manager'
+			$body.settings.instanceDurationInDays | Should -Be 11
+			([datetime]$body.settings.recurrence.range.endDate).Date | Should -Be $start.AddDays(11)
+		}
+	}
+
+	It 'rejects a one-day window for a forced two-stage review' {
+		$start = (Get-Date).Date.AddDays(1)
+		{ & $script:testScript -GroupId $script:groupId -ForceTwoStage -StartDate $start -EndDate $start.AddDays(1) } |
+			Should -Throw '*at least 2 days*'
+		Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times 0 -Exactly
+	}
+
+	It 'still skips empty groups when forcing two stages' {
+		$script:fixture.Count = 0
+		$result = & $script:testScript -GroupId $script:groupId -ForceTwoStage -Confirm:$false
+		$result.Status | Should -Be 'Skipped'
 		Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times 0 -Exactly
 	}
 

@@ -35,8 +35,10 @@ AppOwnerIds supplies application-owner user object IDs and is required whenever
 application owners review. CSV AppOwnerIds and ReviewerType override their
 run-wide parameters per row; blank cells use the parameters. Multiple owner IDs
 are comma- or semicolon-separated. Quote cells when needed for the CSV delimiter.
-The old LineManager ReviewerType maps to ApplicationOwner with a warning;
-ForceTwoStage is no longer supported.
+ForceTwoStage adds a manager stage before the selected owner for targets with
+1-150 members. Targets with 151-499 already use two stages; 500+ retain all three.
+It applies in single-group, CSV, and application modes; empty targets remain skipped.
+The old LineManager ReviewerType maps to ApplicationOwner with a warning.
 
 Each validated real run writes its invocation syntax and per-group results to
 a separate logs/Create-AccessReview_<UTC timestamp>_<RunId>.jsonl file next to
@@ -160,11 +162,8 @@ function ConvertFrom-CsvUserIds {
 	}
 }
 
-if ($ForceTwoStage) {
-	throw 'ForceTwoStage is no longer supported: stage count is determined by the target size.'
-}
 if ($ReviewerType -eq 'LineManager') {
-	Write-Warning 'ReviewerType LineManager is deprecated; using ApplicationOwner for the owner stage. Managers are selected automatically based on target size.'
+	Write-Warning 'ReviewerType LineManager is deprecated; using ApplicationOwner for the owner stage. Managers are selected based on target size or ForceTwoStage.'
 	$ReviewerType = 'ApplicationOwner'
 }
 $invocationParameters = @{} + $PSBoundParameters
@@ -673,7 +672,7 @@ foreach ($target in $targets) {
 
 		$stages = @(
 			if ($memberCount -ge $SelfReviewStageThreshold) { $selfReviewStage }
-			if ($memberCount -gt 150) { $managerStage }
+			if ($memberCount -gt 150 -or $ForceTwoStage) { $managerStage }
 			$ownerStage
 		)
 		$stageCount = $stages.Count

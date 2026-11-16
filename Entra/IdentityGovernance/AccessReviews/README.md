@@ -182,6 +182,20 @@ Applications without direct users do not get a direct-user review.
 | 151-499 | Line managers -> selected owner |
 | 500+ | Self-review -> line managers -> application owners |
 
+Use `-ForceTwoStage` to add line managers before the selected owner for targets
+with 1-150 members. Targets with 151-499 members still use two stages, and 500+
+retain all three stages. Empty targets remain skipped. The switch applies
+run-wide in single-group, CSV, and application modes.
+
+```powershell
+.\Create-AccessReview.ps1 -GroupId '<group Object ID>' -ReviewerType ResourceOwner `
+    -ForceTwoStage -WhatIf
+```
+
+Forced stages use the same owner/fallback routing and stage-duration settings
+as automatic stages. An explicit one-time `EndDate` splits the date window
+across the resulting stages.
+
 `ResourceOwner` selects group user owners or, for direct-user application reviews,
 service-principal user owners. Non-synchronized groups with no user owners
 (including groups owned only by service principals) use explicitly configured
@@ -207,8 +221,7 @@ application owners, or the selected resource owners when no application owners
 were supplied. Duplicate IDs are removed. Fallback IDs are GUID-validated, not
 checked for user existence. Lookup failures fail explicitly.
 `-ReviewerType LineManager` is deprecated and maps to `ApplicationOwner` with
-a warning; manager stages now depend on size. `-ForceTwoStage` is rejected,
-because it conflicts with the required stage policy.
+a warning; manager stages depend on size or `-ForceTwoStage`.
 Graph advances `Approve` and `NotReviewed` decisions to subsequent stages;
 denied decisions do not advance.
 
