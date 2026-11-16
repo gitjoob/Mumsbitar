@@ -14,7 +14,9 @@ This guidance applies to this tool and its tests, not the rest of the repository
 
 - Keep existing options and defaults unless their change is explicitly requested.
 - Stage thresholds count distinct direct users; discover nested groups separately,
-  merge by group ID, retain all paths and fail closed on discovery/policy conflicts.
+  merge by group ID and retain all paths, including circular closing connections.
+  Warn/log cycles and stop only that recursive branch; metadata/membership read
+  failures and policy conflicts still fail closed before creation.
 - Preserve case-insensitive existing-name guards and aliases. Do not repair,
   stop, delete or recreate existing/running reviews as a side effect of a rerun.
 - Resource-owner routing uses each group's human owners. Synced children do not

@@ -436,13 +436,129 @@ Describe 'Unified access review creation and local logging' {
 		$results[1].Reason | Should -Match 'Child owners forbidden'
 	}
 
+	It 'retains circular connections and reviews every distinct group in <Mode> mode (preview: <Preview>)' -TestCases @(
+		@{ Mode = 'Single'; Preview = $false },
+		@{ Mode = 'Single'; Preview = $true },
+		@{ Mode = 'Csv'; Preview = $false },
+		@{ Mode = 'Csv'; Preview = $true },
+		@{ Mode = 'Application'; Preview = $false },
+		@{ Mode = 'Application'; Preview = $true },
+		@{ Mode = 'CsvApplication'; Preview = $false },
+		@{ Mode = 'CsvApplication'; Preview = $true }
+	) {
+		param($Mode, $Preview)
+		Set-NestedGroupFixture
+		$child = '44444444-4444-4444-4444-444444444444'
+		$leaf = '55555555-5555-5555-5555-555555555555'
+		$other = '77777777-7777-7777-7777-777777777777'
+		$script:fixture.Children[$script:groupId] = @($child, $other)
+		$script:fixture.Children[$child] = @($script:groupId, $leaf)
+		$script:fixture.MemberCounts[$leaf] = 25
+		$script:fixture.MemberCounts[$other] = 30
+		$parameters = switch ($Mode) {
+			'Single' { @{ GroupId = $script:groupId } }
+			'Application' { @{ ServicePrincipalId = $script:groupId } }
+			default {
+				$csv = Join-Path $script:testScriptRoot 'circular.csv'
+				$column = if ($Mode -eq 'Csv') { 'GroupId' } else { 'ServicePrincipalId' }
+				"$column`n$script:groupId" | Set-Content $csv
+				@{ CsvPath = $csv }
+			}
+		}
+		$reportPath = Join-Path $script:testScriptRoot 'circular.html'
+		$warnings = @()
+		$results = @(& $script:testScript @parameters -ReviewerType ResourceOwner -HtmlReportPath $reportPath `
+			-WhatIf:$Preview -Confirm:$false -WarningAction SilentlyContinue -WarningVariable warnings)
+		$results | Should -HaveCount 4
+		@($results.GroupId | Sort-Object -Unique) | Should -HaveCount 4
+		$results.MemberCount | Should -Be @(50, 470, 25, 30)
+		$results.Stages | Should -Be @(1, 2, 1, 1)
+		$results[0].ReviewName | Should -Be $(if ($Mode -in @('Application', 'CsvApplication')) { 'AR Demo app - Group 1' } else { 'AR Group 1' })
+		$results[0].ParentGroupIds | Should -Be @($child)
+		$closure = @($results[0].GroupPaths | Where-Object { $_.GroupIds.Count -eq 3 })
+		$closure | Should -HaveCount 1
+		$closure[0].GroupIds | Should -Be @($script:groupId, $child, $script:groupId)
+		$closure[0].GroupNames | Should -Be @('Group 1', 'Group 2', 'Group 1')
+		$cycleWarnings = @($warnings | Where-Object { "$_" -like '*Circular nested group membership detected*' })
+		$cycleWarnings | Should -HaveCount 1
+		"$($cycleWarnings[0])" | Should -Match "Group 1 \($script:groupId\) -> Group 2 \($child\) -> Group 1 \($script:groupId\)"
+		Should -Invoke Get-MgGroup -Times 4 -Exactly
+		Should -Invoke Get-MgGroupMember -Times 4 -Exactly -ParameterFilter { $All }
+		$html = Get-Content -LiteralPath $reportPath -Raw
+		[regex]::Matches($html, 'class="topology-node"').Count | Should -Be 4
+		[regex]::Matches($html, 'class="topology-edge"').Count | Should -Be 4
+		$html | Should -Match 'Group 1 -&gt; Group 2 -&gt; Group 1'
+		if ($Preview) {
+			$results.Status | Should -Be @('Would be created', 'Would be created', 'Would be created', 'Would be created')
+			Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times 0 -Exactly
+			Test-Path (Join-Path $script:testScriptRoot 'logs') | Should -BeFalse
+		}
+		else {
+			$results.Status | Should -Be @('Created', 'Created', 'Created', 'Created')
+			Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times 4 -Exactly
+			$cycleEvents = @(Get-LogEntries | Where-Object Event -eq 'GroupCycleDetected')
+			$cycleEvents | Should -HaveCount 1
+			$cycleEvents[0].GroupIds | Should -Be @($script:groupId, $child, $script:groupId)
+			$cycleEvents[0].GroupNames | Should -Be @('Group 1', 'Group 2', 'Group 1')
+			$cycleEvents[0].ServicePrincipalId | Should -Be $(if ($Mode -in @('Application', 'CsvApplication')) { $script:groupId } else { $null })
+			(Get-LogEntries)[-1].Event | Should -Be 'RunCompleted'
+		}
+	}
+
+	It 'handles direct self-membership as a circular connection without duplicate reads or reviews' {
+		$script:fixture.Children[$script:groupId] = @($script:groupId)
+		$results = @(& $script:testScript -GroupId $script:groupId -Confirm:$false -WarningAction SilentlyContinue)
+		$results | Should -HaveCount 1
+		$results[0].Status | Should -Be 'Created'
+		$results[0].ParentGroupIds | Should -Be @($script:groupId)
+		$results[0].GroupPaths[1].GroupIds | Should -Be @($script:groupId, $script:groupId)
+		Should -Invoke Get-MgGroupMember -Times 1 -Exactly
+		Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times 1 -Exactly
+		@(Get-LogEntries | Where-Object Event -eq 'GroupCycleDetected') | Should -HaveCount 1
+	}
+
+	It 'does not recreate reviews when a circular component is rerun' {
+		Set-NestedGroupFixture
+		$script:fixture.Children['44444444-4444-4444-4444-444444444444'] = @($script:groupId)
+		$null = & $script:testScript -GroupId $script:groupId -Confirm:$false -WarningAction SilentlyContinue
+		$script:fixture.ExistingNames = @($script:fixture.Bodies.displayName)
+		$results = @(& $script:testScript -GroupId $script:groupId -Confirm:$false -WarningAction SilentlyContinue)
+		$results.Status | Should -Be @('Skipped', 'Skipped')
+		$results[0].ParentGroupIds | Should -Be @('44444444-4444-4444-4444-444444444444')
+		Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times 2 -Exactly
+	}
+
+	It 'still fails closed when policies conflict across a circular component' {
+		Set-NestedGroupFixture
+		$child = '44444444-4444-4444-4444-444444444444'
+		$script:fixture.Children[$child] = @($script:groupId)
+		$csv = Join-Path $script:testScriptRoot 'circular-conflict.csv'
+		"GroupId,Role`n$script:groupId,First role`n$child,Conflicting role" | Set-Content $csv
+		{ & $script:testScript -CsvPath $csv -Confirm:$false -WarningAction SilentlyContinue } |
+			Should -Throw '*Conflicting inherited review settings*'
+		Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times 0 -Exactly
+		(Get-LogEntries)[-1].Event | Should -Be 'RunFailed'
+	}
+
+	It 'still stops before writes when a descendant is unreadable after a circular connection' {
+		Set-NestedGroupFixture
+		$script:fixture.Children['44444444-4444-4444-4444-444444444444'] = @(
+			$script:groupId, '55555555-5555-5555-5555-555555555555'
+		)
+		Mock Get-MgGroupMember { throw 'Descendant membership denied.' } -ParameterFilter { "$GroupId" -eq '55555555-5555-5555-5555-555555555555' }
+		{ & $script:testScript -GroupId $script:groupId -Confirm:$false -WarningAction SilentlyContinue } |
+			Should -Throw '*Group discovery failed; no reviews were created*Descendant membership denied*'
+		Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times 0 -Exactly
+		@(Get-LogEntries | Where-Object Event -eq 'GroupCycleDetected') | Should -HaveCount 1
+		(Get-LogEntries)[-1].Event | Should -Be 'RunFailed'
+	}
+
 	It 'fails all discovery before writes for <Failure>' -TestCases @(
-		@{ Failure = 'cycle' }, @{ Failure = 'unreadable child' }, @{ Failure = 'unclassified member' }
+		@{ Failure = 'unreadable child' }, @{ Failure = 'unclassified member' }
 	) {
 		param($Failure)
 		Set-NestedGroupFixture
 		switch ($Failure) {
-			'cycle' { $script:fixture.Children['44444444-4444-4444-4444-444444444444'] = @($script:groupId) }
 			'unreadable child' {
 				Mock Get-MgGroupMember { throw 'Hidden membership denied.' } -ParameterFilter { "$GroupId" -eq '44444444-4444-4444-4444-444444444444' }
 			}

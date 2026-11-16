@@ -132,6 +132,15 @@ Describe 'Offline access review reporting' {
 		$html | Should -Match 'Groups without recorded paths are not assumed to be unrelated'
 	}
 
+	It 'retains a self-membership arrow without duplicating the group card' {
+		$result = New-ReportFixture
+		$result.GroupPaths = @(@{ GroupIds = @($result.GroupId, $result.GroupId); GroupNames = @('Self-member', 'Self-member') })
+		$html = New-AccessReviewHtml -Results @($result) -Context $script:context
+		[regex]::Matches($html, 'class="topology-node"').Count | Should -Be 1
+		[regex]::Matches($html, 'class="topology-edge"').Count | Should -Be 1
+		$html | Should -Match 'data-from="node-0" data-to="node-0"'
+	}
+
 	It 'reports incomplete legacy connections and retains other nodes' {
 		$result = New-ReportFixture
 		$result.GroupPaths = @(@{ GroupIds = @($null, $result.GroupId); GroupNames = @('Unknown parent', 'Child') })

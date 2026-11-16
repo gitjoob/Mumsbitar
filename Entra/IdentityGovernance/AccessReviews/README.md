@@ -111,10 +111,20 @@ discovery. Reviews do not certify or remove the child group's membership in the
 parent. Discovery of nested groups also does not imply nested group assignments
 grant access to an enterprise application.
 
-Cycles or failures reading any group's metadata/membership abort discovery
-before creation. Automatically discovered nested-only dynamic groups are
-explicitly skipped because membership is rule-managed. Existing application-mode
-dynamic-root skip behavior is unchanged.
+Circular membership (for example, Group A -> Group B -> Group A) produces a
+warning containing group names and object IDs, not a discovery failure. The
+closing connection is retained in `GroupPaths` and `ParentGroupIds` but is not
+traversed again. Other branches continue normally; every distinct group still
+gets at most one eligible direct-user review, with existing-name guards unchanged.
+The HTML topology retains the circular arrows and displays a cycle warning.
+Investigate and remediate the membership model separately; the script never
+changes group-to-group membership. Cycles do not prove that nested assignments
+grant effective access to an application.
+
+Failures reading any group's metadata/membership still abort discovery before
+creation, as do conflicting inherited settings. Automatically discovered
+nested-only dynamic groups are explicitly skipped because membership is
+rule-managed. Existing application-mode dynamic-root skip behavior is unchanged.
 
 ## Application identity coverage
 
@@ -420,6 +430,11 @@ run ID, runnable invocation syntax (including array parameters), working
 directory, effective schedule and per-group results including created IDs.
 Application reviews use `ApplicationResult` events; manual-review inventory uses
 `ManualReviewRequired` events and a separate count in `RunCompleted`.
+Circular paths use `GroupCycleDetected` events containing `GroupIds`,
+`GroupNames`, the originating `ServicePrincipalId` where applicable, and a
+diagnostic `Reason`. Paths include the repeated closing group so the cycle can
+be identified. A warning/event is emitted for each encountered circular path;
+the same cycle may be encountered from different roots.
 CSV files themselves are not copied into logs; effective application-owner IDs,
 CSV owner IDs and role text are logged in results.
 Authentication commands, credentials and tokens are not logged. Keep logs

@@ -218,9 +218,7 @@ function Add-DiscoveredGroup {
 		[Parameter(Mandatory)][hashtable]$State
 	)
 
-	if ($ParentPath -contains $Id) {
-		throw "Cycle detected in nested group membership: $((@($ParentPath) + $Id) -join ' -> ')."
-	}
+	$isCycleClosure = $ParentPath -contains $Id
 	$path = @($ParentPath) + $Id
 	if (-not $State.Snapshots.ContainsKey($Id)) {
 		try {
@@ -282,6 +280,20 @@ function Add-DiscoveredGroup {
 		if ($Source.ServicePrincipalId) {
 			$null = $entry.Aliases.Add("$ReviewNamePrefix $($Source.ServicePrincipal.DisplayName) - $($snapshot.Group.DisplayName)".Trim())
 		}
+	}
+	if ($isCycleClosure) {
+		$groupNames = @($path | ForEach-Object { $State.Snapshots[$_].Group.DisplayName })
+		$description = ($path | ForEach-Object { "$($State.Snapshots[$_].Group.DisplayName) ($_)" }) -join ' -> '
+		$message = "Circular nested group membership detected: $description. The connection is retained but will not be followed again. Discovery continues; review targets cover direct users only. Investigate this circular membership."
+		Write-AccessReviewLog -Log $creationLog -Entry @{
+			Event = 'GroupCycleDetected'
+			GroupIds = @($path)
+			GroupNames = $groupNames
+			ServicePrincipalId = if ($Source.ServicePrincipalId) { "$($Source.ServicePrincipalId)" } else { $null }
+			Reason = $message
+		}
+		Write-Warning $message
+		return
 	}
 	foreach ($childId in $snapshot.ChildIds) {
 		Add-DiscoveredGroup -Source $Source -Id $childId -ParentPath $path -State $State

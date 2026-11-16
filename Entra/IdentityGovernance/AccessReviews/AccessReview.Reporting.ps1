@@ -408,7 +408,7 @@ pre,code{white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px}.filters{dis
           const x = left + index * 292;
           node.style.left = `${x}px`;
           node.style.top = `${top}px`;
-          positions.set(node.id, { x: x + node.offsetWidth / 2, top, bottom: top + node.offsetHeight });
+          positions.set(node.id, { x: x + node.offsetWidth / 2, right: x + node.offsetWidth, top, bottom: top + node.offsetHeight });
         });
         top += rowHeight + 80;
       }
@@ -423,6 +423,11 @@ pre,code{white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px}.filters{dis
         edge.toggleAttribute('hidden', hidden);
         if (hidden) { edge.removeAttribute('d'); continue; }
         visibleEdges++;
+        if (edge.dataset.from === edge.dataset.to) {
+          const upper = from.top + 24, lower = from.bottom - 24;
+          edge.setAttribute('d', `M ${from.right} ${lower} C ${from.right + 28} ${lower}, ${from.right + 28} ${upper}, ${from.right} ${upper}`);
+          continue;
+        }
         const bend = (from.bottom + to.top) / 2;
         edge.setAttribute('d', to.top > from.bottom
           ? `M ${from.x} ${from.bottom} C ${from.x} ${bend}, ${to.x} ${bend}, ${to.x} ${to.top}`
