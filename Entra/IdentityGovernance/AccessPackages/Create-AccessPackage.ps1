@@ -7,7 +7,13 @@ group read permissions, user read permissions, and appropriate licensing and rol
 CatalogName is mandatory. An exact matching catalog is reused; a missing catalog
 is created. Multiple matching catalogs cause the script to stop.
 
-CSV columns: Name, Description, GroupId, AppOwnerIds (semicolon-separated user IDs).
+CSV columns: Name, Description, GroupId, AppOwnerIds (semicolon-separated user IDs),
+plus optional Application, Role, Region and Comments.
+When a row has both Application and Role, the end-user package name is
+"Application - Role" and any Name value is ignored; Name is then not required.
+Otherwise Name is required. Description plus all details not already in the name
+(Application/Role when not both given, Region, Comments) form the package
+description. Blank optional values are omitted.
 DefaultAppOwnerIds supplies owners when a row's AppOwnerIds is empty.
 FallbackApproverIds is mandatory and is used when a recipient has no manager.
 Names and descriptions must use business-friendly application and access terms.
@@ -59,10 +65,14 @@ $rows = @(Import-Csv -LiteralPath $CsvPath)
 if ($rows.Count -eq 0) {
 	throw 'The CSV file contains no access packages.'
 }
-foreach ($column in 'Name', 'Description', 'GroupId', 'AppOwnerIds') {
+foreach ($column in 'GroupId', 'AppOwnerIds') {
 	if (-not $rows[0].PSObject.Properties[$column]) {
 		throw "The CSV file must contain a '$column' column."
 	}
+}
+if (-not $rows[0].PSObject.Properties['Name'] -and
+	-not ($rows[0].PSObject.Properties['Application'] -and $rows[0].PSObject.Properties['Role'])) {
+	throw "The CSV file must contain a 'Name' column, or both 'Application' and 'Role' columns."
 }
 
 Import-Module Microsoft.Graph.Authentication
@@ -172,6 +182,14 @@ function Send-GraphBody {
 	Invoke-PackageGraphRequest -Method POST -Uri $Uri -Body ($Body | ConvertTo-Json -Depth 20) -ContentType 'application/json' -OutputType Hashtable
 }
 
+function Get-CsvText {
+	param([Parameter(Mandatory)]$Row, [Parameter(Mandatory)][string]$Column)
+
+	$property = $Row.PSObject.Properties[$Column]
+	if ($property) { "$($property.Value)".Trim() }
+	else { '' }
+}
+
 function ConvertTo-UserApprovers {
 	param([Parameter(Mandatory)][guid[]]$Ids)
 
@@ -255,7 +273,7 @@ $processedNames = @{}
 
 foreach ($row in $rows) {
 	$result = [ordered]@{
-		Name = "$($row.Name)".Trim()
+		Name = Get-CsvText $row 'Name'
 		GroupId = "$($row.GroupId)".Trim()
 		CatalogId = if ($catalog) { $catalog.id } else { $null }
 		AccessPackageId = $null
@@ -268,10 +286,23 @@ foreach ($row in $rows) {
 	}
 	$newPackageId = $null
 	try {
+		$application = Get-CsvText $row 'Application'
+		$role = Get-CsvText $row 'Role'
+		$namedFromDetails = $application -and $role
+		if ($namedFromDetails) {
+			$result.Name = "$application - $role"
+		}
 		$name = $result.Name
-		$description = "$($row.Description)".Trim()
+		$details = @(
+			if (-not $namedFromDetails -and $application) { "Application: $application" }
+			if (-not $namedFromDetails -and $role) { "Role: $role" }
+			if (Get-CsvText $row 'Region') { "Region: $(Get-CsvText $row 'Region')" }
+			if (Get-CsvText $row 'Comments') { "Comments: $(Get-CsvText $row 'Comments')" }
+		)
+		$description = (@(Get-CsvText $row 'Description') + $details | Where-Object { $_ }) -join [Environment]::NewLine
+		if (-not $description -and $namedFromDetails) { $description = $name }
 		if (-not $name -or -not $description) {
-			throw 'Name and Description must both contain business-friendly text.'
+			throw 'A name (Name, or both Application and Role) and description text (Description or details) are required.'
 		}
 		if ($name -match '(?i)(?<![a-z0-9])(?:access[\s_-]*package|ap|sg)(?![a-z0-9])') {
 			throw "Name '$name' must not contain 'Access Package', 'AP', or 'SG'."

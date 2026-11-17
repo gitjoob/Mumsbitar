@@ -377,6 +377,63 @@ People's reporting & insights,Read people's reports.,$script:groupId,$script:own
 		}
 	}
 
+	It 'names the package from Application and Role and puts remaining details in the description' {
+		@"
+Name,Description,GroupId,AppOwnerIds,Application,Role,Region,Comments
+Ignored name,View reports.,$script:groupId,$script:ownerId,Finance reporting,Report reader,Nordics,Needs manager sign-off
+"@ | Set-Content -LiteralPath $script:csvPath
+		$result = Invoke-Creation
+		$result.Status | Should -Be 'Created'
+		$result.Name | Should -Be 'Finance reporting - Report reader'
+		$package = Get-PostedBody '/accessPackages'
+		$package.displayName | Should -Be 'Finance reporting - Report reader'
+		$package.description | Should -Be ("View reports.", "Region: Nordics", "Comments: Needs manager sign-off" -join [Environment]::NewLine)
+	}
+
+	It 'works without Name or Description columns and omits blank optional values' {
+		@"
+GroupId,AppOwnerIds,Application,Role,Region,Comments
+$script:groupId,$script:ownerId,Finance reporting,Report reader,,
+"@ | Set-Content -LiteralPath $script:csvPath
+		$result = Invoke-Creation
+		$result.Status | Should -Be 'Created'
+		$package = Get-PostedBody '/accessPackages'
+		$package.displayName | Should -Be 'Finance reporting - Report reader'
+		$package.description | Should -Be 'Finance reporting - Report reader'
+	}
+
+	It 'keeps Name and records a lone <Column> in the description' -TestCases @(
+		@{ Column = 'Application'; Value = 'Finance reporting' },
+		@{ Column = 'Role'; Value = 'Report reader' }
+	) {
+		param($Column, $Value)
+		@"
+Name,Description,GroupId,AppOwnerIds,$Column
+Finance reporting - Read reports,View reports.,$script:groupId,$script:ownerId,$Value
+"@ | Set-Content -LiteralPath $script:csvPath
+		$result = Invoke-Creation
+		$result.Status | Should -Be 'Created'
+		$package = Get-PostedBody '/accessPackages'
+		$package.displayName | Should -Be 'Finance reporting - Read reports'
+		$package.description | Should -Be ("View reports.", "${Column}: $Value" -join [Environment]::NewLine)
+	}
+
+	It 'applies naming rules to the generated name' {
+		@"
+GroupId,AppOwnerIds,Application,Role
+$script:groupId,$script:ownerId,SG Finance,Reader
+"@ | Set-Content -LiteralPath $script:csvPath
+		$result = Invoke-Creation
+		$result.Status | Should -Be 'Failed'
+		$result.Reason | Should -Match 'must not contain'
+		$script:graphFixture.Writes.Count | Should -Be 0
+	}
+
+	It 'rejects a CSV with neither Name nor Application and Role columns' {
+		"GroupId,AppOwnerIds,Application`n$script:groupId,$script:ownerId,Finance" | Set-Content -LiteralPath $script:csvPath
+		{ Invoke-Creation } | Should -Throw "*'Name' column, or both*"
+	}
+
 	It 'rejects unmanageable group type <Kind>' -TestCases @(
 		@{ Kind = 'synced' },
 		@{ Kind = 'dynamic' },

@@ -56,14 +56,25 @@ system and resource ID; expanded resource role lists can be empty in Graph.
 ## CSV and naming
 
 Start with [access-packages.example.csv](./access-packages.example.csv).
-The comma-delimited CSV requires all four headers:
+The comma-delimited CSV requires `GroupId` and `AppOwnerIds`, plus either `Name`
+or both `Application` and `Role`. `Description`, `Application`, `Role`, `Region`
+and `Comments` are optional columns:
 
 | Column | Meaning |
 | --- | --- |
-| `Name` | Business-friendly application/service name and the access provided. |
+| `Name` | Business-friendly application/service name and the access provided. Ignored when the row has both `Application` and `Role`. |
 | `Description` | Explain what the requester can do with this access. |
+| `Application` | Optional. With `Role`, the package name becomes `Application - Role`. |
+| `Role` | Optional. With `Application`, the package name becomes `Application - Role`. |
+| `Region` | Optional. Added to the description as `Region: ...`. |
+| `Comments` | Optional. Added to the description as `Comments: ...`. |
 | `GroupId` | One Entra group object ID, not its name. |
 | `AppOwnerIds` | Explicit approver **user** object IDs separated by semicolons. Blank uses `-DefaultAppOwnerIds`. |
+
+When a row has both `Application` and `Role`, that is the end-user package name
+(any `Name` is ignored) and the naming rules below apply to it. The description
+is `Description` followed by one line per remaining detail (`Region`, `Comments`,
+and `Application`/`Role` if only one was supplied). Blank values are omitted.
 
 Use the application/service name requesters recognize, describe the access
 instead of the Entra group, explain abbreviations before using them, omit the
