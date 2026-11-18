@@ -77,4 +77,6 @@ validation. Add focused behavioral tests in the existing test files and run
 `git diff --check`. Browser-check report interactions with fictional data.
 For Windows PowerShell deployments, also parse the entry point and its helpers
 in the target PowerShell version; a PowerShell 7 parse is not a compatibility check.
+Compute conditional report fields before constructing the hashtable instead of
+using bare `if` statements as values.
 Do not install dependencies unless the chosen validation reports them missing.

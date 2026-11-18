@@ -143,13 +143,21 @@ function New-AccessReviewHtml {
 		foreach ($followUp in @($Results | Where-Object { $_.TargetType -in $followUpTypes -and $_.ServicePrincipalId } |
 			Group-Object -Property ServicePrincipalId, TargetType, Status)) {
 			$first = $followUp.Group[0]
+			$ownerItems = $null
+			$assignmentItems = $null
+			if ($first.TargetType -eq 'ServicePrincipalOwner') {
+				$ownerItems = @($followUp.Group)
+			}
+			else {
+				$assignmentItems = @($followUp.Group)
+			}
 			[pscustomobject]@{
 				TargetType = $first.TargetType; Target = $first.Target
 				ServicePrincipalId = $first.ServicePrincipalId
 				ServicePrincipalName = $first.ServicePrincipalName
 				Status = $first.Status; Reason = $first.Reason; Role = $first.Role
-				OwnerItems = if ($first.TargetType -eq 'ServicePrincipalOwner') { @($followUp.Group) }
-				AssignmentItems = if ($first.TargetType -eq 'ApplicationNonUserAssignment') { @($followUp.Group) }
+				OwnerItems = $ownerItems
+				AssignmentItems = $assignmentItems
 			}
 		}
 	)
