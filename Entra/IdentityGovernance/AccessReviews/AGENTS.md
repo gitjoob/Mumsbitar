@@ -39,7 +39,10 @@ This guidance applies to this tool and its tests, not the rest of the repository
   owners separate. Do not infer the original owner-policy label from named
   user scopes or map runtime stage GUIDs to current configuration by position.
   Count instance decisions once, never add stage totals to overview completion,
-  and distinguish unavailable data from zero.
+  and distinguish unavailable data from zero. Retain individual decision
+  subjects and actors, including pending subjects. Resolve user profiles with
+  Get-MgUser; keep current managers explicitly separate from historical
+  assignments and avoid treating absent decision actors as absent reviewers.
 - Keep logs/reports private and HTML-encode untrusted metadata. Renderers and
   creation/offline reporting make no new Graph queries; only the separate status
   collector reads Graph. Generated HTML stays offline without external assets.

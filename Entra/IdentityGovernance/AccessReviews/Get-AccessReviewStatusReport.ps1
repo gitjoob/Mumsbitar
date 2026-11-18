@@ -7,6 +7,10 @@ Keep AccessReview.Reporting.ps1 beside this script. Current configuration,
 runtime reviewer evidence and current resource owners are reported separately.
 Includes every historical instance returned by Graph. The report and returned
 object contain private user identities. No tenant data is changed.
+Requires Microsoft.Graph.Authentication and Microsoft.Graph.Users. Individual
+decision subjects and actors are resolved with Get-MgUser. Where the current
+definition configures manager review, current subject managers are shown
+separately from recorded decision-makers; they are not historical assignments.
 .PARAMETER Prefixes
 Literal, case-insensitive display-name prefixes. The first matching prefix wins.
 .PARAMETER HtmlReportPath
@@ -70,7 +74,7 @@ function Get-AccessReviewStatusUser {
 		try {
 			$guid = [guid]::Empty
 			if (-not [guid]::TryParse($Id, [ref]$guid) -or $guid -eq [guid]::Empty) { throw "Invalid user ID '$Id'." }
-			$user = Invoke-MgGraphRequest -Method GET -Uri "$($State.Base)/users/$guid`?`$select=id,displayName,userPrincipalName" -OutputType PSObject -ErrorAction Stop
+			$user = Get-MgUser -UserId $guid.ToString() -Property Id,DisplayName,UserPrincipalName -ErrorAction Stop
 			if (-not $user.id -or -not $user.userPrincipalName) { throw 'The directory did not return a user ID and sign-in address; check user-read permissions.' }
 		}
 		catch {
@@ -89,6 +93,29 @@ function Get-AccessReviewStatusUser {
 			else { 'Current directory profile' }
 		Error = $lookup.Error
 	}
+}
+
+function Get-AccessReviewStatusManager {
+	param([hashtable]$State, [string]$UserId)
+	if (-not $State.Managers.ContainsKey($UserId)) {
+		$result = [pscustomobject]@{ User = $null; Note = $null; Error = $null }
+		try {
+			$user = Get-MgUser -UserId $UserId -Property Id -ExpandProperty 'manager' -ErrorAction Stop
+			if (-not $user.Id) { throw 'The directory did not return the subject user for manager resolution.' }
+			if ($user.Manager.Id) {
+				$result.User = Get-AccessReviewStatusUser $State $user.Manager.Id
+				$result.Note = 'Current directory manager; not a historical reviewer assignment.'
+			}
+			else { $result.Note = 'No current manager returned by the directory.' }
+		}
+		catch {
+			$result.Error = $_.Exception.Message
+			$result.Note = 'Current manager unavailable; no assignment inferred.'
+			Add-AccessReviewStatusIssue $State "Current manager of $UserId" $result.Error
+		}
+		$State.Managers[$UserId] = $result
+	}
+	$State.Managers[$UserId]
 }
 
 function Get-AccessReviewStatusResource {
@@ -156,41 +183,46 @@ function Get-AccessReviewStatusReviewers {
 	}
 	foreach ($scope in $Scopes) {
 		$query = [string]$scope.query
+		$lookupQuery = $query
+		if ($lookupQuery.StartsWith("$($State.Base)/", [System.StringComparison]::OrdinalIgnoreCase)) {
+			$lookupQuery = $lookupQuery.Substring($State.Base.Length)
+		}
+		$lookupQuery = $lookupQuery -replace '^/v1\.0/', '/'
 		$mode = 'Unexpanded reviewer scope'
 		$users = @()
 		$note = 'Scope retained without inferring reviewer identities.'
 		if ($scope.queryType -and $scope.queryType -ne 'MicrosoftGraph') {
 			$note = "Query type '$($scope.queryType)' is not expanded."
 		}
-		elseif ($query -match '^/users/([0-9a-fA-F-]{36})/?$') {
+		elseif ($lookupQuery -match '^/users/([0-9a-fA-F-]{36})/?$') {
 			$mode = 'Named user'
 			$users = @(Get-AccessReviewStatusUser $State $Matches[1])
 			$note = 'Explicit user ID in this scope. The original owner/fallback policy label cannot be recovered from a user ID alone.'
 		}
-		elseif ($query -eq './manager') {
+		elseif ($lookupQuery -eq './manager') {
 			$mode = 'Line managers'
-			$note = 'Per-subject manager rule. No historical manager assignment inferred from current directory managers.'
+			$note = 'Per-subject manager rule. Decision tables show current managers separately from recorded decision-makers; pending historical assignments are not exposed by this rule.'
 		}
-		elseif ($query -match '^/groups/([0-9a-fA-F-]{36})/(transitiveMembers|members)$') {
+		elseif ($lookupQuery -match '^/groups/([0-9a-fA-F-]{36})/(transitiveMembers|members)$') {
 			$mode = 'Reviewer group members'
-			if (-not $State.ReviewerGroups.ContainsKey($query)) {
+			if (-not $State.ReviewerGroups.ContainsKey($lookupQuery)) {
 				try {
-					$members = @(Get-AccessReviewStatusCollection $State "$($State.Base)$query/microsoft.graph.user?`$select=id,displayName,userPrincipalName")
-					$State.ReviewerGroups[$query] = @($members | ForEach-Object {
+					$members = @(Get-AccessReviewStatusCollection $State "$($State.Base)$lookupQuery/microsoft.graph.user?`$select=id,displayName,userPrincipalName")
+					$State.ReviewerGroups[$lookupQuery] = @($members | ForEach-Object {
 						Get-AccessReviewStatusUser $State $_.id $_.displayName $_.userPrincipalName 'Current reviewer-group membership'
 					})
 				}
 				catch {
-					$State.ReviewerGroups[$query] = @()
+					$State.ReviewerGroups[$lookupQuery] = @()
 					Add-AccessReviewStatusIssue $State "Reviewer group $query" $_.Exception.Message
 				}
 			}
-			$users = @($State.ReviewerGroups[$query])
+			$users = @($State.ReviewerGroups[$lookupQuery])
 			$note = 'Current human members of this reviewer group, not proof of historical stage assignments. Consult collection issues if identities are unavailable.'
 		}
-		elseif ($query -eq './owners' -or $query -match '^/(groups|servicePrincipals)/([0-9a-fA-F-]{36})/owners$') {
+		elseif ($lookupQuery -eq './owners' -or $lookupQuery -match '^/(groups|servicePrincipals)/([0-9a-fA-F-]{36})/owners$') {
 			$mode = 'Resource owners'
-			$ownerResources = if ($query -eq './owners') { @($Resources) }
+			$ownerResources = if ($lookupQuery -eq './owners') { @($Resources) }
 				else { @(Get-AccessReviewStatusResource $State $Matches[1] $Matches[2]) }
 			$users = @($ownerResources | ForEach-Object { $_.Owners })
 			$note = 'Dynamic owner rule: users below are current human owners, not proof of past stage assignment. See recorded reviewers and decision actors.'
@@ -212,6 +244,7 @@ function Get-AccessReviewStatusDecisions {
 	$raw = @{}
 	$apply = @{}
 	$actors = @{}
+	$items = [System.Collections.Generic.List[object]]::new()
 	$resourceLinks = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
 	$seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
 	$pages = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
@@ -235,6 +268,32 @@ function Get-AccessReviewStatusDecisions {
 			}
 			$actor = $decision.reviewedBy
 			if ($actor.id -and $actor.id -ne [guid]::Empty.ToString()) { $actors[[string]$actor.id] = $actor }
+			$subject = $null
+			$manager = $null
+			$principal = $decision.principal
+			$principalId = [string]$principal.id
+			$isUser = $principal.'@odata.type' -match '^#?microsoft\.graph\.userIdentity$' -or
+				$decision.principalLink -match '(?:^/|/v1\.0/)users/[0-9a-fA-F-]{36}(?:/|$|\?)'
+			if ($isUser) {
+				if (-not $principalId -and $decision.principalLink -match '/users/([0-9a-fA-F-]{36})(?:/|$|\?)') { $principalId = $Matches[1] }
+				$subject = Get-AccessReviewStatusUser $State $principalId $principal.displayName $principal.userPrincipalName 'Recorded review subject'
+				$guid = [guid]::Empty
+				if ($State.IncludeManagers -and [guid]::TryParse($principalId, [ref]$guid) -and $guid -ne [guid]::Empty) {
+					$manager = Get-AccessReviewStatusManager $State $principalId
+				}
+			}
+			elseif ($principalId -or $principal.displayName) {
+				$subject = [pscustomobject]@{
+					Id = $principalId; DisplayName = $principal.displayName; UserPrincipalName = ''
+					ProfileSource = 'Recorded principal (not identified as a user)'; Error = $null
+				}
+			}
+			$items.Add([pscustomobject]@{
+				Id = $decision.id; Subject = $subject; CurrentManager = $manager; Decision = $value
+				ReviewedBy = if ($actor.id -and $actor.id -ne [guid]::Empty.ToString()) { Get-AccessReviewStatusUser $State $actor.id $actor.displayName }
+					else { $null }
+				ReviewedDateTime = $decision.reviewedDateTime; ApplyResult = $decision.applyResult
+			})
 			if ($decision.resourceLink) { $null = $resourceLinks.Add([string]$decision.resourceLink) }
 		}
 		$Uri = $response.'@odata.nextLink'
@@ -246,6 +305,7 @@ function Get-AccessReviewStatusDecisions {
 		Completion = if ($seen.Count) { [math]::Round(100 * $recorded / $seen.Count, 1) } else { $null }
 		DecisionCounts = $raw; ApplyResults = $apply; ResourceLinks = @($resourceLinks)
 		Actors = @($actors.Values | ForEach-Object { Get-AccessReviewStatusUser $State $_.id $_.displayName })
+		Items = $items.ToArray(); IncludeManagers = $State.IncludeManagers
 	}
 }
 
@@ -254,6 +314,7 @@ foreach ($prefix in $Prefixes) {
 }
 $HtmlReportPath = Resolve-AccessReviewReportPath $HtmlReportPath
 Import-Module Microsoft.Graph.Authentication -ErrorAction Stop
+Import-Module Microsoft.Graph.Users -ErrorAction Stop
 $context = Get-MgContext
 if (-not $context) { throw 'Connect to Microsoft Graph first.' }
 if ($context.AuthType -ne 'AppOnly' -and -not @($context.Scopes | Where-Object { $_ -in @('AccessReview.Read.All', 'AccessReview.ReadWrite.All') }).Count) {
@@ -269,7 +330,8 @@ $report = [pscustomobject]@{
 }
 $state = @{
 	Base = "$($environment.GraphEndpoint.TrimEnd('/'))/v1.0"; Report = $report
-	Users = @{}; Resources = @{}; ReviewerGroups = @{}; DefinitionId = $null; InstanceId = $null
+	Users = @{}; Managers = @{}; IncludeManagers = $false
+	Resources = @{}; ReviewerGroups = @{}; DefinitionId = $null; InstanceId = $null
 }
 try {
 	$definitions = @(Get-AccessReviewStatusCollection $state "$($state.Base)/identityGovernance/accessReviews/definitions")
@@ -302,6 +364,7 @@ try {
 				}
 			}
 		)
+		$state.IncludeManagers = @($item.Configuration | ForEach-Object { $_.Reviewers } | Where-Object Mode -EQ 'Line managers').Count -gt 0
 		$definitionUri = "$($state.Base)/identityGovernance/accessReviews/definitions/$([uri]::EscapeDataString($definition.id))"
 		try { $instances = @(Get-AccessReviewStatusCollection $state "$definitionUri/instances") }
 		catch {
@@ -319,7 +382,7 @@ try {
 				Stages = [System.Collections.Generic.List[object]]::new()
 			}
 			$item.Instances.Add($row)
-			try { $row.Summary = Get-AccessReviewStatusDecisions $state "$instanceUri/decisions?`$select=id,decision,applyResult,reviewedBy,resourceLink" }
+			try { $row.Summary = Get-AccessReviewStatusDecisions $state "$instanceUri/decisions?`$select=id,decision,applyResult,reviewedBy,resourceLink,principal,principalLink,reviewedDateTime" }
 			catch {
 				$row.DecisionError = $_.Exception.Message
 				Add-AccessReviewStatusIssue $state 'Instance decisions' $row.DecisionError
@@ -352,7 +415,7 @@ try {
 				}
 				$row.Stages.Add($stageRow)
 				try {
-					$stageRow.Summary = Get-AccessReviewStatusDecisions $state "$instanceUri/stages/$([uri]::EscapeDataString($stage.id))/decisions?`$select=id,decision,applyResult,reviewedBy,resourceLink"
+					$stageRow.Summary = Get-AccessReviewStatusDecisions $state "$instanceUri/stages/$([uri]::EscapeDataString($stage.id))/decisions?`$select=id,decision,applyResult,reviewedBy,resourceLink,principal,principalLink,reviewedDateTime"
 				}
 				catch {
 					$stageRow.Error = $_.Exception.Message

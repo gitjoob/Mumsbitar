@@ -1,5 +1,6 @@
 BeforeAll {
 	Import-Module Microsoft.Graph.Authentication
+	Import-Module Microsoft.Graph.Users
 	$script:reporter = Join-Path $PSScriptRoot '../Get-AccessReviewStatusReport.ps1'
 	$script:base = 'https://graph.microsoft.com/v1.0'
 	$script:definitionsUri = "$base/identityGovernance/accessReviews/definitions"
@@ -13,7 +14,9 @@ BeforeAll {
 	$script:newId = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb'
 	$script:stageId = 'cccccccc-cccc-cccc-cccc-cccccccccccc'
 	$script:instanceRoot = "$definitionsUri/$definitionId/instances"
-	$script:decisionSelect = '?$select=id,decision,applyResult,reviewedBy,resourceLink'
+	$script:subjectId = '99999999-9999-9999-9999-999999999999'
+	$script:managerId = 'dddddddd-dddd-dddd-dddd-dddddddddddd'
+	$script:decisionSelect = '?$select=id,decision,applyResult,reviewedBy,resourceLink,principal,principalLink,reviewedDateTime'
 	function New-StatusDecision {
 		param([string]$Id, [string]$Decision)
 		@{
@@ -30,6 +33,7 @@ Describe 'Read-only historical access review status' {
 		$script:responses = @{}
 		$script:failures = @{}
 		$script:requests = [System.Collections.Generic.List[object]]::new()
+		$script:managerProfiles = @{}
 		$script:definition = @{
 			id = $definitionId; displayName = 'AR Finance'; status = 'InProgress'; descriptionForReviewers = 'Finance access'
 			scope = @{ query = "/groups/$groupId/members" }
@@ -76,6 +80,19 @@ Describe 'Read-only historical access review status' {
 		) }
 		Mock Get-MgContext { [pscustomobject]@{ TenantId = 'fictional-tenant'; Environment = 'Global'; AuthType = 'Delegated'; Scopes = @('AccessReview.Read.All') } }
 		Mock Get-MgEnvironment { [pscustomobject]@{ GraphEndpoint = 'https://graph.microsoft.com' } }
+		Mock Get-MgUser {
+			param($UserId, $Property, $ExpandProperty)
+			if ($ExpandProperty) {
+				if (-not $managerProfiles.ContainsKey("$UserId")) { throw "Unexpected manager lookup: $UserId" }
+				if ($managerProfiles["$UserId"] -is [string]) { throw $managerProfiles["$UserId"] }
+				return $managerProfiles["$UserId"]
+			}
+			$uri = "$base/users/$UserId`?`$select=id,displayName,userPrincipalName"
+			$requests.Add(@{ Method = 'GET'; Uri = $uri })
+			if ($failures.ContainsKey($uri)) { throw $failures[$uri] }
+			if (-not $responses.ContainsKey($uri)) { throw "Unexpected user lookup: $UserId" }
+			$responses[$uri] | ConvertTo-Json -Depth 20 | ConvertFrom-Json
+		}
 		Mock Invoke-MgGraphRequest {
 			param($Method, $Uri)
 			$requests.Add(@{ Method = "$Method"; Uri = "$Uri" })
@@ -137,6 +154,142 @@ Describe 'Read-only historical access review status' {
 		$report.Definitions[0].CurrentResources[0].Owners.Count | Should -Be 2
 	}
 
+	It 'resolves versioned and absolute named reviewer queries with Get-MgUser rather than displaying only paths' -TestCases @(
+		@{ QueryPrefix = '/v1.0' },
+		@{ QueryPrefix = 'https://graph.microsoft.com/v1.0' }
+	) {
+		param($QueryPrefix)
+		$definition.stageSettings[2].reviewers[0].query = "$QueryPrefix/users/$configuredOwner"
+		$report = & $reporter -HtmlReportPath $outputPath
+		$reviewer = $report.Definitions[0].Configuration[2].Reviewers[0]
+		$reviewer.Mode | Should -Be 'Named user'
+		$reviewer.Users[0].DisplayName | Should -Be 'Configured owner'
+		Should -Invoke Get-MgUser -Exactly -Times 1 -ParameterFilter { $UserId -eq $configuredOwner -and -not $ExpandProperty }
+		Should -Invoke Invoke-MgGraphRequest -Times 0 -ParameterFilter { "$Uri" -like '*/users/*' }
+		$html = Get-Content $outputPath -Raw
+		$pages = @([regex]::Match($html, '(?s)<script type="application/json" id="status-details">(.*?)</script>').Groups[1].Value | ConvertFrom-Json)
+		$pages[0] | Should -Match '<strong>Configured owner</strong> configured.owner@example.test'
+		$pages[0] | Should -Match '<details><summary>Technical reviewer rule</summary><code>'
+		$report.Issues.Count | Should -Be 0
+	}
+
+	It 'includes pending and completed self-review subjects and current managers separately from historical stage actors' {
+		$otherSubject = 'eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee'
+		$responses["$base/users/$subjectId`?`$select=id,displayName,userPrincipalName"] = @{
+			id = $subjectId; displayName = 'Alex Subject'; userPrincipalName = 'alex@example.test'
+		}
+		$responses["$base/users/$otherSubject`?`$select=id,displayName,userPrincipalName"] = @{
+			id = $otherSubject; displayName = 'Sam Pending'; userPrincipalName = 'sam@example.test'
+		}
+		$responses["$base/users/$managerId`?`$select=id,displayName,userPrincipalName"] = @{
+			id = $managerId; displayName = 'Current Line Manager'; userPrincipalName = 'manager@example.test'
+		}
+		$managerProfiles[$subjectId] = [pscustomobject]@{ Id = $subjectId; Manager = [pscustomobject]@{ Id = $managerId } }
+		$managerProfiles[$otherSubject] = [pscustomobject]@{ Id = $otherSubject; Manager = $null }
+		$completed = New-StatusDecision 'self-completed' 'Approve'
+		$completed.principal = @{ id = $subjectId; '@odata.type' = '#microsoft.graph.userIdentity' }
+		$completed.principalLink = "$base/users/$subjectId"
+		$completed.reviewedBy = @{ id = $subjectId }
+		$completed.reviewedDateTime = '2026-01-02T00:00:00Z'
+		$pending = New-StatusDecision 'self-pending' 'NotReviewed'
+		$pending.principalLink = "$base/users/$otherSubject"
+		$managerDecision = New-StatusDecision 'manager-completed' 'Deny'
+		$managerDecision.principal = $completed.principal
+		$managerDecision.reviewedBy = @{ id = $configuredOwner }
+		$managerStageId = 'ffffffff-ffff-ffff-ffff-ffffffffffff'
+		$responses["$instanceRoot/$newId/decisions$decisionSelect"] = @{ value = @($completed, $pending) }
+		$responses["$instanceRoot/$newId/stages"].value[0].reviewers = @()
+		$responses["$instanceRoot/$newId/stages/$stageId/decisions$decisionSelect"] = @{ value = @($completed, $pending) }
+		$responses["$instanceRoot/$newId/stages"].value += @{
+			id = $managerStageId; status = 'InProgress'; startDateTime = '2026-01-04T00:00:00Z'; reviewers = @(@{ query = './manager' })
+		}
+		$responses["$instanceRoot/$newId/stages/$managerStageId/decisions$decisionSelect"] = @{ value = @($managerDecision) }
+		$report = & $reporter -HtmlReportPath $outputPath
+		$instance = $report.Definitions[0].Instances[0]
+		$instance.Summary.Total | Should -Be 2
+		$selfStage = $instance.Stages | Where-Object Id -EQ $stageId
+		$selfStage.Summary.Items.Count | Should -Be 2
+		$selfStage.Summary.Items[0].Subject.UserPrincipalName | Should -Be 'alex@example.test'
+		$selfStage.Summary.Items[1].Subject.UserPrincipalName | Should -Be 'sam@example.test'
+		$selfStage.Summary.Items[1].ReviewedBy | Should -BeNullOrEmpty
+		$selfStage.Summary.Items[1].CurrentManager.Note | Should -Be 'No current manager returned by the directory.'
+		$managerItem = ($instance.Stages | Where-Object Id -EQ $managerStageId).Summary.Items[0]
+		$managerItem.ReviewedBy.Id | Should -Be $configuredOwner
+		$managerItem.CurrentManager.User.Id | Should -Be $managerId
+		Should -Invoke Get-MgUser -Exactly -Times 1 -ParameterFilter { $UserId -eq $subjectId -and $ExpandProperty -eq 'manager' }
+		Should -Invoke Get-MgUser -Exactly -Times 1 -ParameterFilter { $UserId -eq $subjectId -and -not $ExpandProperty }
+		$html = Get-Content $outputPath -Raw
+		$pages = @([regex]::Match($html, '(?s)<script type="application/json" id="status-details">(.*?)</script>').Groups[1].Value | ConvertFrom-Json)
+		$pages[0] | Should -Match 'Individual users and decisions'
+		$pages[0] | Should -Match 'Sam Pending'
+		$pages[0] | Should -Match 'Current Line Manager'
+		$pages[0] | Should -Match 'not proof of historical or pending stage assignments'
+		$report.Issues.Count | Should -Be 0
+	}
+
+	It 'keeps user decisions available when current manager lookup fails and does not repeat failed lookups' {
+		$decision = $responses["$instanceRoot/$newId/decisions$decisionSelect"].value[0]
+		$decision.principal = @{ id = $subjectId; displayName = 'Alex'; userPrincipalName = 'alex@example.test'; '@odata.type' = '#microsoft.graph.userIdentity' }
+		$responses["$instanceRoot/$newId/stages/$stageId/decisions$decisionSelect"].value = @($decision)
+		$managerProfiles[$subjectId] = 'Manager lookup forbidden'
+		$report = & $reporter -HtmlReportPath $outputPath -WarningAction SilentlyContinue
+		$item = $report.Definitions[0].Instances[0].Summary.Items[0]
+		$item.Subject.DisplayName | Should -Be 'Alex'
+		$item.CurrentManager.Error | Should -Be 'Manager lookup forbidden'
+		$report.Definitions[0].Instances[0].Summary.Total | Should -Be 4
+		$report.Issues.Source | Should -Contain "Current manager of $subjectId"
+		Should -Invoke Get-MgUser -Exactly -Times 1 -ParameterFilter { $UserId -eq $subjectId -and $ExpandProperty -eq 'manager' }
+	}
+
+	It 'does not look up service principals or missing subject identities as users' {
+		$decision = $responses["$instanceRoot/$newId/decisions$decisionSelect"].value[0]
+		$decision.principal = @{ id = $applicationId; displayName = 'Automation'; '@odata.type' = '#microsoft.graph.servicePrincipalIdentity' }
+		$decision.principalLink = "$base/servicePrincipals/$applicationId"
+		$report = & $reporter -HtmlReportPath $outputPath
+		$items = $report.Definitions[0].Instances[0].Summary.Items
+		$items[0].Subject.DisplayName | Should -Be 'Automation'
+		$items[0].CurrentManager | Should -BeNullOrEmpty
+		$items[1].Subject | Should -BeNullOrEmpty
+		Should -Invoke Get-MgUser -Times 0 -ParameterFilter { $UserId -eq $applicationId }
+		$report.Issues.Count | Should -Be 0
+	}
+
+	It 'does not request current managers when no manager-review stage is configured' {
+		$definition.stageSettings = @($definition.stageSettings[2])
+		$decision = $responses["$instanceRoot/$newId/decisions$decisionSelect"].value[0]
+		$decision.principal = @{ id = $subjectId; displayName = 'Alex'; userPrincipalName = 'alex@example.test'; '@odata.type' = '#microsoft.graph.userIdentity' }
+		$report = & $reporter -HtmlReportPath $outputPath
+		$report.Definitions[0].Instances[0].Summary.Items[0].Subject.DisplayName | Should -Be 'Alex'
+		$report.Definitions[0].Instances[0].Summary.IncludeManagers | Should -BeFalse
+		Should -Invoke Get-MgUser -Times 0 -ParameterFilter { $ExpandProperty }
+		(Get-Content $outputPath -Raw) | Should -Not -Match 'Current line manager \(directory snapshot\)'
+	}
+
+	It 'does not follow named-reviewer URLs outside the connected Graph endpoint' {
+		$definition.stageSettings[2].reviewers[0].query = "https://outside.example.test/v1.0/users/$managerId"
+		$report = & $reporter -HtmlReportPath $outputPath
+		$report.Definitions[0].Configuration[2].Reviewers[0].Mode | Should -Be 'Unexpanded reviewer scope'
+		Should -Invoke Get-MgUser -Times 0 -ParameterFilter { $UserId -eq $managerId }
+		@($requests | Where-Object Uri -Like 'https://outside.example.test/*').Count | Should -Be 0
+	}
+
+	It 'encodes individual subject, manager and decision-maker metadata inside decision tables' {
+		$payload = '</script><img src=x onerror=alert(1)>'
+		$decision = $responses["$instanceRoot/$newId/decisions$decisionSelect"].value[0]
+		$decision.principal = @{ id = $subjectId; displayName = $payload; userPrincipalName = 'subject@example.test'; '@odata.type' = '#microsoft.graph.userIdentity' }
+		$decision.reviewedBy = @{ id = $configuredOwner; displayName = $payload }
+		$decision.reviewedDateTime = $payload
+		$responses["$base/users/$managerId`?`$select=id,displayName,userPrincipalName"] = @{
+			id = $managerId; displayName = $payload; userPrincipalName = 'manager@example.test'
+		}
+		$managerProfiles[$subjectId] = [pscustomobject]@{ Id = $subjectId; Manager = [pscustomobject]@{ Id = $managerId } }
+		$null = & $reporter -HtmlReportPath $outputPath
+		$html = Get-Content $outputPath -Raw
+		$pages = @([regex]::Match($html, '(?s)<script type="application/json" id="status-details">(.*?)</script>').Groups[1].Value | ConvertFrom-Json)
+		$pages[0] | Should -Not -Match '<img'
+		$pages[0] | Should -Match '&lt;/script&gt;&lt;img'
+	}
+
 	It 'counts only instance outcomes in overview metrics and treats unknown outcomes as other' {
 		$report = & $reporter -HtmlReportPath $outputPath
 		$current = $report.Definitions[0].Instances[0].Summary
@@ -157,6 +310,7 @@ Describe 'Read-only historical access review status' {
 		$responses["$instanceRoot/$newId/decisions?page=2"] = @{ value = @($duplicate, (New-StatusDecision 'h' 'DontKnow')) }
 		$report = & $reporter -HtmlReportPath $outputPath
 		$report.Definitions[0].Instances[0].Summary.Total | Should -Be 5
+		$report.Definitions[0].Instances[0].Summary.Items.Count | Should -Be 5
 		$report.Definitions[0].Instances[0].Summary.DontKnow | Should -Be 1
 		@($requests | Where-Object Uri -Like '*/users/00000000-*').Count | Should -Be 0
 	}

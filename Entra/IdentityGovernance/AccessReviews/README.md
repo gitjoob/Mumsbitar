@@ -601,7 +601,7 @@ It uses only Graph **GET** requests: no creation, changes, reminders or applicat
 of decisions.
 
 ```powershell
-Connect-MgGraph -Scopes 'AccessReview.Read.All','User.ReadBasic.All','GroupMember.Read.All','Application.Read.All'
+Connect-MgGraph -Scopes 'AccessReview.Read.All','User.Read.All','GroupMember.Read.All','Application.Read.All'
 
 $status = .\Get-AccessReviewStatusReport.ps1 `
     -Prefixes @('AR ', 'Quarterly ') `
@@ -616,9 +616,13 @@ Definitions with no instances and failed instance listings remain visible.
 Collection can take time for large histories because decisions are read for
 each instance and runtime stage.
 
-The script requires an existing Graph connection and the Authentication module.
+The script requires an existing Graph connection and the
+`Microsoft.Graph.Authentication` and `Microsoft.Graph.Users` modules.
 `AccessReview.Read.All` (or `AccessReview.ReadWrite.All`) permits review reads.
-`User.ReadBasic.All` resolves basic user identities; `GroupMember.Read.All`
+`User.Read.All` permits basic user identities and current manager expansion
+through `Get-MgUser`. If only `User.ReadBasic.All` is granted, basic identities
+can still resolve, but manager-read failures are shown as collection issues.
+`GroupMember.Read.All`
 supports current group owners/reviewer-group membership; `Application.Read.All`
 supports current application owners. Additional permissions can be required for
 hidden membership or directory restrictions. The signed-in account also needs
@@ -641,7 +645,8 @@ For each review/instance, it separates:
   returned by the runtime API, with duration, dependencies, reviewer rules,
   resolved named users and fallbacks.
 - **Runtime stages:** Graph's stage GUIDs, statuses, dates, reviewer/fallback
-  scopes, decision counts and recorded decision actors. Runtime stages are
+  scopes, decision counts, individual subjects (including pending self-reviews),
+  recorded decision-makers, decision timestamps and application results. Runtime stages are
   sorted for display, **not guessed into a mapping to current configuration**.
 - **Recorded instance reviewers:** Graph's `contactedReviewers`, retaining
   recorded names and UPNs where present. These are instance-wide, not a per-stage
@@ -650,6 +655,14 @@ For each review/instance, it separates:
   from service-principal/unclassified owners. These are **today's directory
   owners**, not historical stage assignments. Group resources include safe
   Entra links.
+- **Individual users and current line managers:** instance and stage decision
+  tables identify each user being reviewed and the recorded decision-maker.
+  When the current definition contains a manager-review stage, each user also
+  has a separately labelled current manager (or an explicit unavailable/no-manager
+  result). These current relationships are **not historical assignments**.
+  Pending items and automatic/default decisions can have no recorded actor;
+  that does not mean no reviewer was assigned. Profiles and manager lookups are
+  cached for the run, including failures.
 
 For reviews created by this tool, resource-owner policies are resolved to
 explicit `/users/{id}` reviewer queries when created. Graph does not preserve
@@ -657,12 +670,17 @@ an original “resource owner” policy label on those IDs. The status report
 resolves and shows these configured users, but cannot distinguish captured
 owners from manually selected users or infer an earlier owner roster.
 Current profiles may have changed; the report labels their evidence source.
+Named reviewer queries in `/users/{id}`, `/v1.0/users/{id}` and absolute URLs
+on the connected Graph endpoint are resolved to names and sign-in addresses.
+Technical queries/JSON are collapsed rather than used as the primary identity
+display. Unrecognized queries are retained without following arbitrary URLs.
 
 Simple dynamic owner rules are expanded to current human owners. Simple
 reviewer-group membership rules are expanded to current human members.
 Per-person manager/self-review rules cannot supply a complete historical
 per-stage roster from configuration alone; consult recorded instance reviewers
-and actual decision actors. Filtered/unsupported rules remain visible verbatim,
+and individual stage decisions. Current managers are supporting directory
+context, not a reconstruction of past assignments. Filtered/unsupported rules remain visible verbatim,
 without claiming the separate unfiltered current owner list is eligible.
 Raw resource/reviewer scopes are available in details.
 

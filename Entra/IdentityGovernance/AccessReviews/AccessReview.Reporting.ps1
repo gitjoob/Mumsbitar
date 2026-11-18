@@ -561,9 +561,12 @@ function ConvertTo-AccessReviewStatusScopesHtml {
 	param([object[]]$Scopes)
 	if (-not @($Scopes | Where-Object { $_ }).Count) { return '<p class="muted">None configured/returned.</p>' }
 	(@(foreach ($scope in $Scopes) {
-		"<p><strong>$(ConvertTo-AccessReviewHtmlText $scope.Mode)</strong><br><code>$(ConvertTo-AccessReviewHtmlText $scope.Query)</code><small>$(ConvertTo-AccessReviewHtmlText $scope.Note)</small></p>"
-		ConvertTo-AccessReviewStatusUsersHtml $scope.Users
-		if ($scope.RawScope) { "<details><summary>Raw reviewer rule</summary><pre>$(ConvertTo-AccessReviewHtmlText ($scope.RawScope | ConvertTo-Json -Depth 10))</pre></details>" }
+		"<p><strong>$(ConvertTo-AccessReviewHtmlText $scope.Mode)</strong><small>$(ConvertTo-AccessReviewHtmlText $scope.Note)</small></p>"
+		if ($scope.Mode -in @('Self-review / default reviewer behavior', 'Line managers')) {
+			'<p class="muted">Individual users are listed in the instance and runtime-stage decision tables below, when available.</p>'
+		}
+		else { ConvertTo-AccessReviewStatusUsersHtml $scope.Users }
+		"<details><summary>Technical reviewer rule</summary><code>$(ConvertTo-AccessReviewHtmlText $scope.Query)</code>$(if ($scope.RawScope) { '<pre>' + (ConvertTo-AccessReviewHtmlText ($scope.RawScope | ConvertTo-Json -Depth 10)) + '</pre>' })</details>"
 	}) -join '')
 }
 
@@ -592,6 +595,24 @@ function ConvertTo-AccessReviewStatusSummaryHtml {
 	$counts = ConvertTo-AccessReviewHtmlText ($Summary.DecisionCounts | ConvertTo-Json -Compress)
 	$apply = ConvertTo-AccessReviewHtmlText ($Summary.ApplyResults | ConvertTo-Json -Compress)
 	"<p><strong>$($Summary.Recorded) / $($Summary.Total)</strong> recorded outcomes ($percent). Approve: $($Summary.Approve); Deny: $($Summary.Deny); Don't know: $($Summary.DontKnow); Not reviewed: $($Summary.NotReviewed); Other: $($Summary.Other).</p><details><summary>Decision and application-result breakdown</summary><pre>$counts</pre><p>Application results are not all removals; successful application can also retain access.</p><pre>$apply</pre></details><h4>Recorded decision actors</h4>$(ConvertTo-AccessReviewStatusUsersHtml $Summary.Actors)"
+	'<h4>Individual users and decisions</h4>'
+	if (-not @($Summary.Items | Where-Object { $_ }).Count) {
+		'<p class="muted">No individual decision records returned.</p>'
+		return
+	}
+	'<p class="muted">Recorded decision-makers are actual actors, not a complete assigned-reviewer roster. An unreviewed item has no recorded actor; automatic/default outcomes can also have no actor.</p>'
+	if ($Summary.IncludeManagers) { '<p class="notice">Managers below are current directory relationships, not proof of historical or pending stage assignments. Consult the stage reviewer rule and recorded decision-maker separately.</p>' }
+	'<div class="table-wrap"><table class="decision-items"><thead><tr><th>User being reviewed</th><th>Decision</th><th>Recorded decision-maker</th>'
+	if ($Summary.IncludeManagers) { '<th>Current line manager (directory snapshot)</th>' }
+	'<th>Reviewed (UTC)</th><th>Application result</th></tr></thead><tbody>'
+	foreach ($item in $Summary.Items) {
+		"<tr><td>$(if ($item.Subject) { ConvertTo-AccessReviewStatusUsersHtml @($item.Subject) } else { 'Subject identity unavailable in the review record.' })</td><td>$(ConvertTo-AccessReviewHtmlText $item.Decision)</td><td>$(if ($item.ReviewedBy) { ConvertTo-AccessReviewStatusUsersHtml @($item.ReviewedBy) } else { 'No recorded decision-maker' })</td>"
+		if ($Summary.IncludeManagers) {
+			"<td>$(if ($item.CurrentManager.User) { ConvertTo-AccessReviewStatusUsersHtml @($item.CurrentManager.User) })<small>$(ConvertTo-AccessReviewHtmlText $item.CurrentManager.Note)</small>$(if ($item.CurrentManager.Error) { '<span class="warning">' + (ConvertTo-AccessReviewHtmlText $item.CurrentManager.Error) + '</span>' })$(if (-not $item.CurrentManager) { 'Unavailable / not a user subject' })</td>"
+		}
+		"<td>$(ConvertTo-AccessReviewHtmlText $item.ReviewedDateTime)</td><td>$(ConvertTo-AccessReviewHtmlText $item.ApplyResult)</td></tr>"
+	}
+	'</tbody></table></div>'
 }
 
 function New-AccessReviewStatusHtml {
