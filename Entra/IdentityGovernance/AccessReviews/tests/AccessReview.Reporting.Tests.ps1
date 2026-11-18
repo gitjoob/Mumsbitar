@@ -139,12 +139,70 @@ Describe 'Offline access review reporting' {
 		$html | Should -Match "Overview/groupId/$parentId"
 	}
 
+	It 'shows applications as distinct roots connected only to directly assigned groups' {
+		$root = New-ReportFixture -Name 'Assigned group'
+		$child = New-ReportFixture -Name 'Nested child'
+		$child.GroupId = '44444444-4444-4444-4444-444444444444'
+		$child.ParentGroupIds = @($root.GroupId)
+		$first = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
+		$second = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb'
+		foreach ($result in @($root, $child)) {
+			$result.GroupPaths = @(foreach ($app in @($first, $second)) {
+				@{
+					ServicePrincipalId = $app; ServicePrincipalName = "Payroll <$app>"
+					GroupIds = if ($result -eq $root) { @($root.GroupId) } else { @($root.GroupId, $child.GroupId) }
+					GroupNames = if ($result -eq $root) { @('Assigned group') } else { @('Assigned group', 'Nested child') }
+				}
+			})
+		}
+		$direct = [pscustomobject]@{
+			TargetType = 'ApplicationDirectUsers'; ServicePrincipalId = $first; Target = "Payroll <$first>"
+			SubjectCount = 3; Status = 'Created'; ReviewName = 'AR Payroll direct users'
+		}
+		$html = New-AccessReviewHtml -Results @($root, $child, $direct) -Context $script:context
+		[regex]::Matches($html, 'class="topology-node application-node"').Count | Should -Be 2
+		[regex]::Matches($html, 'class="topology-edge application-edge"').Count | Should -Be 2
+		[regex]::Matches($html, 'class="topology-edge"').Count | Should -Be 1
+		$html | Should -Match 'data-from="app-0" data-to="node-0"'
+		$html | Should -Match 'data-from="app-1" data-to="node-0"'
+		$html | Should -Not -Match 'data-from="app-[01]" data-to="node-1"'
+		$html | Should -Match '3 directly assigned users'
+		$html | Should -Match 'Direct-user review: Created'
+		$html | Should -Match 'data-target="review-2"'
+		$html | Should -Match "objectId/$first"
+		$html | Should -Not -Match '<aaaaaaaa'
+	}
+
+	It 'retains discovered applications with no review targets in live and offline reports (offline: <Offline>)' -TestCases @(
+		@{ Offline = $false }, @{ Offline = $true }
+	) {
+		param($Offline)
+		$app = @{ ServicePrincipalId = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'; ServicePrincipalName = 'Empty application'; GroupIds = @(); DirectUserCount = 0 }
+		if ($Offline) {
+			@(
+				@{ Event = 'RunStarted'; RunId = 'empty-app' }
+				@{ Event = 'ApplicationDiscovered'; RunId = 'empty-app'; Application = $app }
+				@{ Event = 'RunCompleted'; RunId = 'empty-app' }
+			) | ForEach-Object { $_ | ConvertTo-Json -Depth 10 -Compress } | Set-Content $script:logPath
+			& $script:exporter -LogPath $script:logPath -OutputPath $script:outputPath
+			$html = Get-Content $script:outputPath -Raw
+		}
+		else {
+			$script:context.Applications = @($app)
+			$html = New-AccessReviewHtml -Results @() -Context $script:context
+		}
+		[regex]::Matches($html, 'class="topology-node application-node"').Count | Should -Be 1
+		$html | Should -Match 'Empty application'
+		$html | Should -Match '0 directly assigned users discovered'
+		$html | Should -Not -Match '<tr data-status=|class="topology-edge'
+	}
+
 	It 'does not invent edges for legacy groups without recorded paths' {
 		$result = New-ReportFixture
 		$html = New-AccessReviewHtml -Results @($result) -Context $script:context
 		[regex]::Matches($html, 'class="topology-node"').Count | Should -Be 1
 		[regex]::Matches($html, 'class="topology-edge"').Count | Should -Be 0
-		$html | Should -Match 'Groups without recorded paths are not assumed to be unrelated'
+		$html | Should -Match 'Resources without recorded connections are not assumed to be unrelated'
 	}
 
 	It 'retains a self-membership arrow without duplicating the group card' {

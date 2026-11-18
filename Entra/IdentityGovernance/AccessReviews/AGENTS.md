@@ -27,6 +27,8 @@ This guidance applies to this tool and its tests, not the rest of the repository
   unresolvable overlapping scopes require explicit manual assessment, not an
   assumption of full coverage. Keep group membership and application assignment
   scopes distinct; a transitive parent review does not certify child membership.
+  A concrete enumeration resource ID must not become a type-wide wildcard;
+  empty SDK enumeration containers are not resource sets.
 - New nested-only names omit `[Nested]`; preserve that suffix as a legacy alias.
   Explain recorded parent/application relationships in descriptions without
   claiming nested assignments prove effective application access. Preserve
@@ -40,6 +42,10 @@ This guidance applies to this tool and its tests, not the rest of the repository
 - Creation/offline reports describe computed/submitted settings and recorded
   outcomes, not live progress/remediation. Never infer unavailable historical
   configuration or treat an unmarked old member count as a direct-user count.
+  Retain discovered application metadata in logs for offline topology, including
+  applications without review targets. Application/group edges record direct
+  app-role assignments, not effective access through nested membership.
+  Batch console results without stripping structured result/export properties.
 - Status collection uses GET only. Keep current configured stages, runtime
   stages, recorded instance reviewers, decision actors and current directory
   owners separate. Do not infer the original owner-policy label from named

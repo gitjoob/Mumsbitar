@@ -134,15 +134,40 @@ function Get-ReviewResourceCoverage {
 	$scope = Get-ReviewProperty $Definition 'scope'
 	$unrelatedResourcePath = '^/(?:roleManagement|identityGovernance/entitlementManagement)(?:[/?]|$)'
 	$enumeration = Get-ReviewProperty $Definition 'instanceEnumerationScope'
-	if ($enumeration) {
-		$query = [string](Get-ReviewProperty $enumeration 'query')
+	$query = [string](Get-ReviewProperty $enumeration 'query')
+	if (-not [string]::IsNullOrWhiteSpace($query)) {
 		$path = Get-ReviewQueryPath $query
-		if ($path -match $unrelatedResourcePath -or
-			(-not $query -and (Get-ReviewQueryPath ([string](Get-ReviewProperty $scope 'query'))) -match $unrelatedResourcePath)) { return }
+		if ($path -match $unrelatedResourcePath) { return }
+		if ($path -match '^/(groups|servicePrincipals)/([0-9a-fA-F-]{36})(?=[/?]|$)') {
+			$kind = $Matches[1]
+			$id = [guid]::Empty
+			$root = $Matches[0]
+			if (-not [guid]::TryParse($Matches[2], [ref]$id) -or $id -eq [guid]::Empty) {
+				throw "Review '$($Definition.Id)' contains an invalid enumerated resource ID."
+			}
+			$key = if ($kind -eq 'groups') { "GroupMembership:$id" } else { "ApplicationDirectUsers:$id" }
+			$coverage = 'Partial'
+			if ($path.Substring($root.Length) -in @('', '/') -and $scope) {
+				$resolvedScope = @{}
+				foreach ($property in @('query', 'queryType', 'queryRoot', 'inactiveDuration', '@odata.type', 'principalScopes', 'resourceScopes')) {
+					$value = Get-ReviewProperty $scope $property
+					if ($null -ne $value) { $resolvedScope[$property] = $value }
+				}
+				if ($resolvedScope.query -like './*') { $resolvedScope.query = $root + $resolvedScope.query.Substring(1) }
+				if ($resolvedScope.query -or $resolvedScope.resourceScopes) {
+					$resolved = @(Get-ReviewResourceCoverage ([pscustomobject]@{ Id = $Definition.Id; Scope = $resolvedScope }))
+					if (@($resolved | Where-Object { $_.Key -eq $key -and $_.Coverage -eq 'Full' }).Count) { $coverage = 'Full' }
+				}
+			}
+			return [pscustomobject]@{
+				Key = $key; Coverage = $coverage
+				Query = "instanceEnumerationScope: $query; scope: $($scope | ConvertTo-Json -Depth 10 -Compress)"
+			}
+		}
 		$keys = if ($path -match '^/groups(?:[/?]|$)') { @('GroupMembership:*') }
 			elseif ($path -match '^/servicePrincipals(?:[/?]|$)') { @('ApplicationDirectUsers:*') }
 			else { @('GroupMembership:*', 'ApplicationDirectUsers:*') }
-		$description = if ($query) { "instanceEnumerationScope: $query" } else { 'instanceEnumerationScope (query missing; resource set requires manual assessment)' }
+		$description = "instanceEnumerationScope: $query"
 		foreach ($key in $keys) {
 			[pscustomobject]@{ Key = $key; Coverage = 'Unknown'; Query = $description }
 		}
@@ -489,6 +514,7 @@ $reportRun = @{
 	RunId = $null
 	Completed = $false
 	Failure = $null
+	Applications = [System.Collections.Generic.List[object]]::new()
 }
 $runStarted = $false
 try {
@@ -536,6 +562,14 @@ foreach ($inputTarget in $inputTargets) {
 		$assignedGroups = @($assignments | Where-Object PrincipalType -eq 'Group' |
 			Select-Object -ExpandProperty PrincipalId -Unique)
 		$directAssignments = @($assignments | Where-Object PrincipalType -eq 'User')
+		$applicationRecord = [pscustomobject]@{
+			ServicePrincipalId = "$ServicePrincipalId"
+			ServicePrincipalName = $servicePrincipal.DisplayName
+			GroupIds = @($assignedGroups)
+			DirectUserCount = $assignedUserCount
+		}
+		$reportRun.Applications.Add($applicationRecord)
+		Write-AccessReviewLog -Log $creationLog -Entry @{ Event = 'ApplicationDiscovered'; Application = $applicationRecord }
 		foreach ($assignedGroup in $assignedGroups) {
 			$targets.Add([pscustomobject]@{
 				GroupId = $assignedGroup; ServicePrincipalId = $ServicePrincipalId
@@ -591,6 +625,7 @@ foreach ($inputTarget in $inputTargets) {
 			$manualResult = [pscustomobject]@{
 				TargetType = $item.TargetType
 				ServicePrincipalId = "$ServicePrincipalId"
+				ServicePrincipalName = $servicePrincipal.DisplayName
 				Target = $servicePrincipal.DisplayName
 				Group = $null
 				GroupId = $null
@@ -627,10 +662,8 @@ foreach ($inputTarget in $inputTargets) {
 				Status = 'Manual review required'
 				Reason = $item.Reason
 			}
-			Write-Warning "$($item.TargetType) '$($item.PrincipalId)' on '$($servicePrincipal.DisplayName)': $($item.Reason)"
 			Write-AccessReviewLog -Log $creationLog -Entry @{ Event = 'ManualReviewRequired'; Result = $manualResult }
 			$results.Add($manualResult)
-			$manualResult
 		}
 	}
 	catch {
@@ -740,6 +773,7 @@ foreach ($target in $targets) {
 		TargetType = if ($isApplicationReview) { 'ApplicationDirectUsers' } else { 'GroupMembership' }
 		Target = "$GroupId"
 		ServicePrincipalId = if ($isApplicationTarget) { "$ServicePrincipalId" } else { $null }
+		ServicePrincipalName = if ($isApplicationTarget) { $servicePrincipal.DisplayName } else { $null }
 		Group = "$GroupId"
 		GroupId = "$GroupId"
 		MemberCount = $null
@@ -882,7 +916,6 @@ foreach ($target in $targets) {
 				$result.DuplicateMatchType = 'UncertainResourceScope'
 				$result.Status = 'Manual review required'
 				$result.Reason = "Existing review '$($match.DisplayName)' ($($match.Id)) has partial or unsupported potentially overlapping scope. No review created; manually assess coverage rather than assume this resource is fully reviewed."
-				Write-Warning $result.Reason
 			}
 			continue
 		}
@@ -1204,10 +1237,13 @@ foreach ($target in $targets) {
 			Event = if ($isApplicationReview) { 'ApplicationResult' } else { 'GroupResult' }
 			Result = $resultObject
 		}
-		$resultObject
 	}
 }
 
+foreach ($matchGroup in @($results | Where-Object DuplicateMatchType -EQ 'UncertainResourceScope' | Group-Object MatchedReviewId)) {
+	$match = $matchGroup.Group[0]
+	Write-Warning "$($matchGroup.Count) target(s) need manual duplicate-coverage assessment for '$($match.MatchedReviewName)' ($($match.MatchedReviewId)); no reviews were created for those targets. See MatchedReviewScope in the results/report."
+}
 Write-AccessReviewLog -Log $creationLog -Entry @{
 	Event = 'RunCompleted'
 	Total = $results.Count
@@ -1224,14 +1260,11 @@ if ($PSCmdlet.ParameterSetName -ne 'Single') {
 	$createdCount = $createdResults.Count
 	$failedCount = @($results | Where-Object { $_.Status -eq 'Failed' }).Count
 	$skippedCount = @($results | Where-Object Status -eq 'Skipped').Count
-	$notCreated = @($results | Where-Object { $_.Status -in 'Failed', 'Skipped' })
-	if ($notCreated) {
-		Write-Host ($notCreated | Select-Object Target, Status, Reason | Format-Table -AutoSize -Wrap | Out-String -Width 200)
-	}
-
-	$reviewTargetCount = @($results | Where-Object Status -ne 'Manual review required').Count
+	$reviewTargetCount = @($results | Where-Object { $_.TargetType -in @('GroupMembership', 'ApplicationDirectUsers') }).Count
 	$targetLabel = if (@($inputTargets | Where-Object ServicePrincipalId).Count) { 'review target(s)' } else { 'group(s)' }
-	Write-Host "$reviewTargetCount ${targetLabel}: $createdCount $($createdStatus.ToLower()), $skippedCount skipped, $failedCount failed."
+	$manualCoverageCount = @($results | Where-Object DuplicateMatchType -EQ 'UncertainResourceScope').Count
+	$manualLabel = if ($manualCoverageCount) { " $manualCoverageCount require manual duplicate assessment." } else { '' }
+	Write-Host "$reviewTargetCount ${targetLabel}: $createdCount $($createdStatus.ToLower()), $skippedCount skipped, $failedCount failed.$manualLabel"
 }
 $totalMemberCount = [long](($createdResults | Measure-Object -Property MemberCount -Sum).Sum)
 $reviewSummary = if ($WhatIfPreference) { 'reviews that would be created' } else { 'created reviews' }
@@ -1241,7 +1274,7 @@ if (@($inputTargets | Where-Object ServicePrincipalId).Count) {
 		Write-Host "Direct-user review: $($directUserResult.Status); discovered users: $($directUserResult.SubjectCount); review name: $($directUserResult.ReviewName); reason: $($directUserResult.Reason)"
 	}
 	$directUserCount = [long](($createdResults | Where-Object TargetType -eq 'ApplicationDirectUsers' | Measure-Object SubjectCount -Sum).Sum)
-	$manualReviewCount = @($results | Where-Object Status -eq 'Manual review required').Count
+	$manualReviewCount = @($results | Where-Object { $_.TargetType -in @('ServicePrincipalOwner', 'ApplicationNonUserAssignment') }).Count
 	Write-Host "Directly assigned users in ${reviewSummary}: $directUserCount"
 	Write-Host "Manual review required: $manualReviewCount ownership/assignment item(s). These are not covered by the created reviews."
 }
@@ -1252,6 +1285,11 @@ catch {
 	throw
 }
 finally {
+	foreach ($result in $results) {
+		$display = [System.Management.Automation.PSPropertySet]::new('DefaultDisplayPropertySet', [string[]]@('TargetType', 'Target', 'Status', 'Reason'))
+		$result | Add-Member -MemberType MemberSet -Name PSStandardMembers -Value @($display)
+	}
+	$results.ToArray()
 	if ($HtmlReportPath -and $runStarted) {
 		try {
 			Write-AccessReviewReport -Path $HtmlReportPath -Results @($results.ToArray()) -Context $reportRun

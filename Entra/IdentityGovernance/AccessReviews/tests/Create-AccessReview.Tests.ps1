@@ -1484,6 +1484,102 @@ Describe 'Unified access review creation and local logging' {
 		Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times 0 -Exactly
 	}
 
+	It 'limits a specific enumerated group to its own ID (same: <Same>, filtered: <Filtered>)' -TestCases @(
+		@{ Same = $false; Filtered = $false }, @{ Same = $true; Filtered = $false }
+		@{ Same = $false; Filtered = $true }, @{ Same = $true; Filtered = $true }
+	) {
+		param($Same, $Filtered)
+		$id = if ($Same) { $script:groupId } else { 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa' }
+		$existing = New-ExistingResourceReview -Query './members/microsoft.graph.user'
+		if ($Filtered) { $existing.Scope.query += "?`$filter=userType eq 'Guest'" }
+		$existing | Add-Member instanceEnumerationScope @{ query = "/v1.0/groups/$id" }
+		$fixture.ExistingReviews = @($existing)
+		$result = & $script:testScript -GroupId $script:groupId -Confirm:$false -WarningAction SilentlyContinue
+		$result.Status | Should -Be $(if (-not $Same) { 'Created' } elseif ($Filtered) { 'Manual review required' } else { 'Skipped' })
+		if ($Same) {
+			$result.MatchedReviewScope | Should -Match "/v1.0/groups/$id"
+			$result.DuplicateMatchType | Should -Be $(if ($Filtered) { 'UncertainResourceScope' } else { 'Resource' })
+		}
+		Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times $(if ($Same) { 0 } else { 1 }) -Exactly
+	}
+
+	It 'creates CSV direct-user reviews despite unrelated exact enumeration and empty SDK scopes (preview: <Preview>, existing app: <Same>)' -TestCases @(
+		@{ Preview = $false; Same = $false }, @{ Preview = $true; Same = $false }
+		@{ Preview = $false; Same = $true }, @{ Preview = $true; Same = $true }
+	) {
+		param($Preview, $Same)
+		$first = $script:reviewId
+		$second = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb'
+		Mock Get-MgServicePrincipal {
+			param($ServicePrincipalId)
+			[pscustomobject]@{ Id = "$ServicePrincipalId"; DisplayName = if ("$ServicePrincipalId" -eq '33333333-3333-3333-3333-333333333333') { 'First app' } else { 'Second app' } }
+		}
+		$fixture.Assignments += [pscustomobject]@{ PrincipalType = 'User'; PrincipalId = $script:ownerId; Id = 'direct-role-one' }
+		$fixture.Assignments += [pscustomobject]@{ PrincipalType = 'User'; PrincipalId = $script:groupOwnerId; Id = 'direct-role-two' }
+		$groupReview = New-ExistingResourceReview -Query './members'
+		$groupReview | Add-Member instanceEnumerationScope @{ query = '/v1.0/groups/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa' }
+		$appId = if ($Same) { $first } else { 'cccccccc-cccc-cccc-cccc-cccccccccccc' }
+		$appReview = New-ExistingResourceReview
+		$appReview.Id = 'dddddddd-dddd-dddd-dddd-dddddddddddd'
+		$appReview.DisplayName = 'Unrelated application campaign'
+		$appReview.Scope = @{
+			principalScopes = @(@{ query = '/v1.0/users' })
+			resourceScopes = @(@{ query = "/v1.0/servicePrincipals/$appId" })
+		}
+		$appReview | Add-Member instanceEnumerationScope ([Microsoft.Graph.PowerShell.Models.MicrosoftGraphAccessReviewScope]::new())
+		$fixture.ExistingReviews = @($groupReview, $appReview)
+		$csv = Join-Path $script:testScriptRoot 'applications.csv'
+		"ServicePrincipalId`n$first`n$second" | Set-Content $csv
+		$path = Join-Path $script:testScriptRoot 'applications.html'
+		$results = @(& $script:testScript -CsvPath $csv -WhatIf:$Preview -HtmlReportPath $path -Confirm:$false)
+		$direct = @($results | Where-Object TargetType -EQ 'ApplicationDirectUsers')
+		$created = if ($Preview) { 'Would be created' } else { 'Created' }
+		$direct | Should -HaveCount 2
+		$direct.SubjectCount | Should -Be @(2, 2)
+		$direct.Status | Should -Be @($(if ($Same) { 'Skipped' } else { $created }), $created)
+		if ($Same) { $direct[0].DuplicateMatchType | Should -Be 'Resource' }
+		@($results | Where-Object TargetType -EQ 'GroupMembership').Status | Should -Be $created
+		Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times $(if ($Preview) { 0 } elseif ($Same) { 2 } else { 3 }) -Exactly
+		$html = Get-Content $path -Raw
+		[regex]::Matches($html, 'class="topology-node application-node"').Count | Should -Be 2
+		[regex]::Matches($html, 'class="topology-edge application-edge"').Count | Should -Be 2
+		$html | Should -Match '2 directly assigned users'
+	}
+
+	It 'batches compactly displayed results without losing their full exportable properties' {
+		$fixture.Assignments += [pscustomobject]@{ PrincipalType = 'User'; PrincipalId = $script:ownerId }
+		$fixture.ApplicationOwners = @(
+			[pscustomobject]@{ Id = $script:ownerId; AdditionalProperties = @{ '@odata.type' = '#microsoft.graph.user' } }
+		)
+		$observed = [System.Collections.Generic.List[int]]::new()
+		$results = @(& $script:testScript -ServicePrincipalId $script:reviewId -Confirm:$false -WarningVariable warnings |
+			ForEach-Object { $observed.Add($fixture.Bodies.Count); $_ })
+		$results | Should -HaveCount 3
+		@($observed | Sort-Object -Unique) | Should -Be @(2)
+		@($warnings).Count | Should -Be 0
+		$results[0].PSStandardMembers.DefaultDisplayPropertySet.ReferencedPropertyNames | Should -Be @('TargetType', 'Target', 'Status', 'Reason')
+		($results | Out-String -Width 160) | Should -Not -Match 'ReportSchemaVersion|GroupPaths|PrincipalIds'
+		($results | ConvertTo-Csv -NoTypeInformation)[0] | Should -Match 'ReportSchemaVersion'
+	}
+
+	It 'groups uncertain duplicate warnings and distinguishes coverage from ownership follow-up' {
+		Set-NestedGroupFixture
+		$fixture.Assignments += [pscustomobject]@{ PrincipalType = 'User'; PrincipalId = $script:ownerId }
+		$fixture.ApplicationOwners = @(
+			[pscustomobject]@{ Id = $script:ownerId; AdditionalProperties = @{ '@odata.type' = '#microsoft.graph.user' } }
+		)
+		$existing = New-ExistingResourceReview -Query './members'
+		$existing | Add-Member instanceEnumerationScope @{ query = "/groups?`$filter=groupTypes/any(c:c eq 'Unified')" }
+		$fixture.ExistingReviews = @($existing)
+		$results = @(& $script:testScript -ServicePrincipalId $script:reviewId -Confirm:$false -WarningAction SilentlyContinue -WarningVariable warnings)
+		$results | Should -HaveCount 4
+		@($warnings) | Should -HaveCount 1
+		$warnings[0].Message | Should -Match '^2 target\(s\) need manual duplicate-coverage assessment'
+		$fixture.HostMessages | Should -Contain '3 review target(s): 1 created, 0 skipped, 0 failed. 2 require manual duplicate assessment.'
+		$fixture.HostMessages | Should -Contain 'Manual review required: 1 ownership/assignment item(s). These are not covered by the created reviews.'
+		@($results | Where-Object TargetType -EQ 'ApplicationDirectUsers').Status | Should -Be 'Created'
+	}
+
 	It 'reads SDK AdditionalProperties and versioned group scopes' {
 		$existing = New-ExistingResourceReview
 		$existing.Scope = [Microsoft.Graph.PowerShell.Models.MicrosoftGraphAccessReviewScope]::new()
@@ -1670,7 +1766,7 @@ Describe 'Unified access review creation and local logging' {
 		$result.Stages | Should -BeNullOrEmpty
 		$script:fixture.HostMessages | Should -Contain 'The group Demo group has no direct users; no access review needed.'
 		if (-not $Preview) {
-			(Get-LogEntries)[1].Result.Status | Should -Be 'Skipped'
+			((Get-LogEntries) | Where-Object Event -EQ 'GroupResult').Result.Status | Should -Be 'Skipped'
 			(Get-LogEntries)[-1].Skipped | Should -Be 1
 		}
 		Should -Invoke Get-MgGroupOwner -Times 0 -Exactly
@@ -2131,8 +2227,8 @@ Describe 'Unified access review creation and local logging' {
 		$result = & $script:testScript -ServicePrincipalId $script:groupId -Confirm:$false
 		$result.Status | Should -Be 'Skipped'
 		$entries = Get-LogEntries
-		$entries[1].Result.Status | Should -Be 'Skipped'
-		$entries[2].Skipped | Should -Be 1
+		($entries | Where-Object Event -EQ 'GroupResult').Result.Status | Should -Be 'Skipped'
+		($entries | Where-Object Event -EQ 'RunCompleted').Skipped | Should -Be 1
 		Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times 0 -Exactly
 	}
 
@@ -2165,9 +2261,9 @@ Describe 'Unified access review creation and local logging' {
 		$result.Stages | Should -Be 1
 		$body.reviewers[0].query | Should -Be "/users/$script:ownerId"
 		$entries = Get-LogEntries
-		$entries[1].Event | Should -Be 'ApplicationResult'
-		$entries[1].Result.SubjectCount | Should -Be 2
-		$entries[1].Result.AssignmentIds | Should -Be $result.AssignmentIds
+		$applicationResult = $entries | Where-Object Event -EQ 'ApplicationResult'
+		$applicationResult.Result.SubjectCount | Should -Be 2
+		$applicationResult.Result.AssignmentIds | Should -Be $result.AssignmentIds
 		$script:fixture.HostMessages | Should -Contain 'Total direct users in group created reviews: 0'
 		$script:fixture.HostMessages | Should -Contain 'Directly assigned users in created reviews: 2'
 		Should -Invoke Get-MgGroup -Times 0 -Exactly
@@ -2345,7 +2441,11 @@ Describe 'Unified access review creation and local logging' {
 		$script:fixture.Assignments = @()
 		$results = @(& $script:testScript -ServicePrincipalId $script:groupId -WarningAction SilentlyContinue)
 		$results | Should -HaveCount 0
-		(Get-LogEntries)[1].Total | Should -Be 0
+		((Get-LogEntries) | Where-Object Event -EQ 'RunCompleted').Total | Should -Be 0
+		$application = ((Get-LogEntries) | Where-Object Event -EQ 'ApplicationDiscovered').Application
+		$application.ServicePrincipalId | Should -Be $script:groupId
+		$application.DirectUserCount | Should -Be 0
+		@($application.GroupIds) | Should -HaveCount 0
 		$script:fixture.HostMessages | Should -Contain '0 review target(s): 0 created, 0 skipped, 0 failed.'
 		$script:fixture.HostMessages | Should -Contain 'Total direct users in group created reviews: 0'
 	}

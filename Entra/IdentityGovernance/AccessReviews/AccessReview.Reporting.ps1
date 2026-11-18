@@ -43,6 +43,16 @@ function New-AccessReviewGroupLink {
 	}
 }
 
+function New-AccessReviewApplicationLink {
+	param([AllowNull()][string]$ServicePrincipalId)
+	$id = [guid]::Empty
+	if ([guid]::TryParse($ServicePrincipalId, [ref]$id) -and $id -ne [guid]::Empty) {
+		$url = "https://entra.microsoft.com/#view/Microsoft_AAD_IAM/ManagedAppMenuBlade/~/Overview/objectId/$id"
+		"<a class=`"entra-link`" href=`"$url`" target=`"_blank`" rel=`"noopener noreferrer`">Open application in Entra</a>"
+	}
+	else { '<small class="muted">Entra link unavailable: valid service-principal Object ID not recorded.</small>' }
+}
+
 function Get-AccessReviewReportStyle {
 	@'
 :root{color-scheme:light;--bg:#f8f3f3;--panel:#fff;--ink:#302327;--muted:#715e65;--line:#e7d8dc;--accent:#b51f3b;--soft:#fbe9ed;--warning:#775015;--warn-bg:#fff3dc}
@@ -65,6 +75,7 @@ button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible{ou
 .entra-link{display:block;font-size:12px;margin-top:6px}.topology-controls{display:flex;align-items:end;justify-content:space-between;gap:14px;flex-wrap:wrap}.topology-controls label{font-size:12px;max-width:100%}.topology-controls select{display:block;max-width:100%;margin-top:5px}.topology-controls button{padding:6px 10px}
 #topology-viewport{max-height:700px;overflow:auto;border:1px solid var(--line);border-radius:8px;background:var(--bg)}#topology-space{position:relative}#topology-canvas{position:relative;transform-origin:top left}#topology-lines{position:absolute;inset:0;pointer-events:none;overflow:visible}.topology-edge{stroke:var(--accent);stroke-width:2;fill:none}#topology-arrow path{fill:var(--accent)}
 .topology-node{width:260px;max-width:100%;min-height:180px;padding:14px;margin:12px;background:var(--panel);border:1px solid var(--line);border-top:4px solid var(--accent);border-radius:9px;display:flex;flex-direction:column;gap:6px;overflow-wrap:anywhere}.topology-node.positioned{position:absolute;margin:0}.topology-node .eyebrow{font-size:10px;letter-spacing:.5px}.topology-name{font-weight:700;font-size:15px}.topology-stages{font-size:12px}.topology-name,.topology-stages{display:-webkit-box;-webkit-box-orient:vertical;overflow:hidden;-webkit-line-clamp:3}.topology-node .entra-link{margin-top:auto}
+.application-node{background:var(--soft)}.application-edge{stroke-dasharray:6 4}
 .relationships{display:grid;grid-template-columns:1fr 1fr 1fr;gap:15px;padding:12px;border:1px solid var(--line);border-radius:7px}.relationships>div{min-width:0;overflow-wrap:anywhere}.selected-group{display:flex;flex-direction:column;justify-content:center;gap:8px;padding:15px;background:var(--soft);border:1px solid var(--accent);border-radius:7px}
 .timeline{display:flex;gap:3px;margin:18px 0}.stage{flex-basis:0;min-width:0;background:var(--soft);border-top:4px solid var(--accent);padding:12px;border-radius:6px;overflow-wrap:anywhere}
 .stage strong,.stage span{display:block}.stage small{font-size:11px}details{margin:14px 0}summary{cursor:pointer;color:var(--accent);font-weight:600}
@@ -121,6 +132,7 @@ function New-AccessReviewHtml {
 			[pscustomobject]@{
 				TargetType = 'ServicePrincipalOwner'; Target = $first.Target
 				ServicePrincipalId = $first.ServicePrincipalId
+				ServicePrincipalName = $first.ServicePrincipalName
 				Status = $first.Status; Reason = $first.Reason; Role = $first.Role
 				OwnerItems = @($owners.Group)
 			}
@@ -157,7 +169,46 @@ function New-AccessReviewHtml {
 	$groupTotal = [long](($knownGroups | Measure-Object MemberCount -Sum).Sum)
 	$appTotal = [long](($Results | Where-Object TargetType -eq 'ApplicationDirectUsers' | Measure-Object SubjectCount -Sum).Sum)
 	$null = $body.AppendLine("<p class=`"muted`">All recorded targets: <strong>$groupTotal</strong> verified direct-user counts summed across group targets; <strong>$appTotal</strong> direct-application user counts, separately. These are per-review populations, not unique people. <strong>$($unknownGroups.Count)</strong> group count(s) have an unknown historical basis and are excluded from the direct-user total.</p>")
-	$null = $body.AppendLine('<nav><a href="#topology">Group topology</a><a href="#configuration">Stages and details</a><a href="#inventory">Search inventory</a></nav>')
+	$null = $body.AppendLine('<nav><a href="#topology">Resource topology</a><a href="#configuration">Stages and details</a><a href="#inventory">Search inventory</a></nav>')
+	$applications = @{}
+	$applicationSources = @(
+		$Context.Applications | Where-Object { $_ }
+		for ($i = 0; $i -lt $Results.Count; $i++) {
+			$result = $Results[$i]
+			if ($result.ServicePrincipalId) {
+				[pscustomobject]@{
+					ServicePrincipalId = $result.ServicePrincipalId
+					ServicePrincipalName = if ($result.ServicePrincipalName) { $result.ServicePrincipalName }
+						elseif ($result.TargetType -ne 'GroupMembership') { $result.Target }
+					DirectUserIndex = if ($result.TargetType -eq 'ApplicationDirectUsers') { $i } else { $null }
+				}
+			}
+			foreach ($path in @($result.GroupPaths | Where-Object ServicePrincipalId)) {
+				[pscustomobject]@{
+					ServicePrincipalId = $path.ServicePrincipalId; ServicePrincipalName = $path.ServicePrincipalName
+					GroupIds = @($path.GroupIds | Select-Object -First 1)
+				}
+			}
+			foreach ($sourceId in @($result.SourceServicePrincipalIds | Where-Object { $_ })) {
+				[pscustomobject]@{ ServicePrincipalId = $sourceId }
+			}
+		}
+	)
+	foreach ($source in $applicationSources) {
+		$id = [string]$source.ServicePrincipalId
+		if (-not $id) { continue }
+		if (-not $applications.ContainsKey($id)) {
+			$applications[$id] = @{
+				Name = $id; DirectUserIndex = $null; DirectUserCount = $null
+				GroupIds = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+			}
+		}
+		$app = $applications[$id]
+		if ($source.ServicePrincipalName) { $app.Name = $source.ServicePrincipalName }
+		if ($null -ne $source.DirectUserIndex) { $app.DirectUserIndex = $source.DirectUserIndex }
+		if ($null -ne $source.DirectUserCount) { $app.DirectUserCount = $source.DirectUserCount }
+		foreach ($groupId in @($source.GroupIds | Where-Object { $_ })) { $null = $app.GroupIds.Add([string]$groupId) }
+	}
 	$groupIndex = @{}
 	$parents = @{}
 	$children = @{}
@@ -195,18 +246,40 @@ function New-AccessReviewHtml {
 			$null = $children[$parentId].Add($childId)
 		}
 	}
-	$topologyIds = @(@($groupIndex.Keys) + @($parents.Keys) + @($children.Keys) | Sort-Object -Unique)
+	$assignedGroupIds = @($applications.Values | ForEach-Object { $_.GroupIds })
+	$topologyIds = @(@($groupIndex.Keys) + @($parents.Keys) + @($children.Keys) + $assignedGroupIds | Sort-Object -Unique)
+	$applicationIds = @($applications.Keys | Sort-Object)
+	$applicationIndex = @{}
+	for ($i = 0; $i -lt $applicationIds.Count; $i++) { $applicationIndex[$applicationIds[$i]] = $i }
 	$topologyIndex = @{}
 	for ($i = 0; $i -lt $topologyIds.Count; $i++) { $topologyIndex[$topologyIds[$i]] = $i }
-	$null = $body.AppendLine('<section id="topology" class="panel"><h2>Group topology</h2><p>Arrows show recorded parent-to-child membership. Shared children appear once, with a connection from every recorded parent. Choose a group card for review details, or open the group in Entra in a new tab.</p><div class="topology-controls"><label>Connected hierarchy<select id="topology-component" aria-controls="topology-viewport"><option value="all">All recorded groups</option></select></label><div><button id="zoom-out" type="button" aria-label="Zoom topology out">-</button> <button id="zoom-in" type="button" aria-label="Zoom topology in">+</button> <button id="zoom-fit" type="button">Fit width</button> <button id="zoom-reset" type="button">100%</button></div></div><p id="topology-count" class="muted" role="status"></p><p id="topology-warning" class="notice warning" role="status" hidden></p>')
+	$null = $body.AppendLine('<section id="topology" class="panel"><h2>Application and group topology</h2><p>Dashed arrows connect enterprise applications to their directly assigned groups. Solid arrows show recorded parent-to-child group membership, not guaranteed effective application access. Shared resources appear once. Application cards show direct-user review outcomes separately from group reviews.</p><div class="topology-controls"><label>Connected hierarchy<select id="topology-component" aria-controls="topology-viewport"><option value="all">All recorded resources</option></select></label><div><button id="zoom-out" type="button" aria-label="Zoom topology out">-</button> <button id="zoom-in" type="button" aria-label="Zoom topology in">+</button> <button id="zoom-fit" type="button">Fit width</button> <button id="zoom-reset" type="button">100%</button></div></div><p id="topology-count" class="muted" role="status"></p><p id="topology-warning" class="notice warning" role="status" hidden></p>')
 	if ($incompleteTopology) { $null = $body.AppendLine('<p class="notice warning">Some recorded path IDs are missing; those incomplete connections cannot be drawn. Other recorded nodes and connections remain visible.</p>') }
-	$null = $body.AppendLine('<div id="topology-viewport" tabindex="0" aria-label="Scrollable group topology"><div id="topology-space"><div id="topology-canvas"><svg id="topology-lines" aria-hidden="true"><defs><marker id="topology-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z"/></marker></defs>')
+	$null = $body.AppendLine('<div id="topology-viewport" tabindex="0" aria-label="Scrollable application and group topology"><div id="topology-space"><div id="topology-canvas"><svg id="topology-lines" aria-hidden="true"><defs><marker id="topology-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z"/></marker></defs>')
+	foreach ($appId in $applicationIds) {
+		foreach ($groupId in @($applications[$appId].GroupIds | Sort-Object)) {
+			$null = $body.AppendLine("<path class=`"topology-edge application-edge`" data-from=`"app-$($applicationIndex[$appId])`" data-to=`"node-$($topologyIndex[$groupId])`" marker-end=`"url(#topology-arrow)`"><title>Direct application-role group assignment</title></path>")
+		}
+	}
 	foreach ($childId in @($parents.Keys | Sort-Object)) {
 		foreach ($parentId in @($parents[$childId] | Sort-Object)) {
 			$null = $body.AppendLine("<path class=`"topology-edge`" data-from=`"node-$($topologyIndex[$parentId])`" data-to=`"node-$($topologyIndex[$childId])`" marker-end=`"url(#topology-arrow)`"/>")
 		}
 	}
 	$null = $body.AppendLine('</svg>')
+	foreach ($appId in $applicationIds) {
+		$app = $applications[$appId]
+		$null = $body.AppendLine("<article id=`"app-$($applicationIndex[$appId])`" class=`"topology-node application-node`"><small class=`"eyebrow`">Enterprise application / service principal</small>")
+		if ($null -ne $app.DirectUserIndex) {
+			$result = $Results[$app.DirectUserIndex]
+			$population = if ($null -ne $result.SubjectCount) { "$($result.SubjectCount) directly assigned users" } else { 'Direct-user population unavailable' }
+			$null = $body.AppendLine("<button class=`"link view topology-name`" data-target=`"review-$($app.DirectUserIndex)`">$(ConvertTo-AccessReviewHtmlText $app.Name)</button><span>$(ConvertTo-AccessReviewHtmlText $population)</span><small>Direct-user review: $(ConvertTo-AccessReviewHtmlText (Get-AccessReviewReportOutcome $result))</small><small class=`"topology-stages`">$(ConvertTo-AccessReviewHtmlText $result.StageNames)</small>")
+		}
+		else {
+			$null = $body.AppendLine("<strong class=`"topology-name`">$(ConvertTo-AccessReviewHtmlText $app.Name)</strong><small>$(if ($null -ne $app.DirectUserCount) { "$($app.DirectUserCount) directly assigned users discovered. " })No direct-user review result recorded.</small>")
+		}
+		$null = $body.AppendLine("$(New-AccessReviewApplicationLink $appId)</article>")
+	}
 	foreach ($id in $topologyIds) {
 		$index = $topologyIndex[$id]
 		$parentCount = @($parents[$id] | Where-Object { $_ }).Count
@@ -228,7 +301,7 @@ function New-AccessReviewHtml {
 		}
 		$null = $body.AppendLine("$(New-AccessReviewGroupLink -GroupId $id)</article>")
 	}
-	$null = $body.AppendLine('</div></div></div><noscript><p>JavaScript is required to lay out the connected topology. Group cards remain listed without connectors.</p></noscript><p class="muted">Connections reflect recorded discovery, not live membership. Groups without recorded paths are not assumed to be unrelated. Entra links require signing in to the appropriate directory with permission to view the group.</p></section><section id="configuration" class="panel"><h2>Hierarchy and stage configuration</h2><p id="selection-hint" class="muted">Choose a group in the topology or a review in the inventory to see its relationships, paths and available configuration.</p>')
+	$null = $body.AppendLine('</div></div></div><noscript><p>JavaScript is required to lay out the connected topology. Resource cards remain listed without connectors.</p></noscript><p class="muted">Connections reflect recorded discovery, not live membership. Resources without recorded connections are not assumed to be unrelated. Entra links require signing in to the appropriate directory with permission to view the resource.</p></section><section id="configuration" class="panel"><h2>Hierarchy and stage configuration</h2><p id="selection-hint" class="muted">Choose an application or group in the topology, or a review in the inventory, to see its relationships, paths and available configuration.</p>')
 	for ($i = 0; $i -lt $Results.Count; $i++) {
 		$result = $Results[$i]
 		$name = if ($result.ReviewName) { $result.ReviewName } elseif ($result.Target) { $result.Target } else { 'Unnamed recorded item' }
@@ -378,7 +451,7 @@ function New-AccessReviewHtml {
     const selector = document.getElementById('topology-component');
     const counter = document.getElementById('topology-count');
     if (!nodes.length) {
-      counter.textContent = 'No group IDs recorded; group topology is unavailable for this report.';
+      counter.textContent = 'No application or group IDs recorded; resource topology is unavailable for this report.';
       viewport.hidden = true;
       for (const control of document.querySelectorAll('.topology-controls button, .topology-controls select')) control.disabled = true;
       return;
@@ -411,7 +484,7 @@ function New-AccessReviewHtml {
       const first = [...ids].find(id => incoming.get(id) === 0) || ids.values().next().value;
       const option = document.createElement('option');
       option.value = String(index);
-      option.textContent = `${index + 1}. ${byId.get(first).querySelector('.topology-name').textContent.trim()} (${ids.size} ${ids.size === 1 ? 'group' : 'groups'})`;
+      option.textContent = `${index + 1}. ${byId.get(first).querySelector('.topology-name').textContent.trim()} (${ids.size} ${ids.size === 1 ? 'resource' : 'resources'})`;
       selector.append(option);
     });
     const levels = new Map(nodes.map(node => [node.id, 0]));
@@ -488,7 +561,7 @@ function New-AccessReviewHtml {
       const warning = document.getElementById('topology-warning');
       warning.hidden = ![...visible].some(id => affected.has(id));
       warning.textContent = 'Recorded connections contain a cycle. Affected nodes are placed separately; connections are retained. This is not a valid hierarchical ordering.';
-      summary = `${visible.size} of ${nodes.length} recorded groups; ${visibleEdges} of ${edges.length} connections. ${components.length} connected hierarchies.`;
+      summary = `${visible.size} of ${nodes.length} recorded resources; ${visibleEdges} of ${edges.length} connections. ${components.length} connected hierarchies.`;
       lastWidth = viewport.clientWidth;
       setZoom(fit ? Math.max(.4, Math.min(1, viewport.clientWidth / width)) : zoom);
     }

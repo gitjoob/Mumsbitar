@@ -125,6 +125,8 @@ Group reviews remove user membership, not group-to-group or group-to-app assignm
   recurring coverage, regardless of prefix or reviewer policy.
 - Access-package assignment reviews are separate coverage, not group/application
   reviews. Enumerated scopes are checked by resource family, not review name.
+  An enumeration naming one resource matches only that object ID. Empty SDK
+  enumeration containers are treated as absent, not as tenant-wide coverage.
 - Completed/Applied historical coverage alone does not block by resource. Future/no-end
   recurring ranges are treated conservatively; numbered series check instances.
 - Partial or unsupported overlapping scopes require manual assessment; no new
@@ -148,16 +150,21 @@ file only when you explicitly supply `-HtmlReportPath`.
     -OutputPath '.\reports\creation.html'
 ```
 
-The report includes a clickable group topology, stage configuration, duplicate
+The report includes a clickable application/group topology, stage configuration, duplicate
 matches, search and a dark-mode switch. It shows planned/submitted settings and
 creation outcomes, **not live status or proof that access was removed**.
 Ownership follow-up is grouped by application, with expandable owner details;
 raw results and logs still contain individual ownership records.
+Application cards connect to directly assigned groups and show direct-user review
+outcomes separately. Discovered applications remain visible even with no review
+targets; discovery metadata is retained for offline export.
 
 Real runs write a separate JSONL file under `logs/` and print its path. Results
 contain review/resource IDs, counts, discovery paths and skip/failure reasons.
 Check returned IDs and logs before retrying a failed run. Logs are not deleted
-automatically. To export the returned results:
+automatically. Results are returned together at the end, with a compact default
+console table; all detailed properties remain available for export or `Format-List *`.
+Uncertain duplicate-scope warnings are grouped by existing review. To export results:
 
 ```powershell
 $results = .\Create-AccessReview.ps1 -CsvPath '.\reviews.csv' -ReviewerType ResourceOwner

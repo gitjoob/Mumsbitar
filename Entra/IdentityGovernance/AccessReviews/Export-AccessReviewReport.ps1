@@ -45,5 +45,6 @@ $context = @{
 	RunId = if ($runIds.Count) { $runIds[0] } else { $null }
 	Completed = @($entries | Where-Object Event -eq 'RunCompleted').Count -gt 0
 	Failure = (@($entries | Where-Object Event -eq 'RunFailed' | ForEach-Object { $_.Reason }) -join '; ')
+	Applications = @($entries | Where-Object Event -EQ 'ApplicationDiscovered' | ForEach-Object { $_.Application })
 }
 Write-AccessReviewReport -Path $OutputPath -Results $results -Context $context
