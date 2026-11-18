@@ -84,6 +84,7 @@ Describe 'Unified access review creation and local logging' {
 			Assignments = @([pscustomobject]@{ PrincipalType = 'Group'; PrincipalId = $script:groupId })
 			ApplicationOwners = @()
 			ExistingNames = @()
+			ExistingNameScope = @{ query = "/groups/$script:groupId/members" }
 			ExistingReviews = @()
 			ExistingInstances = @()
 			HostMessages = [System.Collections.Generic.List[string]]::new()
@@ -123,7 +124,7 @@ Describe 'Unified access review creation and local logging' {
 		Mock Get-MgServicePrincipalAppRoleAssignedTo ({ $fixture.Assignments }.GetNewClosure())
 		Mock Get-MgServicePrincipalOwner ({ $fixture.ApplicationOwners }.GetNewClosure())
 		Mock Get-MgIdentityGovernanceAccessReviewDefinition ({
-			foreach ($name in $fixture.ExistingNames) { [pscustomobject]@{ Id = $fixture.ReviewId; DisplayName = $name; Status = 'Completed' } }
+			foreach ($name in $fixture.ExistingNames) { [pscustomobject]@{ Id = $fixture.ReviewId; DisplayName = $name; Status = 'Completed'; Scope = $fixture.ExistingNameScope } }
 			$fixture.ExistingReviews
 		}.GetNewClosure())
 		Mock Get-MgIdentityGovernanceAccessReviewDefinitionInstance ({ $fixture.ExistingInstances }.GetNewClosure())
@@ -328,6 +329,7 @@ Describe 'Unified access review creation and local logging' {
 		param($Name)
 		Set-NestedGroupFixture
 		$script:fixture.ExistingNames = @($Name)
+		$fixture.ExistingNameScope = @{ query = '/groups/44444444-4444-4444-4444-444444444444/members' }
 		$results = @(& $script:testScript -ServicePrincipalId $script:groupId -ReviewerType ResourceOwner -Confirm:$false -WarningAction SilentlyContinue)
 		$results.Status | Should -Be @('Created', 'Skipped')
 		$results[1].MatchedReviewName | Should -Be $Name
@@ -337,7 +339,9 @@ Describe 'Unified access review creation and local logging' {
 	It 'does not recreate root or nested reviews on a rerun' {
 		Set-NestedGroupFixture
 		$null = & $script:testScript -GroupId $script:groupId -ReviewerType ResourceOwner -Confirm:$false
-		$script:fixture.ExistingNames = @($script:fixture.Bodies.displayName)
+		$fixture.ExistingReviews = @($fixture.Bodies | ForEach-Object {
+			[pscustomobject]@{ Id = $script:reviewId; DisplayName = $_.displayName; Status = 'Completed'; Scope = $_.scope }
+		})
 		$results = @(& $script:testScript -GroupId $script:groupId -ReviewerType ResourceOwner -Confirm:$false)
 		$results.Status | Should -Be @('Skipped', 'Skipped')
 		$script:fixture.Bodies | Should -HaveCount 2
@@ -512,13 +516,15 @@ Describe 'Unified access review creation and local logging' {
 		@($results.GroupId | Sort-Object -Unique) | Should -HaveCount 4
 		$results.MemberCount | Should -Be @(50, 470, 25, 30)
 		$results.Stages | Should -Be @(1, 2, 1, 1)
-		$results[0].ReviewName | Should -Be $(if ($Mode -in @('Application', 'CsvApplication')) { 'AR Demo app - Group 1' } else { 'AR Group 1' })
+		$results[0].ReviewName | Should -Be $(if ($Mode -in @('Application', 'CsvApplication')) { 'AR Demo app - Group membership' } else { 'AR Group 1 - Group membership' })
+		$results[2].ReviewName | Should -Be $results[0].ReviewName
+		$results[3].ReviewName | Should -Be $results[0].ReviewName
 		$results[0].ParentGroupIds | Should -Be @($child)
 		$closure = @($results[0].GroupPaths | Where-Object { $_.GroupIds.Count -eq 3 })
 		$closure | Should -HaveCount 1
 		$closure[0].GroupIds | Should -Be @($script:groupId, $child, $script:groupId)
 		$closure[0].GroupNames | Should -Be @('Group 1', 'Group 2', 'Group 1')
-		$results[0].ReviewConfiguration.DescriptionForReviewers | Should -Match "Member of 'Group 2'"
+		$results[0].ReviewConfiguration.DescriptionForReviewers | Should -Match 'nested membership'
 		$results[0].ReviewConfiguration.DescriptionForAdmins | Should -Match 'Group 1 -> Group 2 -> Group 1'
 		$cycleWarnings = @($warnings | Where-Object { "$_" -like '*Circular nested group membership detected*' })
 		$cycleWarnings | Should -HaveCount 1
@@ -536,7 +542,7 @@ Describe 'Unified access review creation and local logging' {
 		}
 		else {
 			$results.Status | Should -Be @('Created', 'Created', 'Created', 'Created')
-			Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times 4 -Exactly
+			Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times 2 -Exactly
 			$cycleEvents = @(Get-LogEntries | Where-Object Event -eq 'GroupCycleDetected')
 			$cycleEvents | Should -HaveCount 1
 			$cycleEvents[0].GroupIds | Should -Be @($script:groupId, $child, $script:groupId)
@@ -562,7 +568,9 @@ Describe 'Unified access review creation and local logging' {
 		Set-NestedGroupFixture
 		$script:fixture.Children['44444444-4444-4444-4444-444444444444'] = @($script:groupId)
 		$null = & $script:testScript -GroupId $script:groupId -Confirm:$false -WarningAction SilentlyContinue
-		$script:fixture.ExistingNames = @($script:fixture.Bodies.displayName)
+		$fixture.ExistingReviews = @($fixture.Bodies | ForEach-Object {
+			[pscustomobject]@{ Id = $script:reviewId; DisplayName = $_.displayName; Status = 'Completed'; Scope = $_.scope }
+		})
 		$results = @(& $script:testScript -GroupId $script:groupId -Confirm:$false -WarningAction SilentlyContinue)
 		$results.Status | Should -Be @('Skipped', 'Skipped')
 		$results[0].ParentGroupIds | Should -Be @('44444444-4444-4444-4444-444444444444')
@@ -1411,13 +1419,14 @@ Describe 'Unified access review creation and local logging' {
 		}
 		$fixture.ExistingReviews = @($existing)
 		$result = & $script:testScript -GroupId $script:groupId -Confirm:$false -WarningAction SilentlyContinue
-		$result.Status | Should -Be 'Manual review required'
-		$result.DuplicateMatchType | Should -Be 'UncertainResourceScope'
-		$result.Reason | Should -Match 'rather than assume'
 		if ($Kind -eq 'enumeration') {
-			$result.MatchedReviewScope | Should -Match 'instanceEnumerationScope: /groups'
+			$result.Status | Should -Be 'Created'
 		}
-		Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times 0
+		else {
+			$result.Status | Should -Be 'Manual review required'
+			$result.DuplicateMatchType | Should -Be 'UncertainResourceScope'
+		}
+		Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times $(if ($Kind -eq 'enumeration') { 1 } else { 0 }) -Exactly
 	}
 
 	It 'does not match access-package coverage to application groups or direct users (kind: <Kind>)' -TestCases @(
@@ -1450,23 +1459,20 @@ Describe 'Unified access review creation and local logging' {
 		Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times 2 -Exactly
 	}
 
-	It 'limits unresolved enumeration coverage to its resource family (kind: <Kind>)' -TestCases @(
-		@{ Kind = 'groups'; Query = '/groups'; GroupStatus = 'Manual review required'; AppStatus = 'Created' }
-		@{ Kind = 'applications'; Query = '/v1.0/servicePrincipals'; GroupStatus = 'Created'; AppStatus = 'Manual review required' }
-		@{ Kind = 'unknown'; Query = '/unsupportedResources'; GroupStatus = 'Manual review required'; AppStatus = 'Manual review required' }
+	It 'does not block a group or direct app users without an exact resource ID (kind: <Kind>)' -TestCases @(
+		@{ Kind = 'groups'; Query = '/groups' }
+		@{ Kind = 'applications'; Query = '/v1.0/servicePrincipals' }
+		@{ Kind = 'unknown'; Query = '/unsupportedResources' }
 	) {
-		param($Kind, $Query, $GroupStatus, $AppStatus)
+		param($Kind, $Query)
 		$fixture.Assignments += [pscustomobject]@{ PrincipalType = 'User'; PrincipalId = $script:ownerId }
 		$existing = New-ExistingResourceReview
 		$existing.Scope.query = './members'
 		$existing | Add-Member instanceEnumerationScope @{ query = $Query }
 		$fixture.ExistingReviews = @($existing)
 		$results = @(& $script:testScript -ServicePrincipalId $script:reviewId -Confirm:$false -WarningAction SilentlyContinue)
-		$results.Status | Should -Be @($GroupStatus, $AppStatus)
-		$manual = @($results | Where-Object Status -EQ 'Manual review required')
-		$manual[0].MatchedReviewScope | Should -Be "instanceEnumerationScope: $Query"
-		$created = @($results | Where-Object Status -EQ 'Created').Count
-		Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times $created -Exactly
+		$results.Status | Should -Be @('Created', 'Created')
+		Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times 2 -Exactly
 	}
 
 	It 'retains a real group resource match in a mixed group and access-package scope' {
@@ -1571,8 +1577,11 @@ Describe 'Unified access review creation and local logging' {
 		$fixture.ApplicationOwners = @(
 			[pscustomobject]@{ Id = $script:ownerId; AdditionalProperties = @{ '@odata.type' = '#microsoft.graph.user' } }
 		)
-		$existing = New-ExistingResourceReview -Query './members'
-		$existing | Add-Member instanceEnumerationScope @{ query = "/groups?`$filter=groupTypes/any(c:c eq 'Unified')" }
+		$existing = New-ExistingResourceReview -Query '/groups/44444444-4444-4444-4444-444444444444/members?$filter=userType eq ''Guest'''
+		$existing.Scope = @{
+			principalScopes = @(@{ query = "/users/$script:ownerId" })
+			resourceScopes = @($existing.Scope, @{ query = "/groups/$script:groupId/members" })
+		}
 		$fixture.ExistingReviews = @($existing)
 		$results = @(& $script:testScript -ServicePrincipalId $script:reviewId -Confirm:$false -WarningAction SilentlyContinue -WarningVariable warnings)
 		$results | Should -HaveCount 4
@@ -1637,17 +1646,75 @@ Describe 'Unified access review creation and local logging' {
 		(Get-LogEntries)[-1].Event | Should -Be 'RunFailed'
 	}
 
-	It 'skips duplicate names within a CSV batch (preview: <Preview>)' -TestCases @(
+	It 'allows different resource IDs with the same review name (preview: <Preview>)' -TestCases @(
 		@{ Preview = $false }, @{ Preview = $true }
 	) {
 		param($Preview)
 		$csv = Join-Path $script:testScriptRoot 'same-name.csv'
 		"GroupId`n$script:groupId`n44444444-4444-4444-4444-444444444444" | Set-Content $csv
+		$fixture.ExistingNames = @('AR Demo group')
+		$fixture.ExistingNameScope = @{ query = "/servicePrincipals/$script:groupId/appRoleAssignedTo" }
 		$results = @(& $script:testScript -CsvPath $csv -WhatIf:$Preview -Confirm:$false)
 		$results[0].Status | Should -Be $(if ($Preview) { 'Would be created' } else { 'Created' })
-		$results[1].Status | Should -Be 'Skipped'
-		$results[1].Reason | Should -Match 'already exists'
-		Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times $(if ($Preview) { 0 } else { 1 }) -Exactly
+		$results[1].Status | Should -Be $results[0].Status
+		Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times $(if ($Preview) { 0 } else { 2 }) -Exactly
+	}
+
+	It 'automatically submits one definition for related compatible groups and blocks an exact-ID rerun' {
+		$second = '44444444-4444-4444-4444-444444444444'
+		$csv = Join-Path $script:testScriptRoot 'campaign.csv'
+		$fixture.Children[$script:groupId] = @($second)
+		"GroupId`n$script:groupId" | Set-Content $csv
+		$preview = @(& $script:testScript -CsvPath $csv -WhatIf)
+		$preview.Status | Should -Be @('Would be created', 'Would be created')
+		$fixture.Bodies | Should -HaveCount 0
+		$created = @(& $script:testScript -CsvPath $csv -Confirm:$false)
+		$created.Status | Should -Be @('Created', 'Created')
+		$created.ReviewId | Should -Be @($script:reviewId, $script:reviewId)
+		$fixture.Bodies | Should -HaveCount 1
+		$body = $fixture.Bodies[0]
+		$body.displayName | Should -Be 'AR Demo group - Group membership'
+		$body.scope.AdditionalProperties.principalScopes[0].query | Should -Be '/v1.0/users'
+		$body.scope.AdditionalProperties.resourceScopes.query | Should -Be @("/groups/$script:groupId/members", "/groups/$second/members")
+		$fixture.ExistingReviews = @([pscustomobject]@{
+			Id = $script:reviewId; DisplayName = 'Different name'; Status = 'InProgress'; Scope = $body.scope
+		})
+		$rerun = @(& $script:testScript -CsvPath $csv -Confirm:$false)
+		$rerun.Status | Should -Be @('Skipped', 'Skipped')
+		$rerun.DuplicateMatchType | Should -Be @('Resource', 'Resource')
+		$fixture.ExistingReviews[0].Status = 'Completed'
+		$fixture.ExistingReviews[0].DisplayName = $body.displayName
+		$historicalRerun = @(& $script:testScript -CsvPath $csv -Confirm:$false)
+		$historicalRerun.DuplicateMatchType | Should -Be @('Name', 'Name')
+		Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times 1 -Exactly
+	}
+
+	It 'keeps related groups with incompatible reviewer stages separate' {
+		$second = '44444444-4444-4444-4444-444444444444'
+		$fixture.MemberCounts[$second] = 151
+		$csv = Join-Path $script:testScriptRoot 'incompatible-campaign.csv'
+		$fixture.Children[$script:groupId] = @($second)
+		"GroupId`n$script:groupId" | Set-Content $csv
+		$results = @(& $script:testScript -CsvPath $csv -Confirm:$false)
+		$results.Status | Should -Be @('Created', 'Created')
+		$results.Stages | Should -Be @(1, 2)
+		Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times 2 -Exactly
+	}
+
+	It 'omits only exact-ID matches from an automatic group review' {
+		$second = '44444444-4444-4444-4444-444444444444'
+		$csv = Join-Path $script:testScriptRoot 'partial-campaign.csv'
+		$fixture.Children[$script:groupId] = @($second)
+		"GroupId`n$script:groupId" | Set-Content $csv
+		$existing = New-ExistingResourceReview -Query './members/microsoft.graph.user'
+		$existing | Add-Member instanceEnumerationScope @{
+			query = "/groups?`$filter=(id eq '$script:groupId' or id eq 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa')"
+		}
+		$fixture.ExistingReviews = @($existing)
+		$results = @(& $script:testScript -CsvPath $csv -Confirm:$false)
+		$results.Status | Should -Be @('Skipped', 'Created')
+		$fixture.Bodies | Should -HaveCount 1
+		$results[1].ReviewConfiguration.Scope.query | Should -Be "/groups/$second/members"
 	}
 
 	It 'does not create another review when a <Mode> run is repeated' -TestCases @(
@@ -1657,7 +1724,9 @@ Describe 'Unified access review creation and local logging' {
 		$fixture = $script:fixture
 		Mock New-MgIdentityGovernanceAccessReviewDefinition ({
 			param($BodyParameter)
-			$fixture.ExistingNames += $BodyParameter.displayName
+			$fixture.ExistingReviews += [pscustomobject]@{
+				Id = $fixture.ReviewId; DisplayName = $BodyParameter.displayName; Status = 'Completed'; Scope = $BodyParameter.scope
+			}
 			[pscustomobject]@{ Id = $fixture.ReviewId }
 		}.GetNewClosure())
 		$parameters = switch ($Mode) {
@@ -1992,6 +2061,7 @@ Describe 'Unified access review creation and local logging' {
 		"ServicePrincipalId`n$script:groupId" | Set-Content $csv
 		$script:fixture.Assignments = @([pscustomobject]@{ PrincipalType = 'User'; PrincipalId = $script:ownerId })
 		$script:fixture.ExistingNames = @('AR Demo app')
+		$fixture.ExistingNameScope = @{ query = "/servicePrincipals/$script:groupId/appRoleAssignedTo" }
 		$result = & $script:testScript -CsvPath $csv -Confirm:$false
 		$result.Status | Should -Be 'Skipped'
 		$result.Reason | Should -Match 'already exists'
@@ -2368,6 +2438,7 @@ Describe 'Unified access review creation and local logging' {
 	It 'skips an existing direct-user review without skipping ownership reporting' {
 		$script:fixture.Assignments = @([pscustomobject]@{ PrincipalType = 'User'; PrincipalId = $script:ownerId })
 		$script:fixture.ExistingNames = @('AR Demo app')
+		$fixture.ExistingNameScope = @{ query = "/servicePrincipals/$script:groupId/appRoleAssignedTo" }
 		$script:fixture.ApplicationOwners = @(
 			[pscustomobject]@{ Id = $script:ownerId; AdditionalProperties = @{ '@odata.type' = '#microsoft.graph.user' } }
 		)

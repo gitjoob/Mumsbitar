@@ -132,12 +132,25 @@ function Get-ReviewQueryPath {
 function Get-ReviewResourceCoverage {
 	param([object]$Definition)
 	$scope = Get-ReviewProperty $Definition 'scope'
-	$unrelatedResourcePath = '^/(?:roleManagement|identityGovernance/entitlementManagement)(?:[/?]|$)'
 	$enumeration = Get-ReviewProperty $Definition 'instanceEnumerationScope'
 	$query = [string](Get-ReviewProperty $enumeration 'query')
 	if (-not [string]::IsNullOrWhiteSpace($query)) {
 		$path = Get-ReviewQueryPath $query
-		if ($path -match $unrelatedResourcePath) { return }
+		if ($path -match '^/(groups|servicePrincipals)\?\$filter=(.+)$') {
+			$collection = $Matches[1]
+			$filter = [uri]::UnescapeDataString($Matches[2]).Trim()
+			$clause = "id\s+eq\s+'[0-9a-f-]{36}'"
+			if ($filter -match "^(?:$clause(?:\s+or\s+$clause)*|\(\s*$clause(?:\s+or\s+$clause)*\s*\))$") {
+				foreach ($idClause in [regex]::Matches($filter, $clause, 'IgnoreCase')) {
+					Get-ReviewResourceCoverage ([pscustomobject]@{
+						Id = $Definition.Id
+						Scope = $scope
+						InstanceEnumerationScope = @{ query = "/$collection/$($idClause.Value.Split("'")[1])" }
+					})
+				}
+				return
+			}
+		}
 		if ($path -match '^/(groups|servicePrincipals)/([0-9a-fA-F-]{36})(?=[/?]|$)') {
 			$kind = $Matches[1]
 			$id = [guid]::Empty
@@ -164,14 +177,7 @@ function Get-ReviewResourceCoverage {
 				Query = "instanceEnumerationScope: $query; scope: $($scope | ConvertTo-Json -Depth 10 -Compress)"
 			}
 		}
-		$keys = if ($path -match '^/groups(?:[/?]|$)') { @('GroupMembership:*') }
-			elseif ($path -match '^/servicePrincipals(?:[/?]|$)') { @('ApplicationDirectUsers:*') }
-			else { @('GroupMembership:*', 'ApplicationDirectUsers:*') }
-		$description = "instanceEnumerationScope: $query"
-		foreach ($key in $keys) {
-			[pscustomobject]@{ Key = $key; Coverage = 'Unknown'; Query = $description }
-		}
-		return
+		# A broad enumeration does not identify a target. Still inspect any explicit resource scopes.
 	}
 	if (-not $scope) { throw "Review '$($Definition.Id)' did not return its scope." }
 	$resourceScopes = @(Get-ReviewProperty $scope 'resourceScopes')
@@ -189,7 +195,7 @@ function Get-ReviewResourceCoverage {
 		if (-not $query) { throw "Review '$($Definition.Id)' returned a resource scope without a query." }
 		$path = Get-ReviewQueryPath $query
 		$key = $null
-		if ($path -match '^/(groups|servicePrincipals)/([0-9a-fA-F-]{36})(.*)$') {
+		if ($path -match '^/(groups|servicePrincipals)/([0-9a-fA-F-]{36})(?=[/?]|$)(.*)$') {
 			$kind = $Matches[1]
 			$id = [guid]::Empty
 			$suffix = $Matches[3]
@@ -206,14 +212,6 @@ function Get-ReviewResourceCoverage {
 			$full = $allUsers -and -not $restricted -and ($suffix -match $membershipPath -or
 				((Get-ReviewProperty $scope 'resourceScopes') -and $suffix -in @('', '/')))
 			[pscustomobject]@{ Key = $key; Coverage = if ($full) { 'Full' } else { 'Partial' }; Query = $query }
-		}
-		elseif ($path -notmatch $unrelatedResourcePath) {
-			$keys = if ($path -match '^/groups(?:[/?]|$)') { @('GroupMembership:*') }
-				elseif ($path -match '^/servicePrincipals(?:[/?]|$)') { @('ApplicationDirectUsers:*') }
-				else { @('GroupMembership:*', 'ApplicationDirectUsers:*') }
-			foreach ($unknownKey in $keys) {
-				[pscustomobject]@{ Key = $unknownKey; Coverage = 'Unknown'; Query = $query }
-			}
 		}
 	}
 }
@@ -539,7 +537,6 @@ $reportRun.RunId = $creationLog.RunId
 if ($creationLog.Enabled) {
 	Write-Host "Creation log: $($creationLog.Path)"
 }
-$existingReviewNames = @()
 $targets = [System.Collections.Generic.List[object]]::new()
 foreach ($inputTarget in $inputTargets) {
 	if (-not $inputTarget.ServicePrincipalId) {
@@ -697,6 +694,7 @@ try {
 		foreach ($property in $chosen.Source.PSObject.Properties) { $properties[$property.Name] = $property.Value }
 		$properties.GroupId = $id
 		$properties.ReviewName = $chosen.Name
+		$properties.HasExplicitReviewName = [bool]@($rootOrigins | Where-Object { $_.Source.ReviewName }).Count
 		$properties.Owner = if ($chosen.GroupIds.Count -eq 1) { $chosen.Source.Owner } else { $null }
 		$properties.GroupSnapshot = $discovery.Snapshots[$id]
 		$properties.KnownReviewNames = @($entry.Aliases | Sort-Object)
@@ -741,13 +739,18 @@ $existingResourceReviews = [System.Collections.Generic.List[object]]::new()
 if ($targets.Count) {
 	try {
 		$existingReviews = @(Get-MgIdentityGovernanceAccessReviewDefinition -All -Property id,displayName,status,scope,instanceEnumerationScope,settings -ErrorAction Stop)
-		$existingReviewNames = @($existingReviews | ForEach-Object { $_.DisplayName })
+		$targetKeys = @(foreach ($target in $targets) {
+			if ($target.TargetType -eq 'ApplicationDirectUsers') { "ApplicationDirectUsers:$($target.ServicePrincipalId)" }
+			else { "GroupMembership:$($target.GroupId)" }
+		})
 		foreach ($existing in $existingReviews) {
-			if (-not (Test-ReviewCurrentCoverage $existing)) { continue }
-			foreach ($coverage in @(Get-ReviewResourceCoverage $existing)) {
+			$coverageEntries = @(Get-ReviewResourceCoverage $existing | Where-Object { $_.Key -in $targetKeys })
+			if (-not $coverageEntries.Count) { continue }
+			$isCurrent = Test-ReviewCurrentCoverage $existing
+			foreach ($coverage in $coverageEntries) {
 				$existingResourceReviews.Add([pscustomobject]@{
 					Key = $coverage.Key; Coverage = $coverage.Coverage; Query = $coverage.Query
-					Id = $existing.Id; DisplayName = $existing.DisplayName
+					Id = $existing.Id; DisplayName = $existing.DisplayName; IsCurrent = $isCurrent
 				})
 			}
 		}
@@ -758,6 +761,28 @@ if ($targets.Count) {
 	}
 }
 
+$relatedGroups = @{}
+$relatedCounts = @{}
+foreach ($groupTarget in $targets) {
+	if ($groupTarget.TargetType -eq 'ApplicationDirectUsers' -or $groupTarget.HasExplicitReviewName) { continue }
+	$rootIds = @($groupTarget.RootGroupIds)
+	$appIds = @($groupTarget.SourceServicePrincipalIds | Where-Object { $_ })
+	$key = $null
+	$label = $null
+	if ($appIds.Count -eq 1 -and $groupTarget.ServicePrincipalId -eq $appIds[0]) {
+		$key = "app:$($appIds[0])"
+		$label = $groupTarget.ServicePrincipal.DisplayName
+	}
+	elseif ($appIds.Count -eq 0 -and $rootIds.Count -eq 1) {
+		$key = "root:$($rootIds[0])"
+		$label = $discovery.Snapshots[$rootIds[0]].Group.DisplayName
+	}
+	if ($key -and $label) {
+		$relatedGroups["$($groupTarget.GroupId)"] = @{ Key = $key; Label = $label }
+		$relatedCounts[$key]++
+	}
+}
+$groupPlans = [System.Collections.Generic.List[object]]::new()
 foreach ($target in $targets) {
 	$isApplicationReview = $target.TargetType -eq 'ApplicationDirectUsers'
 	$isApplicationTarget = $null -ne $target.ServicePrincipalId
@@ -889,20 +914,25 @@ foreach ($target in $targets) {
 				continue
 			}
 		}
-		$matchingNames = @(@($reviewDisplayName) + @($target.KnownReviewNames) |
-			Where-Object { $_ -and $existingReviewNames -contains $_ })
-		if ($matchingNames.Count) {
-			$result.MatchedReviewName = $matchingNames[0]
-			$result.MatchedReviewId = ($existingReviews | Where-Object DisplayName -EQ $matchingNames[0] | Select-Object -First 1).Id
+		$resourceKey = if ($isApplicationReview) { "ApplicationDirectUsers:$ServicePrincipalId" } else { "GroupMembership:$GroupId" }
+		$matchesForResource = @($existingResourceReviews | Where-Object Key -EQ $resourceKey)
+		$matchingNames = @($reviewDisplayName) + @($target.KnownReviewNames)
+		$family = if (-not $isApplicationReview) { $relatedGroups["$GroupId"] }
+		if ($family) {
+			$sharedName = "$ReviewNamePrefix $($family.Label) - Group membership".Trim()
+			$matchingNames += $sharedName
+		}
+		$nameMatch = $matchesForResource | Where-Object { $_.DisplayName -and $_.DisplayName -in $matchingNames } | Select-Object -First 1
+		if ($nameMatch) {
+			$result.MatchedReviewName = $nameMatch.DisplayName
+			$result.MatchedReviewId = $nameMatch.Id
+			$result.MatchedReviewScope = $nameMatch.Query
 			$result.DuplicateMatchType = 'Name'
 			$result.Status = 'Skipped'
-			$result.Reason = 'Access review with the same name already exists'
+			$result.Reason = 'Access review with the same name already exists for this resource'
 			continue
 		}
-		$resourceKey = if ($isApplicationReview) { "ApplicationDirectUsers:$ServicePrincipalId" } else { "GroupMembership:$GroupId" }
-		$wildcardKey = "$($result.TargetType):*"
-		$matchesForResource = @($existingResourceReviews | Where-Object { $_.Key -eq $resourceKey -or $_.Key -eq $wildcardKey })
-		$match = $matchesForResource | Sort-Object @{ Expression = { if ($_.Coverage -eq 'Full') { 0 } else { 1 } } }, DisplayName, Id | Select-Object -First 1
+		$match = $matchesForResource | Where-Object IsCurrent | Sort-Object @{ Expression = { if ($_.Coverage -eq 'Full') { 0 } else { 1 } } }, DisplayName, Id | Select-Object -First 1
 		if ($match) {
 			$result.MatchedReviewName = $match.DisplayName
 			$result.MatchedReviewId = $match.Id
@@ -915,7 +945,7 @@ foreach ($target in $targets) {
 			else {
 				$result.DuplicateMatchType = 'UncertainResourceScope'
 				$result.Status = 'Manual review required'
-				$result.Reason = "Existing review '$($match.DisplayName)' ($($match.Id)) has partial or unsupported potentially overlapping scope. No review created; manually assess coverage rather than assume this resource is fully reviewed."
+				$result.Reason = "Existing review '$($match.DisplayName)' ($($match.Id)) explicitly targets this resource but its scope is partial or unsupported. No review created; manually assess coverage rather than assume this resource is fully reviewed."
 			}
 			continue
 		}
@@ -1036,6 +1066,7 @@ foreach ($target in $targets) {
 		if (($ReviewerMessage.Trim() -or $target.Role) -and $descriptionForReviewers.Length -gt 256) {
 			throw "descriptionForReviewers is $($descriptionForReviewers.Length) characters; reviewer emails support up to 256. Shorten ReviewerMessage or Role."
 		}
+		$reviewerMessageSuffix = $descriptionForReviewers.Substring(("Confirm whether each user still needs access to the $resourceDescription.").Length)
 
 		$relationshipPaths = @()
 		if (-not $isApplicationReview) {
@@ -1193,27 +1224,53 @@ foreach ($target in $targets) {
 		$result.ReviewName = $reviewDisplayName
 		$decisionHandling = if ($isSyncedGroup) { 'recorded decisions only (group synchronized from on-premises)' } else { 'automatic removal of denied access' }
 
+		if ($family -and $relatedCounts[$family.Key] -gt 1) {
+			$sharedMessage = "Confirm whether each user still needs access to the group shown. Related resource: '$($family.Label)'. Groups can be linked through nested membership.$reviewerMessageSuffix"
+			if ($sharedMessage.Length -le 256) {
+				$policy = ConvertTo-Json -Depth 10 -Compress -InputObject ([ordered]@{
+					GroupFamily = $family.Key
+					Stages = @($result.ReviewConfiguration.Stages | ForEach-Object {
+						[ordered]@{
+							Name = $_.Name; Duration = $_.DurationInDays
+							Reviewers = @($_.Reviewers | ForEach-Object { $_.query } | Sort-Object -Unique)
+							Fallback = @($_.FallbackReviewers | ForEach-Object { $_.query } | Sort-Object -Unique)
+						}
+					})
+					Synced = $isSyncedGroup
+					Message = $sharedMessage
+				})
+				$resultObject = [pscustomobject]$result
+				$results.Add($resultObject)
+				$groupPlans.Add([pscustomobject]@{
+					Policy = $policy
+					Order = $groupPlans.Count
+					SharedName = $sharedName
+					Result = $resultObject
+					Body = $params
+					SharedMessage = $sharedMessage
+					ResourceDescription = "$resourceDescription ($GroupId, $countDescription)"
+				})
+				continue
+			}
+		}
 		if ($PSCmdlet.ShouldProcess(
 			"$resourceDescription ($(if ($isApplicationReview) { $ServicePrincipalId } else { $GroupId }), $countDescription)",
 			"Create $stageCount-stage access review '$reviewDisplayName' ($stageDescription) with notifications and $decisionHandling"
 		)) {
 			$createdReview = New-MgIdentityGovernanceAccessReviewDefinition -BodyParameter $params -ErrorAction Stop
 			$result.ReviewId = $createdReview.Id
-			$existingReviewNames += $reviewDisplayName
-			$existingReviewNames += @($target.KnownReviewNames)
 			$existingResourceReviews.Add([pscustomobject]@{
 				Key = $resourceKey; Coverage = 'Full'; Query = ($reviewScope | ConvertTo-Json -Depth 6 -Compress)
-				Id = $createdReview.Id; DisplayName = $reviewDisplayName
+				Id = $createdReview.Id; DisplayName = $reviewDisplayName; IsCurrent = $true
 			})
 			$result.Status = 'Created'
 		}
 		else {
 			$result.Status = if ($WhatIfPreference) { 'Would be created' } else { 'Not created' }
 			if ($WhatIfPreference) {
-				$existingReviewNames += @($reviewDisplayName) + @($target.KnownReviewNames)
 				$existingResourceReviews.Add([pscustomobject]@{
 					Key = $resourceKey; Coverage = 'Full'; Query = ($reviewScope | ConvertTo-Json -Depth 6 -Compress)
-					Id = $null; DisplayName = $reviewDisplayName
+					Id = $null; DisplayName = $reviewDisplayName; IsCurrent = $true
 				})
 			}
 		}
@@ -1231,13 +1288,61 @@ foreach ($target in $targets) {
 		}
 	}
 	finally {
-		$resultObject = [pscustomobject]$result
-		$results.Add($resultObject)
-		Write-AccessReviewLog -Log $creationLog -Entry @{
-			Event = if ($isApplicationReview) { 'ApplicationResult' } else { 'GroupResult' }
-			Result = $resultObject
+		if ($result.Status) {
+			$resultObject = [pscustomobject]$result
+			$results.Add($resultObject)
+			Write-AccessReviewLog -Log $creationLog -Entry @{
+				Event = if ($isApplicationReview) { 'ApplicationResult' } else { 'GroupResult' }
+				Result = $resultObject
+			}
 		}
 	}
+}
+
+foreach ($batch in @($groupPlans | Group-Object -Property Policy -CaseSensitive | Sort-Object { $_.Group[0].Order })) {
+	$plans = @($batch.Group)
+	$first = $plans[0]
+	$body = $first.Body
+	$createdId = $null
+	$reason = $null
+	$status = 'Failed'
+	try {
+		$description = $first.ResourceDescription
+		if ($plans.Count -gt 1) {
+			$body.displayName = $first.SharedName
+			$description = "$($plans.Count) related groups: $($plans.Result.Group -join ', ')"
+			$body.scope = @{
+				'@odata.type' = '#microsoft.graph.principalResourceMembershipsScope'
+				principalScopes = @(@{
+					'@odata.type' = '#microsoft.graph.accessReviewQueryScope'
+					query = '/v1.0/users'; queryType = 'MicrosoftGraph'
+				})
+				resourceScopes = @($plans | ForEach-Object { $_.Body.scope })
+			}
+			$body.descriptionForReviewers = $first.SharedMessage
+			$body.descriptionForAdmins = ($plans | ForEach-Object { $_.Result.ReviewConfiguration.DescriptionForAdmins }) -join ' '
+		}
+		foreach ($plan in $plans) {
+			$plan.Result.ReviewName = $body.displayName
+			$plan.Result.ReviewConfiguration.Scope = $body.scope
+			$plan.Result.ReviewConfiguration.DescriptionForReviewers = $body.descriptionForReviewers
+			$plan.Result.ReviewConfiguration.DescriptionForAdmins = $body.descriptionForAdmins
+		}
+		$decisionHandling = if ($first.Result.IsSyncedGroup) { 'recorded decisions only (group synchronized from on-premises)' } else { 'automatic removal of denied access' }
+		if ($PSCmdlet.ShouldProcess($description, "Create $($first.Result.Stages)-stage access review '$($body.displayName)' ($($first.Result.StageNames)) with notifications and $decisionHandling")) {
+			$createdId = (New-MgIdentityGovernanceAccessReviewDefinition -BodyParameter $body -ErrorAction Stop).Id
+			$status = 'Created'
+		}
+		else { $status = if ($WhatIfPreference) { 'Would be created' } else { 'Not created' } }
+	}
+	catch { $reason = $_.Exception.Message }
+	foreach ($plan in $plans) {
+		$plan.Result.ReviewId = $createdId
+		$plan.Result.Status = $status
+		$plan.Result.Reason = if ($reason) { $reason } elseif ($plan.Result.IsSyncedGroup) { 'Synced from on-premises AD; decisions recorded only' }
+		Write-AccessReviewLog -Log $creationLog -Entry @{ Event = 'GroupResult'; Result = $plan.Result }
+	}
+	if ($reason -and $PSCmdlet.ParameterSetName -eq 'Single') { throw $reason }
 }
 
 foreach ($matchGroup in @($results | Where-Object DuplicateMatchType -EQ 'UncertainResourceScope' | Group-Object MatchedReviewId)) {

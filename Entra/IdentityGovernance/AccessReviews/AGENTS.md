@@ -19,16 +19,18 @@ This guidance applies to this tool and its tests, not the rest of the repository
   merge by group ID and retain all paths, including circular closing connections.
   Warn/log cycles and stop only that recursive branch; metadata/membership read
   failures and policy conflicts still fail closed before creation.
-- Preserve case-insensitive existing-name guards and aliases. Do not repair,
+- Keep case-insensitive existing-name guards and aliases scoped to the same
+  resource Object ID. Do not repair,
   stop, delete or recreate existing/running reviews as a side effect of a rerun.
 - Also guard by resource ID/scope across prefixes for active/scheduled and
   potentially future recurring coverage, irrespective of reviewer policy.
   Completed historical coverage alone must not block by resource. Partial or
-  unresolvable overlapping scopes require explicit manual assessment, not an
-  assumption of full coverage. Keep group membership and application assignment
+  unsupported scopes with a confirmed matching ID require manual assessment,
+  not an assumption of full coverage. Keep group membership and application assignment
   scopes distinct; a transitive parent review does not certify child membership.
-  A concrete enumeration resource ID must not become a type-wide wildcard;
-  empty SDK enumeration containers are not resource sets.
+  Unidentified resource sets and shared users must not block other resources.
+- Group related, compatible groups automatically. Keep per-group results and
+  duplicate checks, and never combine different stage or remediation policies.
 - New nested-only names omit `[Nested]`; preserve that suffix as a legacy alias.
   Explain recorded parent/application relationships in descriptions without
   claiming nested assignments prove effective application access. Preserve

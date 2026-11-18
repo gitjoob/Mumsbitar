@@ -120,19 +120,30 @@ Synced groups are report-only: apply removals in on-premises AD.
 Removing someone from a shared group affects **every resource using that group**.
 Group reviews remove user membership, not group-to-group or group-to-app assignments.
 
-- Existing names and legacy aliases block creation, including completed reviews.
-- Resource ID/scope checks also block active/scheduled or potentially future
-  recurring coverage, regardless of prefix or reviewer policy.
-- Access-package assignment reviews are separate coverage, not group/application
-  reviews. Enumerated scopes are checked by resource family, not review name.
-  An enumeration naming one resource matches only that object ID. Empty SDK
-  enumeration containers are treated as absent, not as tenant-wide coverage.
+- Duplicate matching requires the same **group or service-principal Object ID**
+  in the existing review's resource scope. Names and legacy aliases protect
+  same-resource reruns, including completed reviews, but never block another ID.
+- Shared users, nested users, access-package assignments, and broad or unknown
+  enumerations with no identifiable resource ID are not duplicate evidence.
+  Active/scheduled or future recurring reviews on the same ID are checked
+  regardless of prefix or reviewer policy.
 - Completed/Applied historical coverage alone does not block by resource. Future/no-end
   recurring ranges are treated conservatively; numbered series check instances.
-- Partial or unsupported overlapping scopes require manual assessment; no new
-  review is created. Unreadable duplicate-check data stops creation.
-- Existing reviews are **never changed, stopped or deleted**. Separate group
-  reviews remain separate. Do not run overlapping creation jobs concurrently.
+- Partial coverage of the same ID requires manual assessment. Failed review
+  inventory reads stop creation. Existing reviews are **never changed, stopped
+  or deleted**. Do not run overlapping creation jobs concurrently.
+
+### Automatic grouping
+
+No new parameters or CSV columns are needed. Eligible groups from the same
+application or a single nesting root share a definition if their stages,
+reviewers, fallback reviewers, role/message and remediation agree. Different
+policies, ambiguous relationships, custom review names, and direct application
+user reviews stay separate. Duplicate checks run per resource before grouping.
+
+Results still show one row per group with the shared definition ID. Graph
+models a separate review instance per group. `-WhatIf` previews grouping but
+does not validate the request server-side.
 
 `-WhatIf` performs Graph reads but writes no reviews or logs. It writes an HTML
 file only when you explicitly supply `-HtmlReportPath`.
