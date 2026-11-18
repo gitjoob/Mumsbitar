@@ -2,133 +2,34 @@
 .SYNOPSIS
 Creates group-membership and direct application-user access reviews.
 .DESCRIPTION
-Choose GroupId, CsvPath, or ServicePrincipalId. ServicePrincipalId discovers
-assigned groups and directly assigned users of an enterprise application.
-It retains group-membership reviews and creates a separate application-access
-review for direct users. It also reports service-principal owners and non-user
-assignments (including service principals/managed identities) as Manual review
-required; these are not silently skipped or automatically revoked.
-Existing review names are skipped in all modes. Application mode and nested-only
-targets skip dynamic groups; groups with no direct users are skipped in all modes.
-All group inputs recursively discover nested groups before any review creation.
-Each group is reviewed once per run, including shared children. Nested-only
-reviews use '<prefix> <group>'; descriptions explain membership relationships.
-Known legacy names, including '[Nested]' names, also prevent duplicates.
-Existing parent reviews do not prevent discovering or creating missing child reviews.
-Active/scheduled reviews and recurring series with future configured cycles also
-prevent another review of the same group/application scope, regardless of name,
-prefix or reviewer policy. Existing reviews are never modified. Partial or
-unsupported overlapping scopes require manual assessment instead of assuming
-full coverage. Completed one-time reviews do not trigger this resource guard;
-the existing name guard still includes completed reviews.
-All modes use the same stage policy.
-Connect to Microsoft Graph first.
-Requires AccessReview.ReadWrite.All, access to read the group and its member count,
-and an appropriate access review license.
+Use GroupId for one group, CsvPath for a batch, or ServicePrincipalId for an
+enterprise application. Nested groups get separate reviews of their direct users.
+Application mode also reviews direct user assignments; owners and non-user
+assignments are listed for manual follow-up.
 
-ReviewerType selects the owner stage: ApplicationOwner (default) or ResourceOwner.
-For 1-150 members the owner is the only stage; for 151-499, managers precede
-the owner; for 500+ the stages are self-review, managers and the selected owner.
-Group stages count distinct direct users only, excluding nested groups and
-other directory objects. Direct-user application reviews count distinct directly
-assigned users. Zero-direct-user groups are skipped after discovering children.
-ResourceOwner uses the group's user owners, or service-principal user owners for
-direct-user application reviews at every size. For synchronized groups,
-CSV Owner users review instead of group owners when supplied; otherwise explicit
-FallbackReviewerUserId users review. Without either, the target fails.
-Non-synchronized groups without user owners also use explicit fallback users,
-including groups owned only by service principals. Without fallbacks they fail.
-Direct-user application reviews without user owners still fail.
-ApplicationOwner uses AppOwnerIds for the final stage at every size.
-Missing managers use FallbackReviewerUserId, or the effective application owners,
-or the selected resource owners when no application owners are supplied.
-FallbackReviewerUserId accepts one or more user object IDs.
-AppOwnerIds supplies application-owner user object IDs and is required whenever
-application owners review. CSV AppOwnerIds and ReviewerType override their
-run-wide parameters per row; blank cells use the parameters. Children inherit
-ReviewerType, AppOwnerIds and Role, but not a parent's CSV Owner or ReviewName.
-ResourceOwner resolves each child's own human owners. Synced children need their
-own explicit CSV Owner row or explicit fallback users. Conflicting inherited
-settings for a shared group stop the run before creation. Multiple owner IDs
-are comma- or semicolon-separated. Quote cells when needed for the CSV delimiter.
-ForceTwoStage adds a manager stage before the selected owner for targets with
-1-150 members. Targets with 151-499 already use two stages; 500+ retain all three.
-It applies in single-group, CSV, and application modes; empty targets remain skipped.
-The old LineManager ReviewerType maps to ApplicationOwner with a warning.
+Stages depend on direct-user count: 1-150 owner; 151-499 managers then owner;
+500+ self-review, managers, then owner. ForceTwoStage adds managers for 1-150.
+ReviewerType defaults to ApplicationOwner (requires AppOwnerIds).
+ResourceOwner uses the group's or application's human owners.
 
-Each validated real run writes its invocation syntax and per-group results to
-a separate logs/Create-AccessReview_<UTC timestamp>_<RunId>.jsonl file next to
-the script and prints the log path. Logs are retained even if no reviews are
-created. This directory is gitignored. WhatIf writes no logs and makes no Graph
-writes. Existing combined logs are left untouched; no logs are deleted automatically.
-Keep AccessReview.Logging.ps1 beside this script.
-
-$ReviewerMessage optionally adds text (for example contact details) to the reviewer email.
-Application owners are supplied through AppOwnerIds or the CSV. Optional completion
-notification recipients are configured in $AdditionalNotificationRecipients;
-leave it empty to send no additional notifications. Notifications are enabled.
-Unanswered reviews default to Deny and denied access is automatically removed.
-Groups synchronized from on-premises Active Directory cannot be changed by the
-access review. For those groups, decisions are only recorded and must be
-applied in Active Directory.
-For one-time reviews, an explicitly supplied EndDate sets the total duration
-from StartDate to EndDate. Days are divided evenly across the included stages,
-with any extra days assigned to earlier stages. Each stage needs at least one day.
-EndDate takes priority over the stage-duration parameters.
-Otherwise, stage durations default to five days each. Override SelfReviewDurationInDays,
-SelectedReviewerDurationInDays (managers), and ApplicationOwnerDurationInDays
-(the final owner stage, including resource owners) independently.
-Frequency defaults to OneTime; use
-Frequency to select Weekly, Monthly, Quarterly, SemiAnnual, or Annual recurrence.
-For recurring reviews, the series ends at EndDate, which defaults to the end of
-the current month; provide a later date to allow subsequent occurrences.
-StartDate defaults to today. For recurring reviews, EndDate must allow enough
-days for all stages to complete.
-
-CsvPath accepts GroupId or ServicePrincipalId rows and optional AppOwnerIds,
-Owner, ReviewerType, and Role columns; ReviewName is supported for group rows only.
-Owner contains one or more user object IDs and applies to the row's synchronized
-group, or directly assigned synced groups for an application row, using
-ResourceOwner routing at any size. Nested children do not inherit Owner.
-Role is appended to the reviewer message for each review generated by the row;
-it does not filter assignments. A table of skipped or failed targets and a summary
-are shown at the end. All modes also show the total direct-user count across
-created group reviews (or would-be-created reviews with WhatIf), counting the
-same user separately if directly present in multiple groups. Group reviews cover
-direct membership; denied child memberships affect all resources using that group.
-Application mode reports direct-user totals and manual-review item counts
-separately. Ownership is not application assignment; reporting an owner does not
-create an ownership review. Application registration ownership, consent grants,
-and other access paths are outside this script's scope.
-If ReviewName is omitted, the name is
-derived from the group's display name with the ReviewNamePrefix parameter (default AR), for
-example 'AR Demo Group'.
-Results and JSONL retain root/parent group IDs and all discovery paths.
-Hidden-membership discovery requires Member.Read.Hidden and appropriate roles.
-Discovery failures stop the run before creation; no existing reviews are changed.
+Denied and unanswered access is removed automatically, except for synchronized
+groups, which require changes in on-premises AD. Shared-group removal can affect
+multiple resources. Existing reviews are never changed; name and resource/scope
+checks prevent duplicates, with uncertain overlaps flagged for manual assessment.
+Start with WhatIf: it reads Graph but creates no reviews or logs.
+.NOTES
+Connect to Graph first with AccessReview.ReadWrite.All and resource-read access.
+Keep AccessReview.Logging.ps1 and AccessReview.Reporting.ps1 beside this script.
+See README.md for CSV columns, schedules, fallback reviewers and report usage.
 .PARAMETER HtmlReportPath
-Optional new .html/.htm file for a private, offline configuration/outcome report.
-Supports red/white and system-aware dark themes. With WhatIf, explicitly supplying
-this parameter permits writing the HTML report only, never reviews or JSONL logs.
-Existing output files are rejected. The report is not live certification state.
+Optional new HTML report of planned settings and creation results, not live status.
+With WhatIf, only this explicitly requested file is written. Never overwrites files.
 .EXAMPLE
-.\Create-AccessReview.ps1 -CsvPath '.\groups.csv' -WhatIf
+.\Create-AccessReview.ps1 -GroupId '<group Object ID>' -ReviewerType ResourceOwner -WhatIf
 .EXAMPLE
-.\Create-AccessReview.ps1 -CsvPath '.\groups.csv' -WhatIf -HtmlReportPath '.\reports\preview.html'
+.\Create-AccessReview.ps1 -CsvPath '.\groups.csv' -ReviewerType ResourceOwner -WhatIf -HtmlReportPath '.\reports\preview.html'
 .EXAMPLE
-.\Create-AccessReview.ps1 -GroupId '11111111-1111-1111-1111-111111111111' -AppOwnerIds '22222222-2222-2222-2222-222222222222' -WhatIf
-.EXAMPLE
-.\Create-AccessReview.ps1 -GroupId '11111111-1111-1111-1111-111111111111' -AppOwnerIds '22222222-2222-2222-2222-222222222222' -ReviewerType ApplicationOwner
-.EXAMPLE
-.\Create-AccessReview.ps1 -GroupId '11111111-1111-1111-1111-111111111111' -AppOwnerIds '22222222-2222-2222-2222-222222222222' -ReviewName 'Quarterly review of Demo Group' -WhatIf
-.EXAMPLE
-.\Create-AccessReview.ps1 -CsvPath '.\groups.csv' -ReviewerType ResourceOwner -WhatIf
-.EXAMPLE
-.\Create-AccessReview.ps1 -GroupId '11111111-1111-1111-1111-111111111111' -ReviewerType ResourceOwner -WhatIf
-.EXAMPLE
-.\Create-AccessReview.ps1 -CsvPath '.\groups.csv' -AppOwnerIds '22222222-2222-2222-2222-222222222222' -Frequency Quarterly -EndDate '2027-10-31' -WhatIf
-.EXAMPLE
-.\Create-AccessReview.ps1 -ServicePrincipalId '33333333-3333-3333-3333-333333333333' -AppOwnerIds '22222222-2222-2222-2222-222222222222' -ReviewerType ResourceOwner -WhatIf
+.\Create-AccessReview.ps1 -ServicePrincipalId '<enterprise-application Object ID>' -AppOwnerIds '<owner user Object ID>' -WhatIf
 #>
 [CmdletBinding(SupportsShouldProcess, DefaultParameterSetName = 'Single')]
 param(
