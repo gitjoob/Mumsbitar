@@ -54,8 +54,10 @@ Finance reporting - Read reports,View financial reports.,$script:groupId,$script
 			UserCount = '500'
 			DeniedUserId = $null
 			NamedGroups = @()
-			ApproverUpn = 'owner@example.test'
-			ApproverUpnId = $script:ownerId
+			AddressUsers = @(
+				@{ id = $script:ownerId; userPrincipalName = 'owner@example.test'; mail = 'owner-mail@example.test' }
+				@{ id = $script:fallbackId; userPrincipalName = 'fallback@example.test'; mail = 'fallback-mail@example.test' }
+			)
 			Group = @{
 				id = $script:groupId
 				displayName = 'SG_Finance_Reports'
@@ -111,10 +113,11 @@ Finance reporting - Read reports,View financial reports.,$script:groupId,$script
 				if ($uriText -match '/users/([^?]+)') {
 					$id = $Matches[1]
 					if ($id -eq $fixture.DeniedUserId) { throw 'User not found or forbidden.' }
-					if ([uri]::UnescapeDataString($id) -eq $fixture.ApproverUpn) {
-						return @{ id = $fixture.ApproverUpnId; userPrincipalName = $fixture.ApproverUpn }
-					}
 					return @{ id = $id; displayName = 'Approver' }
+				}
+				if ($decodedUri -match "/users\?\`$filter=userPrincipalName eq '([^']+)' or mail eq '\1'&\`$select=id,userPrincipalName,mail$") {
+					$address = $Matches[1]
+					return @{ value = @($fixture.AddressUsers | Where-Object { $_.userPrincipalName -eq $address -or $_.mail -eq $address }) }
 				}
 				if ($uriText -match '/transitiveMembers/microsoft.graph.user/\$count$') {
 					return $fixture.UserCount
@@ -198,11 +201,11 @@ Finance reporting - Read reports,View financial reports.,$script:groupId,$script
 	Context 'Excel workbook' -Skip:(-not (Get-Module -ListAvailable -Name ImportExcel)) {
 		BeforeAll { Import-Module ImportExcel -WarningAction SilentlyContinue }
 
-		It 'imports the workbook columns and submits three ordered approval stages' {
+		It 'resolves UPN and mail values to user IDs for ordered approval stages' {
 			$script:graphFixture.NamedGroups = @(@{ id = $script:groupId; displayName = "Finance's Readers" })
 			$path = New-WorkbookFixture @{
 				'Access Group' = "Finance's Readers"; 'Approver 1 List' = ' < employee   MANAGER > '
-				'Approver 2' = "owner@example.test;`n$script:ownerId"; 'Approver 3' = $script:fallbackId
+				'Approver 2' = "owner@example.test;`nowner-mail@example.test"; 'Approver 3' = 'fallback-mail@example.test'
 			}
 			$result = & $script:scriptPath -InputPath $path -CatalogName $script:graphFixture.CatalogName `
 				-FallbackApproverIds $script:fallbackId -Confirm:$false -WarningAction SilentlyContinue
@@ -218,6 +221,29 @@ Finance reporting - Read reports,View financial reports.,$script:groupId,$script
 			$stages[1].primaryApprovers | Should -HaveCount 1
 			$stages[1].primaryApprovers[0].userId | Should -Be $script:ownerId
 			$stages[2].primaryApprovers[0].userId | Should -Be $script:fallbackId
+		}
+
+		It 'stops on an unreadable workbook before worksheet validation or Graph access' {
+			$script:csvPath = Join-Path $TestDrive 'not-a-workbook.xlsx'
+			'not an Excel package' | Set-Content -LiteralPath $script:csvPath
+			{ Invoke-Creation -Preview } | Should -Throw '*Could not read Excel workbook*Import error:*'
+			Should -Invoke Get-MgContext -Exactly -Times 0
+			Should -Invoke Invoke-MgGraphRequest -Exactly -Times 0
+		}
+
+		It 'rejects addresses with <MatchCount> exact matches without provisioning' -TestCases @(
+			@{ MatchCount = 0 }, @{ MatchCount = 2 }
+		) {
+			param($MatchCount)
+			if ($MatchCount -eq 2) {
+				$script:graphFixture.AddressUsers[1].mail = 'owner@example.test'
+			}
+			else { $script:graphFixture.AddressUsers = @() }
+			$script:csvPath = New-WorkbookFixture @{ 'Approver 2' = 'owner@example.test' }
+			$result = Invoke-Creation
+			$result.Status | Should -Be 'Failed'
+			$result.Reason | Should -Match "matched $MatchCount Entra users"
+			$script:graphFixture.Writes | Should -HaveCount 0
 		}
 
 		It 'previews a manager-only workbook row without Graph writes' {

@@ -74,10 +74,17 @@ The script reads the first worksheet with headers in row 1:
 | `Access Group` | One Entra group object ID or exact, unique group display name. |
 | `Description`, `Role`, `Brand`, `Region`, `Potential Teams` | Description text and optional details. |
 | `Approver 1 List` | `<Employee Manager>` (case and extra whitespace are ignored). Uses the existing direct-manager stage and fallback approvers. |
-| `Approver 2`, `Approver 3` | Optional additional stages, in order. Separate multiple user object IDs or UPNs with semicolons, commas or line breaks. Stage 3 requires an explicit stage 2. |
+| `Approver 2`, `Approver 3` | Optional additional stages, in order. Separate user object IDs, UPNs, or `mail` addresses with semicolons, commas or line breaks. Stage 3 requires an explicit stage 2. |
 
 For groups over 500 transitive users, a blank stage 2 requires
-`-DefaultAppOwnerIds`. Display names for approvers aren't supported.
+`-DefaultAppOwnerIds`. An address must match exactly one Entra user across UPN
+and `mail`. For ambiguous addresses, use the user object ID. Display names
+and secondary mail aliases aren't supported.
+
+If the workbook cannot be opened, confirm it opens in desktop Excel and save
+a local copy as **Excel Workbook (`.xlsx`)** if your organization's policy
+allows it. Password-encrypted or rights-managed copies may not be readable
+by the importer. A reader error stops the run before worksheet validation.
 
 ## CSV and naming
 

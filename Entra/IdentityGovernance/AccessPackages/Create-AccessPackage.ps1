@@ -19,7 +19,7 @@ FallbackApproverIds is mandatory and is used when a recipient has no manager.
 For XLSX, install ImportExcel and use the first worksheet. Access Package Name
 sets the name; Access Group accepts an object ID or exact unique group name.
 Approver 1 List must be <Employee Manager>. Approver 2 and Approver 3 accept
-user object IDs or UPNs separated by semicolons, commas, or line breaks.
+user object IDs, UPNs, or mail addresses separated by semicolons, commas, or line breaks.
 Names and descriptions must use business-friendly application and access terms.
 Names must not contain "Access Package", "AP", or "SG", or identify the owner.
 
@@ -75,7 +75,14 @@ if ($isWorkbook) {
 	}
 	Import-Module ImportExcel -WarningAction SilentlyContinue
 	$workbookPath = (Get-Item -LiteralPath $InputPath).FullName
-	$rows = @(ImportExcel\Import-Excel -Path ([WildcardPattern]::Escape($workbookPath)) | Where-Object {
+	try {
+		$workbookRows = @(ImportExcel\Import-Excel -Path ([WildcardPattern]::Escape($workbookPath)) -ErrorAction Stop)
+	}
+	catch {
+		$message = "Could not read Excel workbook '$InputPath'. Confirm it opens in Excel and use a local .xlsx copy that policy permits this script to read. Password-protected or rights-managed files may not be readable. Import error: $($_.Exception.Message)"
+		throw [System.IO.InvalidDataException]::new($message, $_.Exception)
+	}
+	$rows = @($workbookRows | Where-Object {
 		@($_.PSObject.Properties | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.Value) }).Count
 	})
 	if (-not $rows.Count) { throw 'The first worksheet contains no access packages.' }
@@ -240,22 +247,27 @@ function Get-WorkbookApproverIds {
 	param([string]$Text, [string]$Column)
 
 	$values = @($Text -split '[;,\r\n]+' | ForEach-Object { $_.Trim() } | Where-Object { $_ } | Select-Object -Unique)
-	if (-not $values.Count) { throw "$Column must contain at least one Entra user object ID or UPN." }
+	if (-not $values.Count) { throw "$Column must contain at least one Entra user object ID, UPN, or mail address." }
 	foreach ($value in $values) {
 		$id = [guid]::Empty
 		if ([guid]::TryParse($value, [ref]$id) -and $id -ne [guid]::Empty) {
 			$id
 		}
 		elseif ($value -match '^[^\s@]+@[^\s@]+$') {
-			$upn = [uri]::EscapeDataString($value)
-			$user = Invoke-PackageGraphRequest -Method GET -Uri "/v1.0/users/${upn}?`$select=id,userPrincipalName" -OutputType Hashtable
-			if ($user.userPrincipalName -ne $value -or -not [guid]::TryParse($user.id, [ref]$id) -or $id -eq [guid]::Empty) {
-				throw "$Column could not resolve '$value' to an exact Entra user UPN."
+			$address = $value.Replace("'", "''")
+			$userIds = @(Get-GraphCollection -Uri '/v1.0/users' -Filter "userPrincipalName eq '$address' or mail eq '$address'" -Select 'id,userPrincipalName,mail' |
+				Where-Object { $_.userPrincipalName -eq $value -or $_.mail -eq $value } |
+				Select-Object -ExpandProperty id -Unique)
+			if ($userIds.Count -ne 1) {
+				throw "$Column address '$value' matched $($userIds.Count) Entra users by UPN or mail. Specify the user object ID."
+			}
+			if (-not [guid]::TryParse($userIds[0], [ref]$id) -or $id -eq [guid]::Empty) {
+				throw "$Column address '$value' resolved to an invalid Entra user object ID."
 			}
 			$validatedUsers["$id"] = $true
 			$id
 		}
-		else { throw "$Column contains '$value'; use Entra user object IDs or UPNs." }
+		else { throw "$Column contains '$value'; use Entra user object IDs, UPNs, or mail addresses." }
 	}
 }
 
