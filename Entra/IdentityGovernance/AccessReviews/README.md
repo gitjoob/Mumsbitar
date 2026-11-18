@@ -166,8 +166,10 @@ file only when you explicitly supply `-HtmlReportPath`.
 The report includes a clickable application/group topology, stage configuration, duplicate
 matches, search and a dark-mode switch. It shows planned/submitted settings and
 creation outcomes, **not live status or proof that access was removed**.
-Ownership follow-up is grouped by application, with expandable owner details;
-raw results and logs still contain individual ownership records.
+Ownership and non-user app-role assignments are grouped separately by
+application, with expandable details. Raw results and logs still retain each
+record. Inventory rows and topology cards show numbered stages; open a review
+to see its dates and durations when recorded.
 Application cards connect to directly assigned groups and show direct-user review
 outcomes separately. Discovered applications remain visible even with no review
 targets; discovery metadata is retained for offline export.

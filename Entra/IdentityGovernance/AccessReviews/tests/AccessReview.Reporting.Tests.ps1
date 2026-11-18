@@ -349,6 +349,51 @@ Describe 'Offline access review reporting' {
 		$inventory | Should -Match 'Second application'
 	}
 
+	It 'rolls up 58 non-user assignments into one searchable row per application in offline export' {
+		$app = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
+		$other = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb'
+		@(
+			@{ Event = 'RunStarted'; RunId = 'assignment-run' }
+			foreach ($i in 1..59) {
+				@{ Event = 'ManualReviewRequired'; RunId = 'assignment-run'; Result = @{
+					TargetType = 'ApplicationNonUserAssignment'; Target = 'Payroll'; Status = 'Manual review required'
+					ServicePrincipalId = $(if ($i -eq 59) { $other } else { $app })
+					PrincipalDisplayName = "Automation <$i>"; PrincipalType = 'ServicePrincipal'
+					PrincipalId = "principal-$i"; AssignmentId = "assignment-$i"; AppRoleId = "role-$i"
+				} }
+			}
+			@{ Event = 'RunCompleted'; RunId = 'assignment-run' }
+		) | ForEach-Object { $_ | ConvertTo-Json -Compress -Depth 10 } | Set-Content $script:logPath
+		& $script:exporter -LogPath $script:logPath -OutputPath $script:outputPath
+		$html = Get-Content $script:outputPath -Raw
+		$inventory = [regex]::Match($html, '(?s)<tbody id="rows">(.*?)</tbody>').Groups[1].Value
+		[regex]::Matches($inventory, 'data-type="ApplicationNonUserAssignment"').Count | Should -Be 2
+		$inventory | Should -Match '58 recorded non-user assignments'
+		$inventory | Should -Match 'assignment-58'
+		$html | Should -Match 'Recorded non-user assignments \(58\)'
+		$html | Should -Match '<td>Automation &lt;58&gt;</td><td>ServicePrincipal</td><td>principal-58</td><td>assignment-58</td><td>role-58</td>'
+		$html | Should -Not -Match 'class="stage-flow"'
+	}
+
+	It 'visualizes recorded stage order in inventory and topology without inventing legacy dates' {
+		$result = New-ReportFixture -Durations @(3, 5, 6)
+		$result.ReviewConfiguration.Stages[0].Name = '<Self review>'
+		$app = [pscustomobject]@{
+			TargetType = 'ApplicationDirectUsers'; Target = 'Payroll'; Status = 'Created'
+			ServicePrincipalId = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
+			StageNames = 'Line managers -> Application owners'
+		}
+		$html = New-AccessReviewHtml -Results @($result, $app) -Context $script:context
+		$inventory = [regex]::Match($html, '(?s)<tbody id="rows">(.*?)</tbody>').Groups[1].Value
+		$topology = [regex]::Match($html, '(?s)<section id="topology".*?</section>').Value
+		foreach ($section in @($inventory, $topology)) {
+			$section | Should -Match '<ol class="stage-flow"[^>]*><li><span>&lt;Self review&gt;</span></li><li><span>Line managers</span></li><li><span>Resource owners \(group owners\)</span></li></ol>'
+			$section | Should -Match '<ol class="stage-flow"[^>]*><li><span>Line managers</span></li><li><span>Application owners</span></li></ol>'
+		}
+		$html | Should -Match '<small>Stage 3</small>'
+		[regex]::Matches($html, 'class="timeline"').Count | Should -Be 1
+	}
+
 	It 'shows review status proportions including unavailable statuses without counting instances or stages' {
 		$definitions = @(
 			@{ Status = 'InProgress'; Instances = @(1, 2, 3) }

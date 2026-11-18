@@ -74,10 +74,11 @@ button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible{ou
 .panel{padding:24px;margin-top:22px;scroll-margin-top:15px}nav{display:flex;gap:22px;flex-wrap:wrap}
 .entra-link{display:block;font-size:12px;margin-top:6px}.topology-controls{display:flex;align-items:end;justify-content:space-between;gap:14px;flex-wrap:wrap}.topology-controls label{font-size:12px;max-width:100%}.topology-controls select{display:block;max-width:100%;margin-top:5px}.topology-controls button{padding:6px 10px}
 #topology-viewport{max-height:700px;overflow:auto;border:1px solid var(--line);border-radius:8px;background:var(--bg)}#topology-space{position:relative}#topology-canvas{position:relative;transform-origin:top left}#topology-lines{position:absolute;inset:0;pointer-events:none;overflow:visible}.topology-edge{stroke:var(--accent);stroke-width:2;fill:none}#topology-arrow path{fill:var(--accent)}
-.topology-node{width:260px;max-width:100%;min-height:180px;padding:14px;margin:12px;background:var(--panel);border:1px solid var(--line);border-top:4px solid var(--accent);border-radius:9px;display:flex;flex-direction:column;gap:6px;overflow-wrap:anywhere}.topology-node.positioned{position:absolute;margin:0}.topology-node .eyebrow{font-size:10px;letter-spacing:.5px}.topology-name{font-weight:700;font-size:15px}.topology-stages{font-size:12px}.topology-name,.topology-stages{display:-webkit-box;-webkit-box-orient:vertical;overflow:hidden;-webkit-line-clamp:3}.topology-node .entra-link{margin-top:auto}
+.topology-node{width:260px;max-width:100%;min-height:180px;padding:14px;margin:12px;background:var(--panel);border:1px solid var(--line);border-top:4px solid var(--accent);border-radius:9px;display:flex;flex-direction:column;gap:6px;overflow-wrap:anywhere}.topology-node.positioned{position:absolute;margin:0}.topology-node .eyebrow{font-size:10px;letter-spacing:.5px}.topology-name{font-weight:700;font-size:15px;display:-webkit-box;-webkit-box-orient:vertical;overflow:hidden;-webkit-line-clamp:3}.topology-node .entra-link{margin-top:auto}
 .application-node{background:var(--soft)}.application-edge{stroke-dasharray:6 4}
 .relationships{display:grid;grid-template-columns:1fr 1fr 1fr;gap:15px;padding:12px;border:1px solid var(--line);border-radius:7px}.relationships>div{min-width:0;overflow-wrap:anywhere}.selected-group{display:flex;flex-direction:column;justify-content:center;gap:8px;padding:15px;background:var(--soft);border:1px solid var(--accent);border-radius:7px}
 .timeline{display:flex;gap:3px;margin:18px 0}.stage{flex-basis:0;min-width:0;background:var(--soft);border-top:4px solid var(--accent);padding:12px;border-radius:6px;overflow-wrap:anywhere}
+.stage-flow{counter-reset:stage;list-style:none;padding:0;margin:0;display:grid;gap:4px;min-width:125px;font-size:12px}.stage-flow li{counter-increment:stage;display:grid;grid-template-columns:1.55em minmax(0,1fr);align-items:start;gap:6px;background:var(--soft);padding:3px 6px;border-radius:5px}.stage-flow li::before{content:counter(stage);text-align:center;border-radius:50%;background:var(--accent);color:var(--panel);font-weight:700}
 .stage strong,.stage span{display:block}.stage small{font-size:11px}details{margin:14px 0}summary{cursor:pointer;color:var(--accent);font-weight:600}
 dl{display:grid;grid-template-columns:minmax(110px,1fr) 3fr;gap:5px 15px}dt{font-weight:600}dd{margin:0;overflow-wrap:anywhere}
 pre,code{white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px}.filters{display:flex;gap:14px;flex-wrap:wrap}.filters label{flex:1;min-width:170px;font-size:12px;font-weight:600}.filters input,.filters select{display:block;width:100%;margin-top:5px}
@@ -118,23 +119,37 @@ function Get-AccessReviewReportThemeScript {
 '@
 }
 
+function ConvertTo-AccessReviewStageFlowHtml {
+	param([object]$Result)
+
+	$names = @($Result.ReviewConfiguration.Stages | ForEach-Object { $_.Name } | Where-Object { $_ })
+	if (-not $names.Count -and $Result.StageNames) {
+		$names = @($Result.StageNames -split '\s*->\s*' | Where-Object { $_ })
+	}
+	if (-not $names.Count) { return '<small>Stage configuration not recorded</small>' }
+	$items = foreach ($name in $names) { "<li><span>$(ConvertTo-AccessReviewHtmlText $name)</span></li>" }
+	"<ol class=`"stage-flow`" role=`"list`" aria-label=`"Recorded stage order`">$($items -join '')</ol>"
+}
+
 function New-AccessReviewHtml {
 	param(
 		[AllowEmptyCollection()][object[]]$Results = @(),
 		[Parameter(Mandatory)][hashtable]$Context
 	)
 
+	$followUpTypes = @('ServicePrincipalOwner', 'ApplicationNonUserAssignment')
 	$Results = @(
-		$Results | Where-Object { $_.TargetType -ne 'ServicePrincipalOwner' -or -not $_.ServicePrincipalId }
-		foreach ($owners in @($Results | Where-Object { $_.TargetType -eq 'ServicePrincipalOwner' -and $_.ServicePrincipalId } |
-			Group-Object -Property ServicePrincipalId, Status)) {
-			$first = $owners.Group[0]
+		$Results | Where-Object { $_.TargetType -notin $followUpTypes -or -not $_.ServicePrincipalId }
+		foreach ($followUp in @($Results | Where-Object { $_.TargetType -in $followUpTypes -and $_.ServicePrincipalId } |
+			Group-Object -Property ServicePrincipalId, TargetType, Status)) {
+			$first = $followUp.Group[0]
 			[pscustomobject]@{
-				TargetType = 'ServicePrincipalOwner'; Target = $first.Target
+				TargetType = $first.TargetType; Target = $first.Target
 				ServicePrincipalId = $first.ServicePrincipalId
 				ServicePrincipalName = $first.ServicePrincipalName
 				Status = $first.Status; Reason = $first.Reason; Role = $first.Role
-				OwnerItems = @($owners.Group)
+				OwnerItems = if ($first.TargetType -eq 'ServicePrincipalOwner') { @($followUp.Group) }
+				AssignmentItems = if ($first.TargetType -eq 'ApplicationNonUserAssignment') { @($followUp.Group) }
 			}
 		}
 	)
@@ -160,8 +175,8 @@ function New-AccessReviewHtml {
 		$null = $body.AppendLine("<div class=`"metric`"><strong>$count</strong><span>$(ConvertTo-AccessReviewHtmlText $status)</span></div>")
 	}
 	$null = $body.AppendLine('</section>')
-	if (@($Results | Where-Object OwnerItems).Count) {
-		$null = $body.AppendLine('<p class="muted">Ownership follow-up is grouped by application and outcome, not counted once per owner. Expand an entry to see its recorded owners. Raw results and logs retain individual ownership records.</p>')
+	if (@($Results | Where-Object { $_.OwnerItems -or $_.AssignmentItems }).Count) {
+		$null = $body.AppendLine('<p class="muted">App follow-up is grouped by application, type and outcome. Open an entry to see individual owners or non-user assignments. Raw results and logs retain each record.</p>')
 	}
 	$groups = @($Results | Where-Object { $_.GroupId -and $_.TargetType -notin @('ApplicationDirectUsers', 'ServicePrincipalOwner', 'ApplicationNonUserAssignment') })
 	$knownGroups = @($groups | Where-Object { $_.GroupCountBasis -eq 'DirectUsers' -and $null -ne $_.MemberCount })
@@ -276,7 +291,7 @@ function New-AccessReviewHtml {
 		if ($null -ne $app.DirectUserIndex) {
 			$result = $Results[$app.DirectUserIndex]
 			$population = if ($null -ne $result.SubjectCount) { "$($result.SubjectCount) directly assigned users" } else { 'Direct-user population unavailable' }
-			$null = $body.AppendLine("<button class=`"link view topology-name`" data-target=`"review-$($app.DirectUserIndex)`">$(ConvertTo-AccessReviewHtmlText $app.Name)</button><span>$(ConvertTo-AccessReviewHtmlText $population)</span><small>Direct-user review: $(ConvertTo-AccessReviewHtmlText (Get-AccessReviewReportOutcome $result))</small><small class=`"topology-stages`">$(ConvertTo-AccessReviewHtmlText $result.StageNames)</small>")
+			$null = $body.AppendLine("<button class=`"link view topology-name`" data-target=`"review-$($app.DirectUserIndex)`">$(ConvertTo-AccessReviewHtmlText $app.Name)</button><span>$(ConvertTo-AccessReviewHtmlText $population)</span><small>Direct-user review: $(ConvertTo-AccessReviewHtmlText (Get-AccessReviewReportOutcome $result))</small>$(ConvertTo-AccessReviewStageFlowHtml $result)")
 		}
 		else {
 			$null = $body.AppendLine("<strong class=`"topology-name`">$(ConvertTo-AccessReviewHtmlText $app.Name)</strong><small>$(if ($null -ne $app.DirectUserCount) { "$($app.DirectUserCount) directly assigned users discovered. " })No direct-user review result recorded.</small>")
@@ -295,8 +310,7 @@ function New-AccessReviewHtml {
 			$population = if ($null -eq $result.MemberCount) { 'Population unavailable' }
 				elseif ($result.GroupCountBasis -eq 'DirectUsers') { "$($result.MemberCount) direct users" }
 				else { "$($result.MemberCount) recorded members; basis unknown" }
-			$stages = if ($result.StageNames) { $result.StageNames } else { 'Stage configuration unavailable' }
-			$null = $body.AppendLine("<button class=`"link view topology-name`" data-target=`"review-$resultIndex`">$(ConvertTo-AccessReviewHtmlText $name)</button><span>$(ConvertTo-AccessReviewHtmlText $population)</span><small class=`"topology-stages`" title=`"$(ConvertTo-AccessReviewHtmlText $stages)`">$(ConvertTo-AccessReviewHtmlText $stages)</small><small>$(ConvertTo-AccessReviewHtmlText (Get-AccessReviewReportOutcome $result))$(if ($result.IsSyncedGroup -eq $true) { ' / synced, report only' })</small>")
+			$null = $body.AppendLine("<button class=`"link view topology-name`" data-target=`"review-$resultIndex`">$(ConvertTo-AccessReviewHtmlText $name)</button><span>$(ConvertTo-AccessReviewHtmlText $population)</span>$(ConvertTo-AccessReviewStageFlowHtml $result)<small>$(ConvertTo-AccessReviewHtmlText (Get-AccessReviewReportOutcome $result))$(if ($result.IsSyncedGroup -eq $true) { ' / synced, report only' })</small>")
 		}
 		else {
 			$name = if ($pathLabels.ContainsKey($id)) { $pathLabels[$id] } else { $id }
@@ -346,6 +360,14 @@ function New-AccessReviewHtml {
 			}
 			$null = $body.AppendLine('</tbody></table></div></details>')
 		}
+		elseif ($result.AssignmentItems) {
+			$null = $body.AppendLine("<p class=`"notice warning`">These non-user assignments require manual follow-up. They are not covered by the application user-access review.</p><details><summary>Recorded non-user assignments ($($result.AssignmentItems.Count))</summary><div class=`"table-wrap`"><table><thead><tr><th>Principal</th><th>Type</th><th>Object ID</th><th>Assignment ID</th><th>App role ID</th><th>Notes</th></tr></thead><tbody>")
+			foreach ($assignment in $result.AssignmentItems) {
+				$principalName = if ($assignment.PrincipalDisplayName) { $assignment.PrincipalDisplayName } else { 'Name not recorded' }
+				$null = $body.AppendLine("<tr><td>$(ConvertTo-AccessReviewHtmlText $principalName)</td><td>$(ConvertTo-AccessReviewHtmlText $assignment.PrincipalType)</td><td>$(ConvertTo-AccessReviewHtmlText $assignment.PrincipalId)</td><td>$(ConvertTo-AccessReviewHtmlText $assignment.AssignmentId)</td><td>$(ConvertTo-AccessReviewHtmlText $assignment.AppRoleId)</td><td>$(ConvertTo-AccessReviewHtmlText $assignment.Reason)</td></tr>")
+			}
+			$null = $body.AppendLine('</tbody></table></div></details>')
+		}
 		elseif ($config -and @($config.Stages).Count) {
 			$label = if ($result.Status -eq 'Created') { 'Submitted configuration (not fetched live)' } else { 'Computed configuration (not evidence of creation)' }
 			$null = $body.AppendLine("<h4>$label</h4><p>Frequency: $(ConvertTo-AccessReviewHtmlText $config.Frequency). First planned instance: $(ConvertTo-AccessReviewHtmlText $config.StartDate), $([int]$config.InstanceDurationInDays) days.</p>")
@@ -362,10 +384,12 @@ function New-AccessReviewHtml {
 				elseif ($config.AutoApplyDecisionsEnabled -eq $false) { 'Report only. Remediate denied access in on-premises AD for synced groups.' }
 				else { 'Application behavior unavailable.' }
 			$null = $body.AppendLine("<p class=`"notice`">$handling Default decision: $(ConvertTo-AccessReviewHtmlText $config.DefaultDecision).</p><div class=`"timeline`">")
+			$stageNumber = 0
 			foreach ($stage in $config.Stages) {
+				$stageNumber++
 				$days = [int]$stage.DurationInDays
 				if ($days -lt 1) { throw 'Recorded stage durations must be positive whole days.' }
-				$null = $body.AppendLine("<div class=`"stage`" style=`"flex-grow:$days`"><strong>$(ConvertTo-AccessReviewHtmlText $stage.Name)</strong><span>$days days</span><small>$(ConvertTo-AccessReviewHtmlText $stage.StartDate) &rarr; $(ConvertTo-AccessReviewHtmlText $stage.EndDate)</small></div>")
+				$null = $body.AppendLine("<div class=`"stage`" style=`"flex-grow:$days`"><small>Stage $stageNumber</small><strong>$(ConvertTo-AccessReviewHtmlText $stage.Name)</strong><span>$days days</span><small>$(ConvertTo-AccessReviewHtmlText $stage.StartDate) &rarr; $(ConvertTo-AccessReviewHtmlText $stage.EndDate)</small></div>")
 			}
 			$null = $body.AppendLine('</div><p class="muted">Dates are planned schedule boundaries, not inclusive day counts or live stage dates. Progression is conditional, not unanimous approval.</p><details><summary>Reviewer, scope and progression details</summary>')
 			foreach ($stage in $config.Stages) {
@@ -379,7 +403,7 @@ function New-AccessReviewHtml {
 		}
 		else {
 			$null = $body.AppendLine('<p class="notice">Detailed configuration unavailable. No durations, reviewer routing or live stage dates have been inferred from names, old defaults or current settings.</p>')
-			if ($result.StageNames) { $null = $body.AppendLine("<p>Recorded stage names only: $(ConvertTo-AccessReviewHtmlText $result.StageNames)</p>") }
+			if ($result.StageNames) { $null = $body.AppendLine("<p>Recorded stage names only:</p>$(ConvertTo-AccessReviewStageFlowHtml $result)") }
 		}
 		$null = $body.AppendLine('<details><summary>All recorded discovery paths</summary><ul>')
 		foreach ($path in @($result.GroupPaths)) {
@@ -409,7 +433,9 @@ function New-AccessReviewHtml {
 		$name = if ($result.ReviewName) { $result.ReviewName } elseif ($result.Target) { $result.Target } else { 'Unnamed recorded item' }
 		$outcome = ConvertTo-AccessReviewHtmlText (Get-AccessReviewReportOutcome $result)
 		$type = ConvertTo-AccessReviewHtmlText $result.TargetType
+		$typeLabel = if ($result.TargetType -eq 'ApplicationNonUserAssignment') { 'Non-user app-role assignments' } else { $type }
 		$population = if ($result.OwnerItems) { "$($result.OwnerItems.Count) recorded owner$(if ($result.OwnerItems.Count -ne 1) { 's' })" }
+		elseif ($result.AssignmentItems) { "$($result.AssignmentItems.Count) recorded non-user assignment$(if ($result.AssignmentItems.Count -ne 1) { 's' })" }
 		elseif ($null -ne $result.MemberCount) {
 			if ($result.GroupCountBasis -eq 'DirectUsers') { "$($result.MemberCount) direct users" }
 			else { "$($result.MemberCount) recorded members (basis unknown)" }
@@ -429,7 +455,8 @@ function New-AccessReviewHtml {
 		) -join ' '
 		$searchText = ConvertTo-AccessReviewHtmlText (($result | ConvertTo-Json -Depth 10 -Compress))
 		$groupLink = if ($result.GroupId) { New-AccessReviewGroupLink -GroupId $result.GroupId } else { '' }
-		$null = $body.AppendLine("<tr data-status=`"$outcome`" data-type=`"$type`" data-search=`"$searchText`"><td><button class=`"link view`" data-target=`"review-$i`">$(ConvertTo-AccessReviewHtmlText $name)</button><small>$type</small>$groupLink</td><td>$(ConvertTo-AccessReviewHtmlText $population)</td><td>$(ConvertTo-AccessReviewHtmlText $result.StageNames)</td><td><span class=`"badge`">$outcome</span></td><td>$(ConvertTo-AccessReviewHtmlText $notes)</td></tr>")
+		$stageFlow = if ($result.TargetType -in $followUpTypes) { '<small>Not applicable</small>' } else { ConvertTo-AccessReviewStageFlowHtml $result }
+		$null = $body.AppendLine("<tr data-status=`"$outcome`" data-type=`"$type`" data-search=`"$searchText`"><td><button class=`"link view`" data-target=`"review-$i`">$(ConvertTo-AccessReviewHtmlText $name)</button><small>$typeLabel</small>$groupLink</td><td>$(ConvertTo-AccessReviewHtmlText $population)</td><td>$stageFlow</td><td><span class=`"badge`">$outcome</span></td><td>$(ConvertTo-AccessReviewHtmlText $notes)</td></tr>")
 	}
 	$null = $body.AppendLine('</tbody></table></div><div id="pagination"><button id="previous" type="button">Previous</button><span id="page"></span><button id="next" type="button">Next</button></div><noscript><p>JavaScript is required for filtering, pagination, theme switching and selecting details. All inventory rows remain visible without JavaScript.</p></noscript></section><footer>Offline report. Existing reviews were not modified by report generation. Counts describe discovery-time populations, not guaranteed current membership.</footer></main>')
 	$template = @'
