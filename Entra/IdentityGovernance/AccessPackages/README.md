@@ -182,7 +182,10 @@ by disabling manager approval for everyone.
 Each row emits an object with package/policy/catalog IDs, user count, stage
 count, status, reason and the required manual action. Skipped/failed rows
 and totals are printed separately without mixing summary text into the result
-pipeline, so results can be captured or exported:
+pipeline, so results can be captured or exported. Previewed and created
+packages show the approvers for each stage, including the fallback if the
+recipient has no manager. The results include that text in `ApprovalStageDetails`
+alongside the numeric `ApprovalStages` count:
 
 ```powershell
 $results = .\Create-AccessPackage.ps1 -CsvPath '.\access-packages.csv' `

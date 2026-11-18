@@ -40,7 +40,8 @@ approver" in the Entra portal for each new policy. The public Graph policy
 schema does not expose this switch. The script does not claim to configure it.
 
 Existing packages with the same name in the catalog are skipped, not updated.
-Each row produces a result object; skipped/failed rows and a summary are printed.
+Each row produces a result object. The console shows approvers by stage for
+created and previewed packages, plus skipped/failed rows and a summary.
 WhatIf performs reads and validation but never writes to Microsoft Graph.
 .EXAMPLE
 .\Create-AccessPackage.ps1 -CsvPath '.\access-packages.csv' -CatalogName 'Business applications' -FallbackApproverIds '11111111-1111-1111-1111-111111111111' -WhatIf
@@ -239,11 +240,11 @@ function ConvertTo-UserApprovers {
 		}
 		$key = "$id"
 		if (-not $validatedUsers.ContainsKey($key)) {
-			$user = Invoke-PackageGraphRequest -Method GET -Uri "/v1.0/users/$id`?`$select=id,displayName" -OutputType Hashtable
+			$user = Invoke-PackageGraphRequest -Method GET -Uri "/v1.0/users/$id`?`$select=id,displayName,userPrincipalName" -OutputType Hashtable
 			if ($user.id -ne $key) {
 				throw "Unable to validate approver user '$id'."
 			}
-			$validatedUsers[$key] = $true
+			$validatedUsers[$key] = $user
 		}
 		@{ '@odata.type' = '#microsoft.graph.singleUser'; userId = $key }
 	}
@@ -261,20 +262,21 @@ function Get-WorkbookApproverIds {
 		}
 		elseif ($value -match '^[^\s@]+@[^\s@]+$') {
 			$address = $value.Replace("'", "''")
-			$users = @(Get-GraphCollection -Uri '/v1.0/users' -Filter "userPrincipalName eq '$address' or mail eq '$address'" -Select 'id,userPrincipalName,mail' |
+			$users = @(Get-GraphCollection -Uri '/v1.0/users' -Filter "userPrincipalName eq '$address' or mail eq '$address'" -Select 'id,userPrincipalName,mail,displayName' |
 				Where-Object { $_.userPrincipalName -eq $value -or $_.mail -eq $value })
 			$userIds = @{}
 			foreach ($user in $users) {
 				if (-not [guid]::TryParse($user['id'], [ref]$id) -or $id -eq [guid]::Empty) {
 					throw "$Column address '$value' matched an Entra user, but Graph did not return a valid user object ID. Specify the user object ID."
 				}
-				$userIds["$id"] = $id
+				$userIds["$id"] = $user
 			}
 			if ($userIds.Count -ne 1) {
 				throw "$Column address '$value' matched $($userIds.Count) Entra users by UPN or mail. Specify the user object ID."
 			}
-			$id = @($userIds.Values)[0]
-			$validatedUsers["$id"] = $true
+			$user = @($userIds.Values)[0]
+			$id = [guid]$user['id']
+			$validatedUsers["$id"] = $user
 			$id
 		}
 		else { throw "$Column contains '$value'; use Entra user object IDs, UPNs, or mail addresses." }
@@ -343,6 +345,20 @@ function New-PackageApprovalStage {
 		primaryApprovers = @($Approvers)
 		fallbackPrimaryApprovers = @($Fallbacks)
 	}
+}
+
+function Get-PackageApproverLabel {
+	param([hashtable]$Approver)
+
+	if ($Approver.'@odata.type' -eq '#microsoft.graph.targetManager') {
+		return "Recipient's direct manager"
+	}
+	$user = $validatedUsers[$Approver.userId]
+	$identity = if ($user.userPrincipalName) { $user.userPrincipalName }
+		elseif ($user.mail) { $user.mail }
+		else { $Approver.userId }
+	if ($user.displayName) { "$($user.displayName) <$identity>" }
+	else { $identity }
 }
 
 function Get-GroupResource {
@@ -419,6 +435,7 @@ foreach ($row in $rows) {
 		PolicyId = $null
 		UserCount = $null
 		ApprovalStages = $null
+		ApprovalStageDetails = $null
 		Status = $null
 		Reason = $null
 		ManualAction = $null
@@ -541,6 +558,16 @@ foreach ($row in $rows) {
 				$stages += New-PackageApprovalStage -Approvers @(ConvertTo-UserApprovers -Ids $thirdIds)
 			}
 			$result.ApprovalStages = $stages.Count
+			$result.ApprovalStageDetails = @(for ($i = 0; $i -lt $stages.Count; $i++) {
+				$stage = $stages[$i]
+				$approvers = @($stage.primaryApprovers | ForEach-Object { Get-PackageApproverLabel $_ }) -join '; '
+				$line = "Stage $($i + 1): $approvers"
+				if ($stage.fallbackPrimaryApprovers.Count) {
+					$fallbacks = @($stage.fallbackPrimaryApprovers | ForEach-Object { Get-PackageApproverLabel $_ }) -join '; '
+					$line += " (if no manager: $fallbacks)"
+				}
+				$line
+			}) -join [Environment]::NewLine
 
 			$groupLabels = @($groupPlans | ForEach-Object { "$($_.Group.DisplayName) [$($_.Group.Id)]" }) -join '; '
 			if ($PSCmdlet.ShouldProcess(
@@ -626,6 +653,9 @@ foreach ($row in $rows) {
 			if ($result.Status -in 'Created', 'Would be created') {
 				$result.ManualAction = $manualAction
 				$processedNames[$name] = $true
+				Write-Host "$($result.Status): $name"
+				Write-Host 'Approval for new and extension requests for directory members (excluding guests):'
+				Write-Host $result.ApprovalStageDetails
 			}
 		}
 	}

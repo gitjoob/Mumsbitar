@@ -58,7 +58,7 @@ Finance reporting - Read reports,View financial reports.,$script:groupId,$script
 			DeniedUserId = $null
 			NamedGroups = @()
 			AddressUsers = @(
-				@{ id = $script:ownerId; userPrincipalName = 'owner@example.test'; mail = 'owner-mail@example.test' }
+				@{ id = $script:ownerId; displayName = 'Application Owner'; userPrincipalName = 'owner@example.test'; mail = 'owner-mail@example.test' }
 				@{ id = $script:fallbackId; userPrincipalName = 'fallback@example.test'; mail = 'fallback-mail@example.test' }
 			)
 			Group = @{
@@ -125,7 +125,7 @@ Finance reporting - Read reports,View financial reports.,$script:groupId,$script
 					if ($id -eq $fixture.DeniedUserId) { throw 'User not found or forbidden.' }
 					return @{ id = $id; displayName = 'Approver' }
 				}
-				if ($decodedUri -match "/users\?\`$filter=userPrincipalName eq '([^']+)' or mail eq '\1'&\`$select=id,userPrincipalName,mail$") {
+				if ($decodedUri -match "/users\?\`$filter=userPrincipalName eq '([^']+)' or mail eq '\1'&\`$select=id,userPrincipalName,mail,displayName$") {
 					$address = $Matches[1]
 					return @{ value = @($fixture.AddressUsers | Where-Object { $_.userPrincipalName -eq $address -or $_.mail -eq $address }) }
 				}
@@ -243,6 +243,24 @@ Finance reporting - Read reports,View financial reports.,$script:groupId,$script
 			$stages | Should -HaveCount 2
 			$stages[0].primaryApprovers[0].'@odata.type' | Should -Be '#microsoft.graph.targetManager'
 			$stages[1].primaryApprovers[0].userId | Should -Be $script:ownerId
+		}
+
+		It 'prints the two planned approvers and manager fallback in WhatIf without writing' {
+			$script:csvPath = New-WorkbookFixture @{ GroupId = $script:groupId; 'Approver 2' = 'owner-mail@example.test'; 'Approver 3' = 'NA' }
+			$output = @(Invoke-Creation -Preview 6>&1)
+			$result = @($output | Where-Object { $_ -isnot [System.Management.Automation.InformationRecord] })
+			$console = @($output | Where-Object { $_ -is [System.Management.Automation.InformationRecord] }) -join "`n"
+			$result | Should -HaveCount 1
+			$result[0].Status | Should -Be 'Would be created'
+			$expected = @(
+				"Stage 1: Recipient's direct manager (if no manager: Approver <$script:fallbackId>)"
+				'Stage 2: Application Owner <owner@example.test>'
+			) -join [Environment]::NewLine
+			$result[0].ApprovalStageDetails | Should -Be $expected
+			$console | Should -Match ([regex]::Escape($expected))
+			$console | Should -Match 'new and extension requests for directory members \(excluding guests\)'
+			$console | Should -Not -Match 'Stage 3:'
+			$script:graphFixture.Writes | Should -HaveCount 0
 		}
 
 		It 'stops on an unreadable workbook before worksheet validation or Graph access' {
