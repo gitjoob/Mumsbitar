@@ -60,6 +60,7 @@ button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible{ou
 .warning{color:var(--warning);background:var(--warn-bg);border-color:var(--warning)}
 .muted,small,footer{color:var(--muted)}small{display:block}.metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin:22px 0}
 .metric,.panel{background:var(--panel);border:1px solid var(--line);border-radius:10px}.metric{padding:12px 16px}.metric strong{display:block;font-size:26px;color:var(--accent)}.metric span{font-size:12px}
+.status-dashboard-layout{display:flex;align-items:center;gap:32px;flex-wrap:wrap}.status-pie{width:220px;aspect-ratio:1;border:1px solid var(--line);border-radius:50%;flex:0 0 220px}.status-legend{list-style:none;padding:0;margin:0;min-width:220px;flex:1}.status-legend li{display:grid;grid-template-columns:16px minmax(0,1fr) auto auto;gap:12px;align-items:center;padding:8px 0;border-bottom:1px solid var(--line)}.status-label{overflow-wrap:anywhere}.status-swatch{width:12px;height:12px;border:1px solid var(--line);border-radius:3px}
 .panel{padding:24px;margin-top:22px;scroll-margin-top:15px}nav{display:flex;gap:22px;flex-wrap:wrap}
 .entra-link{display:block;font-size:12px;margin-top:6px}.topology-controls{display:flex;align-items:end;justify-content:space-between;gap:14px;flex-wrap:wrap}.topology-controls label{font-size:12px;max-width:100%}.topology-controls select{display:block;max-width:100%;margin-top:5px}.topology-controls button{padding:6px 10px}
 #topology-viewport{max-height:700px;overflow:auto;border:1px solid var(--line);border-radius:8px;background:var(--bg)}#topology-space{position:relative}#topology-canvas{position:relative;transform-origin:top left}#topology-lines{position:absolute;inset:0;pointer-events:none;overflow:visible}.topology-edge{stroke:var(--accent);stroke-width:2;fill:none}#topology-arrow path{fill:var(--accent)}
@@ -112,6 +113,19 @@ function New-AccessReviewHtml {
 		[Parameter(Mandatory)][hashtable]$Context
 	)
 
+	$Results = @(
+		$Results | Where-Object { $_.TargetType -ne 'ServicePrincipalOwner' -or -not $_.ServicePrincipalId }
+		foreach ($owners in @($Results | Where-Object { $_.TargetType -eq 'ServicePrincipalOwner' -and $_.ServicePrincipalId } |
+			Group-Object -Property ServicePrincipalId, Status)) {
+			$first = $owners.Group[0]
+			[pscustomobject]@{
+				TargetType = 'ServicePrincipalOwner'; Target = $first.Target
+				ServicePrincipalId = $first.ServicePrincipalId
+				Status = $first.Status; Reason = $first.Reason; Role = $first.Role
+				OwnerItems = @($owners.Group)
+			}
+		}
+	)
 	$body = [System.Text.StringBuilder]::new()
 	$null = $body.AppendLine('<main><header><div><p class="eyebrow">Identity governance / local report</p><h1>Access review campaign</h1></div><div class="theme-control"><button id="theme" type="button" role="switch" aria-checked="false" aria-label="Dark mode">Dark mode</button><small id="theme-notice" role="status"></small></div></header>')
 	$mode = ConvertTo-AccessReviewHtmlText $Context.Mode
@@ -134,6 +148,9 @@ function New-AccessReviewHtml {
 		$null = $body.AppendLine("<div class=`"metric`"><strong>$count</strong><span>$(ConvertTo-AccessReviewHtmlText $status)</span></div>")
 	}
 	$null = $body.AppendLine('</section>')
+	if (@($Results | Where-Object OwnerItems).Count) {
+		$null = $body.AppendLine('<p class="muted">Ownership follow-up is grouped by application and outcome, not counted once per owner. Expand an entry to see its recorded owners. Raw results and logs retain individual ownership records.</p>')
+	}
 	$groups = @($Results | Where-Object { $_.GroupId -and $_.TargetType -notin @('ApplicationDirectUsers', 'ServicePrincipalOwner', 'ApplicationNonUserAssignment') })
 	$knownGroups = @($groups | Where-Object { $_.GroupCountBasis -eq 'DirectUsers' -and $null -ne $_.MemberCount })
 	$unknownGroups = @($groups | Where-Object { $_.GroupCountBasis -ne 'DirectUsers' -and $null -ne $_.MemberCount })
@@ -245,7 +262,15 @@ function New-AccessReviewHtml {
 			$null = $body.AppendLine('</div><p class="notice">A child review covers its direct users, not its membership in the parent. Removal can affect every resource using the group. Nested groups do not necessarily convey enterprise-application assignments.</p>')
 		}
 		$config = $result.ReviewConfiguration
-		if ($config -and @($config.Stages).Count) {
+		if ($result.OwnerItems) {
+			$null = $body.AppendLine("<p class=`"notice warning`">Ownership requires manual review; these owners are not subjects certified by the application user-access review. No ownership changes are applied.</p><details><summary>Recorded owners ($($result.OwnerItems.Count))</summary><div class=`"table-wrap`"><table><thead><tr><th>Owner</th><th>Type</th><th>Object ID</th><th>Notes</th></tr></thead><tbody>")
+			foreach ($owner in $result.OwnerItems) {
+				$name = if ($owner.PrincipalDisplayName) { $owner.PrincipalDisplayName } else { 'Name not recorded' }
+				$null = $body.AppendLine("<tr><td>$(ConvertTo-AccessReviewHtmlText $name)</td><td>$(ConvertTo-AccessReviewHtmlText $owner.PrincipalType)</td><td>$(ConvertTo-AccessReviewHtmlText $owner.PrincipalId)</td><td>$(ConvertTo-AccessReviewHtmlText $owner.Reason)</td></tr>")
+			}
+			$null = $body.AppendLine('</tbody></table></div></details>')
+		}
+		elseif ($config -and @($config.Stages).Count) {
 			$label = if ($result.Status -eq 'Created') { 'Submitted configuration (not fetched live)' } else { 'Computed configuration (not evidence of creation)' }
 			$null = $body.AppendLine("<h4>$label</h4><p>Frequency: $(ConvertTo-AccessReviewHtmlText $config.Frequency). First planned instance: $(ConvertTo-AccessReviewHtmlText $config.StartDate), $([int]$config.InstanceDurationInDays) days.</p>")
 			if ($config.DescriptionForReviewers) {
@@ -308,7 +333,8 @@ function New-AccessReviewHtml {
 		$name = if ($result.ReviewName) { $result.ReviewName } elseif ($result.Target) { $result.Target } else { 'Unnamed recorded item' }
 		$outcome = ConvertTo-AccessReviewHtmlText (Get-AccessReviewReportOutcome $result)
 		$type = ConvertTo-AccessReviewHtmlText $result.TargetType
-		$population = if ($null -ne $result.MemberCount) {
+		$population = if ($result.OwnerItems) { "$($result.OwnerItems.Count) recorded owner$(if ($result.OwnerItems.Count -ne 1) { 's' })" }
+		elseif ($null -ne $result.MemberCount) {
 			if ($result.GroupCountBasis -eq 'DirectUsers') { "$($result.MemberCount) direct users" }
 			else { "$($result.MemberCount) recorded members (basis unknown)" }
 		}
@@ -554,10 +580,13 @@ function Write-AccessReviewReport {
 }
 
 function ConvertTo-AccessReviewStatusUsersHtml {
-	param([object[]]$Users)
+	param([object[]]$Users, [switch]$ShowDepartment)
 	$lines = @(
 		foreach ($user in @($Users | Where-Object { $_ })) {
-			"<li><strong>$(ConvertTo-AccessReviewHtmlText $user.DisplayName)</strong> $(ConvertTo-AccessReviewHtmlText $user.UserPrincipalName)<small>$(ConvertTo-AccessReviewHtmlText $user.Id) | $(ConvertTo-AccessReviewHtmlText $user.ProfileSource)</small>$(if ($user.Error) { '<span class="warning">' + (ConvertTo-AccessReviewHtmlText $user.Error) + '</span>' })</li>"
+			$department = if ($user.Error) { 'Unavailable (profile lookup failed)' }
+				elseif ([string]::IsNullOrWhiteSpace($user.Department)) { 'Not set / not returned' }
+				else { $user.Department }
+			"<li><strong>$(ConvertTo-AccessReviewHtmlText $user.DisplayName)</strong> $(ConvertTo-AccessReviewHtmlText $user.UserPrincipalName)$(if ($ShowDepartment) { '<small class="reviewer-department">Department (current directory): ' + (ConvertTo-AccessReviewHtmlText $department) + '</small>' })<small>$(ConvertTo-AccessReviewHtmlText $user.Id) | $(ConvertTo-AccessReviewHtmlText $user.ProfileSource)</small>$(if ($user.Error) { '<span class="warning">' + (ConvertTo-AccessReviewHtmlText $user.Error) + '</span>' })</li>"
 		}
 	)
 	if (-not $lines.Count) { return '<p class="muted">No individual user identities returned in this list.</p>' }
@@ -572,7 +601,7 @@ function ConvertTo-AccessReviewStatusScopesHtml {
 		if ($scope.Mode -in @('Self-review / default reviewer behavior', 'Line managers')) {
 			'<p class="muted">Individual users are listed in the instance and runtime-stage decision tables below, when available.</p>'
 		}
-		else { ConvertTo-AccessReviewStatusUsersHtml $scope.Users }
+		else { ConvertTo-AccessReviewStatusUsersHtml $scope.Users -ShowDepartment }
 		"<details><summary>Technical reviewer rule</summary><code>$(ConvertTo-AccessReviewHtmlText $scope.Query)</code>$(if ($scope.RawScope) { '<pre>' + (ConvertTo-AccessReviewHtmlText ($scope.RawScope | ConvertTo-Json -Depth 10)) + '</pre>' })</details>"
 	}) -join '')
 }
@@ -588,7 +617,7 @@ function ConvertTo-AccessReviewStatusOwnersHtml {
 		if ($resource.MetadataError -or $resource.OwnersError) {
 			"<p class=`"notice warning`">Owner/resource lookup incomplete: $(ConvertTo-AccessReviewHtmlText $resource.MetadataError) $(ConvertTo-AccessReviewHtmlText $resource.OwnersError)</p>"
 		}
-		ConvertTo-AccessReviewStatusUsersHtml $resource.Owners
+		ConvertTo-AccessReviewStatusUsersHtml $resource.Owners -ShowDepartment
 		foreach ($other in $resource.OtherOwners) {
 			"<p class=`"muted`">Non-user/unclassified owner, not listed as a human reviewer: $(ConvertTo-AccessReviewHtmlText $other.displayName) <code>$(ConvertTo-AccessReviewHtmlText $other.id)</code> $(ConvertTo-AccessReviewHtmlText $other.'@odata.type')</p>"
 		}
@@ -601,7 +630,7 @@ function ConvertTo-AccessReviewStatusSummaryHtml {
 	$percent = if ($null -ne $Summary.Completion) { "$($Summary.Completion)%" } else { 'n/a (no items)' }
 	$counts = ConvertTo-AccessReviewHtmlText ($Summary.DecisionCounts | ConvertTo-Json -Compress)
 	$apply = ConvertTo-AccessReviewHtmlText ($Summary.ApplyResults | ConvertTo-Json -Compress)
-	"<p><strong>$($Summary.Recorded) / $($Summary.Total)</strong> recorded outcomes ($percent). Approve: $($Summary.Approve); Deny: $($Summary.Deny); Don't know: $($Summary.DontKnow); Not reviewed: $($Summary.NotReviewed); Other: $($Summary.Other).</p><details><summary>Decision and application-result breakdown</summary><pre>$counts</pre><p>Application results are not all removals; successful application can also retain access.</p><pre>$apply</pre></details><h4>Recorded decision actors</h4>$(ConvertTo-AccessReviewStatusUsersHtml $Summary.Actors)"
+	"<p><strong>$($Summary.Recorded) / $($Summary.Total)</strong> recorded outcomes ($percent). Approve: $($Summary.Approve); Deny: $($Summary.Deny); Don't know: $($Summary.DontKnow); Not reviewed: $($Summary.NotReviewed); Other: $($Summary.Other).</p><details><summary>Decision and application-result breakdown</summary><pre>$counts</pre><p>Application results are not all removals; successful application can also retain access.</p><pre>$apply</pre></details><h4>Recorded decision actors</h4>$(ConvertTo-AccessReviewStatusUsersHtml $Summary.Actors -ShowDepartment)"
 	'<h4>Individual users and decisions</h4>'
 	if (-not @($Summary.Items | Where-Object { $_ }).Count) {
 		'<p class="muted">No individual decision records returned.</p>'
@@ -613,13 +642,45 @@ function ConvertTo-AccessReviewStatusSummaryHtml {
 	if ($Summary.IncludeManagers) { '<th>Current line manager (directory snapshot)</th>' }
 	'<th>Reviewed (UTC)</th><th>Application result</th></tr></thead><tbody>'
 	foreach ($item in $Summary.Items) {
-		"<tr><td>$(if ($item.Subject) { ConvertTo-AccessReviewStatusUsersHtml @($item.Subject) } else { 'Subject identity unavailable in the review record.' })</td><td>$(ConvertTo-AccessReviewHtmlText $item.Decision)</td><td>$(if ($item.ReviewedBy) { ConvertTo-AccessReviewStatusUsersHtml @($item.ReviewedBy) } else { 'No recorded decision-maker' })</td>"
+		"<tr><td>$(if ($item.Subject) { ConvertTo-AccessReviewStatusUsersHtml @($item.Subject) } else { 'Subject identity unavailable in the review record.' })</td><td>$(ConvertTo-AccessReviewHtmlText $item.Decision)</td><td>$(if ($item.ReviewedBy) { ConvertTo-AccessReviewStatusUsersHtml @($item.ReviewedBy) -ShowDepartment } else { 'No recorded decision-maker' })</td>"
 		if ($Summary.IncludeManagers) {
-			"<td>$(if ($item.CurrentManager.User) { ConvertTo-AccessReviewStatusUsersHtml @($item.CurrentManager.User) })<small>$(ConvertTo-AccessReviewHtmlText $item.CurrentManager.Note)</small>$(if ($item.CurrentManager.Error) { '<span class="warning">' + (ConvertTo-AccessReviewHtmlText $item.CurrentManager.Error) + '</span>' })$(if (-not $item.CurrentManager) { 'Unavailable / not a user subject' })</td>"
+			"<td>$(if ($item.CurrentManager.User) { ConvertTo-AccessReviewStatusUsersHtml @($item.CurrentManager.User) -ShowDepartment })<small>$(ConvertTo-AccessReviewHtmlText $item.CurrentManager.Note)</small>$(if ($item.CurrentManager.Error) { '<span class="warning">' + (ConvertTo-AccessReviewHtmlText $item.CurrentManager.Error) + '</span>' })$(if (-not $item.CurrentManager) { 'Unavailable / not a user subject' })</td>"
 		}
 		"<td>$(ConvertTo-AccessReviewHtmlText $item.ReviewedDateTime)</td><td>$(ConvertTo-AccessReviewHtmlText $item.ApplyResult)</td></tr>"
 	}
 	'</tbody></table></div>'
+}
+
+function ConvertTo-AccessReviewStatusChartHtml {
+	param([AllowEmptyCollection()][object[]]$Definitions)
+	$heading = '<section id="status-dashboard" class="panel"><h2>Reviews by current status</h2><p class="muted">All matched review definitions returned in this snapshot, counted once each. Historical instances and stages are not counted. Inventory filters do not change this chart.</p>'
+	if (-not $Definitions.Count) { return "$heading<p>No review definitions available for the status chart.</p></section>" }
+	$colors = @{
+		Initializing = '#a66340'; NotStarted = '#7b7f88'; Starting = '#9c6aae'
+		InProgress = '#b51f3b'; Completing = '#d66c42'; Completed = '#237868'
+		AutoReviewing = '#42799a'; AutoReviewed = '#5c628f'; Applying = '#a98118'; Applied = '#386641'
+	}
+	$groups = @($Definitions | Group-Object {
+		if ([string]::IsNullOrWhiteSpace($_.Status)) { 'Unavailable' } else { [string]$_.Status }
+	} | Sort-Object Name)
+	$stops = [System.Collections.Generic.List[string]]::new()
+	$legend = [System.Text.StringBuilder]::new()
+	$labels = [System.Collections.Generic.List[string]]::new()
+	$position = 0
+	$culture = [System.Globalization.CultureInfo]::InvariantCulture
+	foreach ($group in $groups) {
+		$start = (100.0 * $position / $Definitions.Count).ToString('0.######', $culture)
+		$position += $group.Count
+		$end = (100.0 * $position / $Definitions.Count).ToString('0.######', $culture)
+		$percent = (100.0 * $group.Count / $Definitions.Count).ToString('0.#', $culture)
+		$color = if ($colors.ContainsKey($group.Name)) { $colors[$group.Name] } else { '#737373' }
+		$stops.Add("$color $start% $end%")
+		$labels.Add("$($group.Name): $($group.Count) ($percent%)")
+		$name = ConvertTo-AccessReviewHtmlText $group.Name
+		$null = $legend.AppendLine("<li data-review-status=`"$name`" data-count=`"$($group.Count)`"><span class=`"status-swatch`" style=`"background:$color`" aria-hidden=`"true`"></span><span class=`"status-label`">$name</span><strong>$($group.Count)</strong><span>$percent%</span></li>")
+	}
+	$label = ConvertTo-AccessReviewHtmlText ("Reviews by current status. " + ($labels -join '; '))
+	"$heading<div class=`"status-dashboard-layout`"><div class=`"status-pie`" role=`"img`" aria-label=`"$label`" style=`"background:conic-gradient($($stops -join ', '))`"></div><ul class=`"status-legend`" aria-label=`"Review status counts and percentages`">$legend</ul></div></section>"
 }
 
 function New-AccessReviewStatusHtml {
@@ -634,7 +695,7 @@ function New-AccessReviewStatusHtml {
 	$other = [long](($known | ForEach-Object { $_.Summary.Other } | Measure-Object -Sum).Sum)
 	$null = $body.AppendLine('<main><header><div><p class="eyebrow">Identity governance / read-only snapshot</p><h1>Access review status</h1></div><div class="theme-control"><button id="theme" type="button" role="switch" aria-checked="false" aria-label="Dark mode">Dark mode</button><small id="theme-notice" role="status"></small></div></header>')
 	$null = $body.AppendLine("<p>Tenant: $(ConvertTo-AccessReviewHtmlText $Report.TenantId)<br>Collected: $(ConvertTo-AccessReviewHtmlText $Report.StartedAt) to $(ConvertTo-AccessReviewHtmlText $Report.FinishedAt)<br>Literal prefixes: $(ConvertTo-AccessReviewHtmlText ($Report.Prefixes -join ', '))</p>")
-	$null = $body.AppendLine('<p class="notice">All historical instances returned by Graph. This is a read-only, non-transactional snapshot, not proof of certification or removal. Decision totals below count instance items only, not repeated stage tasks or unique people. Recorded outcomes include Approve, Deny and Don&#39;t know, and may include automatic/default decisions. Names, sign-in addresses and IDs are private.</p>')
+	$null = $body.AppendLine('<p class="notice">All historical instances returned by Graph. This is a read-only, non-transactional snapshot, not proof of certification or removal. Decision totals below count instance items only, not repeated stage tasks or unique people. Recorded outcomes include Approve, Deny and Don&#39;t know, and may include automatic/default decisions. Names, sign-in addresses, departments and IDs are private.</p>')
 	if (-not $Report.Completed -or $Report.Issues.Count) {
 		$null = $body.AppendLine("<p class=`"notice warning`" role=`"alert`"><strong>Partial data / collection issues.</strong> $($Report.Issues.Count) issue(s). Unavailable data is not treated as zero. See collection issues below.</p>")
 	}
@@ -648,6 +709,7 @@ function New-AccessReviewStatusHtml {
 		$null = $body.AppendLine("<div class=`"metric`"><strong>$($metric[1])</strong><span>$(ConvertTo-AccessReviewHtmlText $metric[0])</span></div>")
 	}
 	$null = $body.AppendLine("</section><p class=`"muted`">Decision-count coverage: $($known.Count) of $($instances.Count) instances. Future/current configured stages and runtime stages are shown separately. Current configuration and directory owners are not historical assignment snapshots.</p>")
+	$null = $body.AppendLine((ConvertTo-AccessReviewStatusChartHtml -Definitions @($Report.Definitions)))
 	$null = $body.AppendLine('<section class="panel"><h2>Summary by prefix</h2><div class="table-wrap"><table><thead><tr><th>Prefix</th><th>Definitions</th><th>Instances</th><th>Known / all instances</th><th>Items</th><th>Recorded outcomes</th><th>Not reviewed</th></tr></thead><tbody>')
 	foreach ($group in @($Report.Definitions | Group-Object Prefix | Sort-Object Name)) {
 		$groupInstances = @($group.Group | ForEach-Object { $_.Instances })
@@ -657,7 +719,7 @@ function New-AccessReviewStatusHtml {
 		$pending = [long](($groupKnown | ForEach-Object { $_.Summary.NotReviewed } | Measure-Object -Sum).Sum)
 		$null = $body.AppendLine("<tr><td>$(ConvertTo-AccessReviewHtmlText $group.Name)</td><td>$($group.Count)</td><td>$($groupInstances.Count)</td><td>$($groupKnown.Count) / $($groupInstances.Count)</td><td>$sum</td><td>$done</td><td>$pending</td></tr>")
 	}
-	$null = $body.AppendLine('</tbody></table></div></section><section id="inventory" class="panel"><h2>Review and instance inventory</h2><div class="filters"><label>Search reviews, owners or reviewers<input id="search" type="search"></label><label>Prefix<select id="prefix"><option value="">All prefixes</option>')
+	$null = $body.AppendLine('</tbody></table></div></section><section id="inventory" class="panel"><h2>Review and instance inventory</h2><div class="filters"><label>Search reviews, owners, reviewers or departments<input id="search" type="search"></label><label>Prefix<select id="prefix"><option value="">All prefixes</option>')
 	foreach ($prefix in @($Report.Definitions.Prefix | Sort-Object -Unique)) {
 		$text = ConvertTo-AccessReviewHtmlText $prefix
 		$null = $body.AppendLine("<option value=`"$text`">$text</option>")
@@ -698,7 +760,7 @@ function New-AccessReviewStatusHtml {
 				foreach ($field in @('DecisionError', 'ContactError', 'StageError')) {
 					if ($instance.$field) { $null = $details.AppendLine("<p class=`"notice warning`">$(ConvertTo-AccessReviewHtmlText $field): $(ConvertTo-AccessReviewHtmlText $instance.$field)</p>") }
 				}
-				$null = $details.AppendLine("<details open><summary>Recorded instance reviewers (instance-wide, not mapped to stages)</summary><p>Graph's contactedReviewers collection includes reviewers irrespective of notification delivery. This is not a per-stage roster.</p>$(ConvertTo-AccessReviewStatusUsersHtml $instance.ContactedReviewers)</details><h4>Instance reviewer scopes</h4>$(ConvertTo-AccessReviewStatusScopesHtml $instance.Reviewers)<h4>Instance fallbacks</h4>$(ConvertTo-AccessReviewStatusScopesHtml $instance.Fallbacks)<details><summary>Current owners of resources recorded for this instance</summary>$(ConvertTo-AccessReviewStatusOwnersHtml $instance.Resources)</details>")
+				$null = $details.AppendLine("<details open><summary>Recorded instance reviewers (instance-wide, not mapped to stages)</summary><p>Graph's contactedReviewers collection includes reviewers irrespective of notification delivery. This is not a per-stage roster.</p>$(ConvertTo-AccessReviewStatusUsersHtml $instance.ContactedReviewers -ShowDepartment)</details><h4>Instance reviewer scopes</h4>$(ConvertTo-AccessReviewStatusScopesHtml $instance.Reviewers)<h4>Instance fallbacks</h4>$(ConvertTo-AccessReviewStatusScopesHtml $instance.Fallbacks)<details><summary>Current owners of resources recorded for this instance</summary>$(ConvertTo-AccessReviewStatusOwnersHtml $instance.Resources)</details>")
 				$null = $details.AppendLine('<h4>Runtime stages</h4><p class="muted">Sorted by recorded start time and ID; runtime GUIDs are not assumed to map to current configured stage IDs.</p>')
 				if (-not $instance.Stages.Count -and -not $instance.StageError) { $null = $details.AppendLine('<p>No runtime stages returned. Instance-level decisions remain separate; no stage count or future stage status is invented.</p>') }
 				foreach ($stage in $instance.Stages) {
@@ -713,7 +775,7 @@ function New-AccessReviewStatusHtml {
 			$index++
 		}
 	}
-	$null = $body.AppendLine('</tbody></table></div><div id="pagination"><button id="previous" type="button">Previous</button><span id="page"></span><button id="next" type="button">Next</button></div><noscript>JavaScript enables filtering, paging, theme switching and detail selection. Inventory rows remain visible without JavaScript.</noscript></section><section class="panel" id="review-details"><h2>Stages, reviewers and owners</h2><p id="selection-hint">Choose a review instance above. Search also matches reviewer and owner names, sign-in addresses and IDs.</p>')
+	$null = $body.AppendLine('</tbody></table></div><div id="pagination"><button id="previous" type="button">Previous</button><span id="page"></span><button id="next" type="button">Next</button></div><noscript>JavaScript enables filtering, paging, theme switching and detail selection. Inventory rows remain visible without JavaScript.</noscript></section><section class="panel" id="review-details"><h2>Stages, reviewers and owners</h2><p id="selection-hint">Choose a review instance above. Search also matches reviewer and owner names, sign-in addresses, departments and IDs.</p>')
 	$null = $body.AppendLine('<div id="selected-status-detail"></div>')
 	$null = $body.AppendLine('</section><section class="panel"><h2>Collection issues</h2><p>Permission errors, deleted users and unavailable APIs remain visible. Missing data is never proof that no reviewers or owners exist.</p><ul>')
 	foreach ($issue in $Report.Issues) {

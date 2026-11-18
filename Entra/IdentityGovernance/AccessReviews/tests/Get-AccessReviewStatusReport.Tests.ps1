@@ -154,6 +154,28 @@ Describe 'Read-only historical access review status' {
 		$report.Definitions[0].CurrentResources[0].Owners.Count | Should -Be 2
 	}
 
+	It 'includes current departments for configured and runtime owner reviewers and recorded reviewer identities' {
+		$responses["$base/users/$currentOwner`?`$select=id,displayName,userPrincipalName"].department = 'Identity & Operations'
+		$responses["$base/users/$configuredOwner`?`$select=id,displayName,userPrincipalName"].department = 'Finance'
+		$definition.stageSettings[2].reviewers = @(@{ query = './owners' }, @{ query = "/users/$configuredOwner" })
+		foreach ($id in @($oldId, $newId)) {
+			$responses["$instanceRoot/$id/stages"].value[0].reviewers = @(@{ query = './owners' })
+		}
+		$report = & $reporter -HtmlReportPath $outputPath
+		$review = $report.Definitions[0]
+		$review.Configuration[2].Reviewers[0].Users[0].Department | Should -Be 'Identity & Operations'
+		$review.Instances[0].Stages[0].Reviewers[0].Users[0].Department | Should -Be 'Identity & Operations'
+		$review.Instances[0].ContactedReviewers[0].Department | Should -Be 'Finance'
+		$review.Instances[0].ContactedReviewers[0].DisplayName | Should -Be 'Recorded historical owner'
+		Should -Invoke Get-MgUser -Exactly -Times 1 -ParameterFilter { $UserId -eq $currentOwner -and $Property -contains 'Department' }
+		Should -Invoke Get-MgUser -Exactly -Times 1 -ParameterFilter { $UserId -eq $configuredOwner -and $Property -contains 'Department' }
+		$pages = @([regex]::Match((Get-Content $outputPath -Raw), '(?s)<script type="application/json" id="status-details">(.*?)</script>').Groups[1].Value | ConvertFrom-Json)
+		$pages[0] | Should -Match 'Department \(current directory\): Identity &amp; Operations'
+		$pages[0] | Should -Match 'Department \(current directory\): Finance'
+		$pages[0] | Should -Match 'Department \(current directory\): Not set / not returned'
+		$report.Issues.Count | Should -Be 0
+	}
+
 	It 'resolves versioned and absolute named reviewer queries with Get-MgUser rather than displaying only paths' -TestCases @(
 		@{ QueryPrefix = '/v1.0' },
 		@{ QueryPrefix = 'https://graph.microsoft.com/v1.0' }
@@ -182,7 +204,7 @@ Describe 'Read-only historical access review status' {
 			id = $otherSubject; displayName = 'Sam Pending'; userPrincipalName = 'sam@example.test'
 		}
 		$responses["$base/users/$managerId`?`$select=id,displayName,userPrincipalName"] = @{
-			id = $managerId; displayName = 'Current Line Manager'; userPrincipalName = 'manager@example.test'
+			id = $managerId; displayName = 'Current Line Manager'; userPrincipalName = 'manager@example.test'; department = 'Service Delivery'
 		}
 		$managerProfiles[$subjectId] = [pscustomobject]@{ Id = $subjectId; Manager = [pscustomobject]@{ Id = $managerId } }
 		$managerProfiles[$otherSubject] = [pscustomobject]@{ Id = $otherSubject; Manager = $null }
@@ -216,6 +238,7 @@ Describe 'Read-only historical access review status' {
 		$managerItem = ($instance.Stages | Where-Object Id -EQ $managerStageId).Summary.Items[0]
 		$managerItem.ReviewedBy.Id | Should -Be $configuredOwner
 		$managerItem.CurrentManager.User.Id | Should -Be $managerId
+		$managerItem.CurrentManager.User.Department | Should -Be 'Service Delivery'
 		Should -Invoke Get-MgUser -Exactly -Times 1 -ParameterFilter { $UserId -eq $subjectId -and $ExpandProperty -eq 'manager' }
 		Should -Invoke Get-MgUser -Exactly -Times 1 -ParameterFilter { $UserId -eq $subjectId -and -not $ExpandProperty }
 		$html = Get-Content $outputPath -Raw
@@ -223,6 +246,7 @@ Describe 'Read-only historical access review status' {
 		$pages[0] | Should -Match 'Individual users and decisions'
 		$pages[0] | Should -Match 'Sam Pending'
 		$pages[0] | Should -Match 'Current Line Manager'
+		$pages[0] | Should -Match 'Department \(current directory\): Service Delivery'
 		$pages[0] | Should -Match 'not proof of historical or pending stage assignments'
 		$report.Issues.Count | Should -Be 0
 	}
@@ -280,7 +304,7 @@ Describe 'Read-only historical access review status' {
 		$decision.reviewedBy = @{ id = $configuredOwner; displayName = $payload }
 		$decision.reviewedDateTime = $payload
 		$responses["$base/users/$managerId`?`$select=id,displayName,userPrincipalName"] = @{
-			id = $managerId; displayName = $payload; userPrincipalName = 'manager@example.test'
+			id = $managerId; displayName = $payload; userPrincipalName = 'manager@example.test'; department = $payload
 		}
 		$managerProfiles[$subjectId] = [pscustomobject]@{ Id = $subjectId; Manager = [pscustomobject]@{ Id = $managerId } }
 		$null = & $reporter -HtmlReportPath $outputPath
@@ -288,6 +312,7 @@ Describe 'Read-only historical access review status' {
 		$pages = @([regex]::Match($html, '(?s)<script type="application/json" id="status-details">(.*?)</script>').Groups[1].Value | ConvertFrom-Json)
 		$pages[0] | Should -Not -Match '<img'
 		$pages[0] | Should -Match '&lt;/script&gt;&lt;img'
+		$pages[0] | Should -Match 'Department \(current directory\): &lt;/script&gt;&lt;img'
 	}
 
 	It 'counts only instance outcomes in overview metrics and treats unknown outcomes as other' {
@@ -301,6 +326,9 @@ Describe 'Read-only historical access review status' {
 		$current.ApplyResults.AppliedSuccessfully | Should -Be 4
 		(Get-Content $outputPath -Raw) | Should -Match '<strong>7</strong><span>Available instance decision items'
 		(Get-Content $outputPath -Raw) | Should -Match '<strong>4</strong><span>Recorded outcomes'
+		$dashboard = [regex]::Match((Get-Content $outputPath -Raw), '(?s)<section id="status-dashboard".*?</section>').Value
+		$dashboard | Should -Match 'data-review-status="InProgress" data-count="1"'
+		$dashboard | Should -Not -Match 'data-review-status="Completed"'
 	}
 
 	It 'paginates and deduplicates decision items and does not resolve a zero-GUID actor' {
@@ -343,6 +371,9 @@ Describe 'Read-only historical access review status' {
 		$user.Id | Should -Be $configuredOwner
 		$user.Error | Should -Be 'Profile forbidden'
 		$report.Definitions[0].Instances[0].ContactedReviewers[0].DisplayName | Should -Be 'Recorded historical owner'
+		$report.Definitions[0].Instances[0].ContactedReviewers[0].Department | Should -BeNullOrEmpty
+		$pages = @([regex]::Match((Get-Content $outputPath -Raw), '(?s)<script type="application/json" id="status-details">(.*?)</script>').Groups[1].Value | ConvertFrom-Json)
+		$pages[0] | Should -Match 'Department \(current directory\): Unavailable \(profile lookup failed\)'
 		@($requests | Where-Object Uri -Like "*/users/$configuredOwner`?*").Count | Should -Be 1
 	}
 
@@ -373,10 +404,12 @@ Describe 'Read-only historical access review status' {
 		$responses["$base$query/microsoft.graph.user?`$select=id,displayName,userPrincipalName"] = @{ value = @(
 			@{ id = $fallback; displayName = 'Reviewer group member'; userPrincipalName = 'member@example.test' }
 		) }
+		$responses["$base/users/$fallback`?`$select=id,displayName,userPrincipalName"].department = 'People Operations'
 		$report = & $reporter -HtmlReportPath $outputPath
 		$scope = $report.Definitions[0].Configuration[2].Reviewers[0]
 		$scope.Users[0].UserPrincipalName | Should -Be 'member@example.test'
 		$scope.Users[0].ProfileSource | Should -Be 'Current reviewer-group membership'
+		$scope.Users[0].Department | Should -Be 'People Operations'
 		$scope.Note | Should -Match 'not proof of historical'
 	}
 
@@ -437,6 +470,8 @@ Describe 'Read-only historical access review status' {
 		$report.Definitions.Count | Should -Be 0
 		$requests.Count | Should -Be 1
 		Test-Path -LiteralPath $outputPath | Should -BeTrue
+		(Get-Content $outputPath -Raw) | Should -Match 'No review definitions available for the status chart'
+		(Get-Content $outputPath -Raw) | Should -Not -Match 'class="status-pie"'
 	}
 
 	It 'rejects unsafe or repeated collection paging and still exports an explicitly partial report' -TestCases @(

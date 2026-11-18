@@ -1414,7 +1414,74 @@ Describe 'Unified access review creation and local logging' {
 		$result.Status | Should -Be 'Manual review required'
 		$result.DuplicateMatchType | Should -Be 'UncertainResourceScope'
 		$result.Reason | Should -Match 'rather than assume'
+		if ($Kind -eq 'enumeration') {
+			$result.MatchedReviewScope | Should -Match 'instanceEnumerationScope: /groups'
+		}
 		Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times 0
+	}
+
+	It 'does not match access-package coverage to application groups or direct users (kind: <Kind>)' -TestCases @(
+		@{ Kind = 'enumerated packages'; Prefix = '' }
+		@{ Kind = 'versioned enumeration'; Prefix = '/beta' }
+		@{ Kind = 'absolute enumeration'; Prefix = 'https://graph.microsoft.com/v1.0' }
+		@{ Kind = 'nested assignment query'; Prefix = '/v1.0' }
+		@{ Kind = 'empty SDK enumeration'; Prefix = '' }
+	) {
+		param($Kind, $Prefix)
+		$fixture.Assignments += [pscustomobject]@{ PrincipalType = 'User'; PrincipalId = $script:ownerId }
+		$existing = New-ExistingResourceReview
+		if ($Kind -eq 'nested assignment query') {
+			$existing.Scope.query = "$Prefix/identityGovernance/entitlementManagement/accessPackages/$script:groupId/assignments"
+		}
+		elseif ($Kind -eq 'empty SDK enumeration') {
+			$existing.Scope.query = "/identityGovernance/entitlementManagement/accessPackageAssignments?`$filter=accessPackageId eq '$script:groupId'"
+			$existing | Add-Member instanceEnumerationScope ([Microsoft.Graph.PowerShell.Models.MicrosoftGraphAccessReviewScope]::new())
+		}
+		else {
+			$existing.Scope.query = './assignments'
+			$enumeration = [Microsoft.Graph.PowerShell.Models.MicrosoftGraphAccessReviewScope]::new()
+			$enumeration.AdditionalProperties['query'] = "$Prefix/identityGovernance/entitlementManagement/accessPackages/$script:groupId"
+			$existing | Add-Member instanceEnumerationScope $enumeration
+		}
+		$fixture.ExistingReviews = @($existing)
+		$results = @(& $script:testScript -ServicePrincipalId $script:reviewId -Confirm:$false)
+		$results.TargetType | Should -Be @('GroupMembership', 'ApplicationDirectUsers')
+		$results.Status | Should -Be @('Created', 'Created')
+		Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times 2 -Exactly
+	}
+
+	It 'limits unresolved enumeration coverage to its resource family (kind: <Kind>)' -TestCases @(
+		@{ Kind = 'groups'; Query = '/groups'; GroupStatus = 'Manual review required'; AppStatus = 'Created' }
+		@{ Kind = 'applications'; Query = '/v1.0/servicePrincipals'; GroupStatus = 'Created'; AppStatus = 'Manual review required' }
+		@{ Kind = 'unknown'; Query = '/unsupportedResources'; GroupStatus = 'Manual review required'; AppStatus = 'Manual review required' }
+	) {
+		param($Kind, $Query, $GroupStatus, $AppStatus)
+		$fixture.Assignments += [pscustomobject]@{ PrincipalType = 'User'; PrincipalId = $script:ownerId }
+		$existing = New-ExistingResourceReview
+		$existing.Scope.query = './members'
+		$existing | Add-Member instanceEnumerationScope @{ query = $Query }
+		$fixture.ExistingReviews = @($existing)
+		$results = @(& $script:testScript -ServicePrincipalId $script:reviewId -Confirm:$false -WarningAction SilentlyContinue)
+		$results.Status | Should -Be @($GroupStatus, $AppStatus)
+		$manual = @($results | Where-Object Status -EQ 'Manual review required')
+		$manual[0].MatchedReviewScope | Should -Be "instanceEnumerationScope: $Query"
+		$created = @($results | Where-Object Status -EQ 'Created').Count
+		Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times $created -Exactly
+	}
+
+	It 'retains a real group resource match in a mixed group and access-package scope' {
+		$existing = New-ExistingResourceReview
+		$existing.Scope = @{
+			principalScopes = @(@{ query = '/users' })
+			resourceScopes = @(
+				@{ query = '/identityGovernance/entitlementManagement/accessPackages/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/assignments' }
+				@{ query = "/groups/$script:groupId/members" }
+			)
+		}
+		$fixture.ExistingReviews = @($existing)
+		$result = & $script:testScript -GroupId $script:groupId -Confirm:$false
+		$result.DuplicateMatchType | Should -Be 'Resource'
+		Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times 0 -Exactly
 	}
 
 	It 'reads SDK AdditionalProperties and versioned group scopes' {

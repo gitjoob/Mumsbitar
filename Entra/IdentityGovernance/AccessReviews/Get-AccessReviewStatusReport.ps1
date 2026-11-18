@@ -11,6 +11,8 @@ Requires Microsoft.Graph.Authentication and Microsoft.Graph.Users. Individual
 decision subjects and actors are resolved with Get-MgUser. Where the current
 definition configures manager review, current subject managers are shown
 separately from recorded decision-makers; they are not historical assignments.
+Reviewer departments are current directory values. The dashboard groups review
+definitions by their current status, not by historical instance or stage status.
 .PARAMETER Prefixes
 Literal, case-insensitive display-name prefixes. The first matching prefix wins.
 .PARAMETER HtmlReportPath
@@ -64,9 +66,9 @@ function Get-AccessReviewStatusCollection {
 }
 
 function Get-AccessReviewStatusUser {
-	param([hashtable]$State, [string]$Id, [string]$DisplayName, [string]$UserPrincipalName, [string]$RecordSource = 'Graph review record')
-	if ($DisplayName -and $UserPrincipalName) {
-		return [pscustomobject]@{ Id = $Id; DisplayName = $DisplayName; UserPrincipalName = $UserPrincipalName; ProfileSource = $RecordSource; Error = $null }
+	param([hashtable]$State, [string]$Id, [string]$DisplayName, [string]$UserPrincipalName, [string]$RecordSource = 'Graph review record', [switch]$IncludeDepartment)
+	if ($DisplayName -and $UserPrincipalName -and -not $IncludeDepartment) {
+		return [pscustomobject]@{ Id = $Id; DisplayName = $DisplayName; UserPrincipalName = $UserPrincipalName; Department = $null; ProfileSource = $RecordSource; Error = $null }
 	}
 	if (-not $State.Users.ContainsKey($Id)) {
 		$user = $null
@@ -74,7 +76,7 @@ function Get-AccessReviewStatusUser {
 		try {
 			$guid = [guid]::Empty
 			if (-not [guid]::TryParse($Id, [ref]$guid) -or $guid -eq [guid]::Empty) { throw "Invalid user ID '$Id'." }
-			$user = Get-MgUser -UserId $guid.ToString() -Property Id,DisplayName,UserPrincipalName -ErrorAction Stop
+			$user = Get-MgUser -UserId $guid.ToString() -Property Id,DisplayName,UserPrincipalName,Department -ErrorAction Stop
 			if (-not $user.id -or -not $user.userPrincipalName) { throw 'The directory did not return a user ID and sign-in address; check user-read permissions.' }
 		}
 		catch {
@@ -88,7 +90,9 @@ function Get-AccessReviewStatusUser {
 		Id = $Id
 		DisplayName = if ($DisplayName) { $DisplayName } elseif ($lookup.User.displayName) { $lookup.User.displayName } else { 'Name unavailable' }
 		UserPrincipalName = if ($UserPrincipalName) { $UserPrincipalName } else { $lookup.User.userPrincipalName }
+		Department = $lookup.User.department
 		ProfileSource = if ($lookup.Error) { "Directory lookup unavailable; supplied name source: $RecordSource" }
+			elseif ($DisplayName -and $UserPrincipalName) { $RecordSource }
 			elseif ($DisplayName) { "$RecordSource name; current directory sign-in address" }
 			else { 'Current directory profile' }
 		Error = $lookup.Error
@@ -209,7 +213,7 @@ function Get-AccessReviewStatusReviewers {
 				try {
 					$members = @(Get-AccessReviewStatusCollection $State "$($State.Base)$lookupQuery/microsoft.graph.user?`$select=id,displayName,userPrincipalName")
 					$State.ReviewerGroups[$lookupQuery] = @($members | ForEach-Object {
-						Get-AccessReviewStatusUser $State $_.id $_.displayName $_.userPrincipalName 'Current reviewer-group membership'
+						Get-AccessReviewStatusUser $State $_.id $_.displayName $_.userPrincipalName 'Current reviewer-group membership' -IncludeDepartment
 					})
 				}
 				catch {
@@ -393,7 +397,7 @@ try {
 			try {
 				$row.ContactedReviewers = @(
 					Get-AccessReviewStatusCollection $state "$instanceUri/contactedReviewers" |
-						ForEach-Object { Get-AccessReviewStatusUser $state $_.id $_.displayName $_.userPrincipalName }
+						ForEach-Object { Get-AccessReviewStatusUser $state $_.id $_.displayName $_.userPrincipalName -IncludeDepartment }
 				)
 			}
 			catch {

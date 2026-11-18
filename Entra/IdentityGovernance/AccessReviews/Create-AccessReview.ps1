@@ -124,19 +124,37 @@ function Get-ReviewProperty {
 	if ($Object.AdditionalProperties -and $null -ne $Object.AdditionalProperties[$Name]) { $Object.AdditionalProperties[$Name] }
 }
 
+function Get-ReviewQueryPath {
+	param([AllowEmptyString()][string]$Query)
+	$Query -replace '^https://[^/]+', '' -replace '^/(?:v1\.0|beta)(?=/)', ''
+}
+
 function Get-ReviewResourceCoverage {
 	param([object]$Definition)
-	if (Get-ReviewProperty $Definition 'instanceEnumerationScope') {
-		return [pscustomobject]@{ Key = 'GroupMembership:*'; Coverage = 'Unknown'; Query = 'instanceEnumerationScope (resource set requires manual assessment)' }
-	}
 	$scope = Get-ReviewProperty $Definition 'scope'
+	$unrelatedResourcePath = '^/(?:roleManagement|identityGovernance/entitlementManagement)(?:[/?]|$)'
+	$enumeration = Get-ReviewProperty $Definition 'instanceEnumerationScope'
+	if ($enumeration) {
+		$query = [string](Get-ReviewProperty $enumeration 'query')
+		$path = Get-ReviewQueryPath $query
+		if ($path -match $unrelatedResourcePath -or
+			(-not $query -and (Get-ReviewQueryPath ([string](Get-ReviewProperty $scope 'query'))) -match $unrelatedResourcePath)) { return }
+		$keys = if ($path -match '^/groups(?:[/?]|$)') { @('GroupMembership:*') }
+			elseif ($path -match '^/servicePrincipals(?:[/?]|$)') { @('ApplicationDirectUsers:*') }
+			else { @('GroupMembership:*', 'ApplicationDirectUsers:*') }
+		$description = if ($query) { "instanceEnumerationScope: $query" } else { 'instanceEnumerationScope (query missing; resource set requires manual assessment)' }
+		foreach ($key in $keys) {
+			[pscustomobject]@{ Key = $key; Coverage = 'Unknown'; Query = $description }
+		}
+		return
+	}
 	if (-not $scope) { throw "Review '$($Definition.Id)' did not return its scope." }
 	$resourceScopes = @(Get-ReviewProperty $scope 'resourceScopes')
 	$allUsers = $true
 	if ($resourceScopes.Count) {
 		$principalScopes = @(Get-ReviewProperty $scope 'principalScopes')
 		$allUsers = @($principalScopes | Where-Object {
-			(Get-ReviewProperty $_ 'query') -match '^/(?:v1\.0/)?users/?$' -and
+			(Get-ReviewQueryPath ([string](Get-ReviewProperty $_ 'query'))) -match '^/users/?$' -and
 				-not (Get-ReviewProperty $_ 'queryRoot') -and -not (Get-ReviewProperty $_ 'inactiveDuration')
 		}).Count -gt 0
 	}
@@ -144,7 +162,7 @@ function Get-ReviewResourceCoverage {
 	foreach ($resourceScope in $resourceScopes) {
 		$query = [string](Get-ReviewProperty $resourceScope 'query')
 		if (-not $query) { throw "Review '$($Definition.Id)' returned a resource scope without a query." }
-		$path = $query -replace '^https://[^/]+/v1\.0/', '/' -replace '^/v1\.0/', '/'
+		$path = Get-ReviewQueryPath $query
 		$key = $null
 		if ($path -match '^/(groups|servicePrincipals)/([0-9a-fA-F-]{36})(.*)$') {
 			$kind = $Matches[1]
@@ -164,7 +182,7 @@ function Get-ReviewResourceCoverage {
 				((Get-ReviewProperty $scope 'resourceScopes') -and $suffix -in @('', '/')))
 			[pscustomobject]@{ Key = $key; Coverage = if ($full) { 'Full' } else { 'Partial' }; Query = $query }
 		}
-		elseif ($path -notmatch '^/(?:roleManagement/|identityGovernance/entitlementManagement/accessPackageAssignments(?:[/?]|$))') {
+		elseif ($path -notmatch $unrelatedResourcePath) {
 			$keys = if ($path -match '^/groups(?:[/?]|$)') { @('GroupMembership:*') }
 				elseif ($path -match '^/servicePrincipals(?:[/?]|$)') { @('ApplicationDirectUsers:*') }
 				else { @('GroupMembership:*', 'ApplicationDirectUsers:*') }

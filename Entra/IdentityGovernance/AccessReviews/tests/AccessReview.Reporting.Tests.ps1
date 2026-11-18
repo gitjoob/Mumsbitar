@@ -233,6 +233,95 @@ Describe 'Offline access review reporting' {
 		$html | Should -Match 'Ownership requires manual review'
 	}
 
+	It 'groups owners by application without merging same-named applications or changing audit results (offline: <Offline>)' -TestCases @(
+		@{ Offline = $false }, @{ Offline = $true }
+	) {
+		param($Offline)
+		$owners = @(foreach ($item in @(
+			@{ Id = 'owner-one'; App = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'; Name = '<Owner & One>' }
+			@{ Id = 'owner-two'; App = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'; Name = 'Owner Two' }
+			@{ Id = 'owner-three'; App = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb'; Name = 'Owner Three' }
+		)) {
+			[pscustomobject]@{
+				TargetType = 'ServicePrincipalOwner'; Target = 'Payroll'; ServicePrincipalId = $item.App
+				Status = 'Manual review required'; PrincipalId = $item.Id; PrincipalType = 'user'
+				PrincipalDisplayName = $item.Name; Reason = 'Ownership requires manual review.'
+			}
+		})
+		$results = @((New-ReportFixture)) + $owners
+		$before = $results | ConvertTo-Json -Depth 10
+		if ($Offline) {
+			@(
+				@{ Event = 'RunStarted'; RunId = 'owner-run' }
+				@{ Event = 'GroupResult'; RunId = 'owner-run'; Result = $results[0] }
+				foreach ($owner in $owners) { @{ Event = 'ManualReviewRequired'; RunId = 'owner-run'; Result = $owner } }
+				@{ Event = 'RunCompleted'; RunId = 'owner-run' }
+			) | ForEach-Object { $_ | ConvertTo-Json -Compress -Depth 10 } | Set-Content $script:logPath
+			& $script:exporter -LogPath $script:logPath -OutputPath $script:outputPath
+			$html = Get-Content $script:outputPath -Raw
+		}
+		else { $html = New-AccessReviewHtml -Results $results -Context $script:context }
+		$inventory = [regex]::Match($html, '(?s)<tbody id="rows">(.*?)</tbody>').Groups[1].Value
+		[regex]::Matches($inventory, '<tr data-status=').Count | Should -Be 3
+		[regex]::Matches($inventory, 'data-type="ServicePrincipalOwner"').Count | Should -Be 2
+		[regex]::Matches($html, 'class="review-detail" hidden').Count | Should -Be 3
+		$html | Should -Match '<strong>2</strong><span>Manual review required'
+		$html | Should -Match 'Recorded owners \(2\)'
+		$html | Should -Match '2 recorded owners'
+		$html | Should -Match '&lt;Owner &amp; One&gt;'
+		$html | Should -Not -Match '<Owner'
+		foreach ($id in @('owner-one', 'owner-two', 'owner-three')) {
+			$html | Should -Match $id
+			$inventory | Should -Match $id
+		}
+		($results | ConvertTo-Json -Depth 10) | Should -Be $before
+	}
+
+	It 'keeps legacy owner entries separate when the application ID was not recorded' {
+		$results = @(foreach ($name in @('First application', 'Second application')) {
+			[pscustomobject]@{
+				TargetType = 'ServicePrincipalOwner'; Target = $name; Status = 'Manual review required'
+				PrincipalId = 'owner-id'; Reason = 'Ownership requires manual review.'
+			}
+		})
+		$html = New-AccessReviewHtml -Results $results -Context $script:context
+		$inventory = [regex]::Match($html, '(?s)<tbody id="rows">(.*?)</tbody>').Groups[1].Value
+		[regex]::Matches($inventory, '<tr data-status=').Count | Should -Be 2
+		$inventory | Should -Match 'First application'
+		$inventory | Should -Match 'Second application'
+	}
+
+	It 'shows review status proportions including unavailable statuses without counting instances or stages' {
+		$definitions = @(
+			@{ Status = 'InProgress'; Instances = @(1, 2, 3) }
+			@{ Status = 'InProgress'; Instances = @() }
+			@{ Status = 'Applied'; Instances = @(1) }
+			@{ Status = $null; Instances = @(1, 2) }
+		)
+		$html = ConvertTo-AccessReviewStatusChartHtml -Definitions $definitions
+		$html | Should -Match 'data-review-status="InProgress" data-count="2"'
+		$html | Should -Match 'data-review-status="Applied" data-count="1"'
+		$html | Should -Match 'data-review-status="Unavailable" data-count="1"'
+		$html | Should -Match 'InProgress: 2 \(50%\)'
+		$html | Should -Match 'Applied: 1 \(25%\)'
+		$html | Should -Match 'conic-gradient\(#386641 0% 25%, #b51f3b 25% 75%, #737373 75% 100%\)'
+	}
+
+	It 'keeps chart percentages culture independent and encodes unfamiliar status labels' {
+		$culture = [System.Globalization.CultureInfo]::CurrentCulture
+		try {
+			[System.Globalization.CultureInfo]::CurrentCulture = [System.Globalization.CultureInfo]::GetCultureInfo('sv-SE')
+			$html = ConvertTo-AccessReviewStatusChartHtml -Definitions @(
+				@{ Status = 'InProgress' }, @{ Status = 'Completed' }, @{ Status = '</div><img src=x onerror=alert(1)>' }
+			)
+			$html | Should -Match '33\.333333%'
+			$html | Should -Match '33\.3%'
+			$html | Should -Not -Match '33,3|<img'
+			$html | Should -Match '&lt;/div&gt;&lt;img'
+		}
+		finally { [System.Globalization.CultureInfo]::CurrentCulture = $culture }
+	}
+
 	It 'exports recorded configuration and a failed run without importing Graph' {
 		Mock Import-Module { throw 'Offline export must not import modules.' }
 		$result = New-ReportFixture

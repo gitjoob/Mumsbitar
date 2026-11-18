@@ -123,6 +123,8 @@ Group reviews remove user membership, not group-to-group or group-to-app assignm
 - Existing names and legacy aliases block creation, including completed reviews.
 - Resource ID/scope checks also block active/scheduled or potentially future
   recurring coverage, regardless of prefix or reviewer policy.
+- Access-package assignment reviews are separate coverage, not group/application
+  reviews. Enumerated scopes are checked by resource family, not review name.
 - Completed/Applied historical coverage alone does not block by resource. Future/no-end
   recurring ranges are treated conservatively; numbered series check instances.
 - Partial or unsupported overlapping scopes require manual assessment; no new
@@ -149,6 +151,8 @@ file only when you explicitly supply `-HtmlReportPath`.
 The report includes a clickable group topology, stage configuration, duplicate
 matches, search and a dark-mode switch. It shows planned/submitted settings and
 creation outcomes, **not live status or proof that access was removed**.
+Ownership follow-up is grouped by application, with expandable owner details;
+raw results and logs still contain individual ownership records.
 
 Real runs write a separate JSONL file under `logs/` and print its path. Results
 contain review/resource IDs, counts, discovery paths and skip/failure reasons.
@@ -175,8 +179,12 @@ Connect-MgGraph -Scopes 'AccessReview.Read.All','User.Read.All','GroupMember.Rea
 ```
 
 Includes stages, individual users, decisions, recorded reviewers and current
-owners/managers. **Current directory relationships are not historical reviewer
-assignments.** Manager lookups require `User.Read.All`. Missing data appears as
+owners/managers, with reviewer departments from the current directory.
+The dashboard pie chart counts each matched review definition once by current
+status, not once per historical instance or stage.
+**Current owners/managers are not proof of historical reviewer assignments;
+departments are current values.** Department and manager lookups require
+`User.Read.All`. Missing data appears as
 collection issues, not zero counts. The script makes no tenant changes.
 
 All HTML reports are offline, have no external assets, and refuse to overwrite
