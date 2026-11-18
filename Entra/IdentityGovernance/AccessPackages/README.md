@@ -1,11 +1,11 @@
 # Access package creation
 
 [Create-AccessPackage.ps1](./Create-AccessPackage.ps1) creates one group-based
-access package and request policy per CSV row. It reuses the mandatory
+access package and request policy per CSV or Excel row. It reuses the mandatory
 `-CatalogName` or creates a published catalog if no exact match exists.
 Ambiguous catalog names stop the run; unpublished catalogs must be published
 first. Existing packages with the same name in that catalog are skipped,
-never overwritten. Duplicate names within a CSV are processed once.
+never overwritten. Duplicate names within an input file are processed once.
 
 ## Prerequisites and use
 
@@ -53,6 +53,32 @@ It adds the group's **Member** role, never its Owner role.
 Roles are read from the catalog's `resourceRoles` endpoint, filtered by origin
 system and resource ID; expanded resource role lists can be empty in Graph.
 
+## Excel input
+
+Install `ImportExcel` once in the PowerShell environment you use to run the
+script. Excel itself is not required.
+
+```powershell
+Install-Module ImportExcel -Scope CurrentUser
+.\Create-AccessPackage.ps1 -InputPath '.\access-packages.xlsx' `
+    -CatalogName 'Business applications' `
+    -FallbackApproverIds '55555555-5555-5555-5555-555555555555' `
+    -WhatIf
+```
+
+The script reads the first worksheet with headers in row 1:
+
+| Column | Meaning |
+| --- | --- |
+| `Access Package Name` | The package name; the same naming rules as CSV apply. |
+| `Access Group` | One Entra group object ID or exact, unique group display name. |
+| `Description`, `Role`, `Brand`, `Region`, `Potential Teams` | Description text and optional details. |
+| `Approver 1 List` | `<Employee Manager>` (case and extra whitespace are ignored). Uses the existing direct-manager stage and fallback approvers. |
+| `Approver 2`, `Approver 3` | Optional additional stages, in order. Separate multiple user object IDs or UPNs with semicolons, commas or line breaks. Stage 3 requires an explicit stage 2. |
+
+For groups over 500 transitive users, a blank stage 2 requires
+`-DefaultAppOwnerIds`. Display names for approvers aren't supported.
+
 ## CSV and naming
 
 Start with [access-packages.example.csv](./access-packages.example.csv).
@@ -98,8 +124,8 @@ at least one is required for a group with more than 500 users.
 | Requesters | Self, authorized administrators, and the recipient's direct manager. |
 | Request justification | Required. |
 | Approval | Required for new assignments and extensions/updates. |
-| Up to and including 500 transitive users | Direct manager, with explicit fallback users. |
-| More than 500 transitive users | Direct manager, then the explicit application-owner users. |
+| Up to and including 500 transitive users (CSV) | Direct manager, with explicit fallback users. |
+| More than 500 transitive users (CSV) | Direct manager, then the explicit application-owner users. |
 | Approval deadline | 14 days per stage; no escalation. |
 | Approver justification | Not required; requester justification is required. |
 | Assignment email notifications | Enabled. |

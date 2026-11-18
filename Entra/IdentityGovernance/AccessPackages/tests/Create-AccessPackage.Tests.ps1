@@ -17,6 +17,21 @@ BeforeAll {
 		param([string]$Suffix)
 		@($script:graphFixture.Writes | Where-Object { $_.Method -eq 'POST' -and $_.Uri.EndsWith($Suffix) })[-1].Body
 	}
+
+	function New-WorkbookFixture {
+		param([hashtable]$Overrides)
+
+		$columns = [ordered]@{
+			Role = 'Reader'; Brand = 'Brand A'; Region = 'EMEA'; 'Potential Teams' = 'Finance'
+			'Access Group' = $script:groupId; Description = 'View financial reports.'
+			'Access Package Name' = 'Finance reporting - Read reports'
+			'Approver 1 List' = '<Employee Manager>'; 'Approver 2' = ''; 'Approver 3' = ''
+		}
+		foreach ($key in $Overrides.Keys) { $columns[$key] = $Overrides[$key] }
+		$path = Join-Path $TestDrive 'package [template].xlsx'
+		[pscustomobject]$columns | Export-Excel -Path $path -WorksheetName 'Packages'
+		$path
+	}
 }
 
 Describe 'Create-AccessPackage' {
@@ -38,6 +53,9 @@ Finance reporting - Read reports,View financial reports.,$script:groupId,$script
 			NeverReady = $false
 			UserCount = '500'
 			DeniedUserId = $null
+			NamedGroups = @()
+			ApproverUpn = 'owner@example.test'
+			ApproverUpnId = $script:ownerId
 			Group = @{
 				id = $script:groupId
 				displayName = 'SG_Finance_Reports'
@@ -93,6 +111,9 @@ Finance reporting - Read reports,View financial reports.,$script:groupId,$script
 				if ($uriText -match '/users/([^?]+)') {
 					$id = $Matches[1]
 					if ($id -eq $fixture.DeniedUserId) { throw 'User not found or forbidden.' }
+					if ([uri]::UnescapeDataString($id) -eq $fixture.ApproverUpn) {
+						return @{ id = $fixture.ApproverUpnId; userPrincipalName = $fixture.ApproverUpn }
+					}
 					return @{ id = $id; displayName = 'Approver' }
 				}
 				if ($uriText -match '/transitiveMembers/microsoft.graph.user/\$count$') {
@@ -100,6 +121,9 @@ Finance reporting - Read reports,View financial reports.,$script:groupId,$script
 				}
 				if ($uriText -match '/groups/[^/?]+\?') {
 					return $fixture.Group
+				}
+				if ($decodedUri.Contains("/groups?`$filter=displayName eq 'Finance''s Readers'&")) {
+					return @{ value = $fixture.NamedGroups }
 				}
 				if ($uriText -match '/catalogs\?') {
 					$items = @()
@@ -169,6 +193,76 @@ Finance reporting - Read reports,View financial reports.,$script:groupId,$script
 			}
 			throw "Unexpected Graph request: $Method $uriText"
 		}.GetNewClosure())
+	}
+
+	Context 'Excel workbook' -Skip:(-not (Get-Module -ListAvailable -Name ImportExcel)) {
+		BeforeAll { Import-Module ImportExcel -WarningAction SilentlyContinue }
+
+		It 'imports the workbook columns and submits three ordered approval stages' {
+			$script:graphFixture.NamedGroups = @(@{ id = $script:groupId; displayName = "Finance's Readers" })
+			$path = New-WorkbookFixture @{
+				'Access Group' = "Finance's Readers"; 'Approver 1 List' = ' < employee   MANAGER > '
+				'Approver 2' = "owner@example.test;`n$script:ownerId"; 'Approver 3' = $script:fallbackId
+			}
+			$result = & $script:scriptPath -InputPath $path -CatalogName $script:graphFixture.CatalogName `
+				-FallbackApproverIds $script:fallbackId -Confirm:$false -WarningAction SilentlyContinue
+			$result.Status | Should -Be 'Created'
+			$result.GroupId | Should -Be $script:groupId
+			$result.ApprovalStages | Should -Be 3
+			$package = Get-PostedBody '/accessPackages'
+			$package.displayName | Should -Be 'Finance reporting - Read reports'
+			$package.description -split '\r?\n' | Should -Be @('View financial reports.', 'Role: Reader', 'Region: EMEA', 'Brand: Brand A', 'Potential Teams: Finance')
+			$stages = (Get-PostedBody '/assignmentPolicies').requestApprovalSettings.stages
+			$stages[0].primaryApprovers[0].'@odata.type' | Should -Be '#microsoft.graph.targetManager'
+			$stages[0].fallbackPrimaryApprovers[0].userId | Should -Be $script:fallbackId
+			$stages[1].primaryApprovers | Should -HaveCount 1
+			$stages[1].primaryApprovers[0].userId | Should -Be $script:ownerId
+			$stages[2].primaryApprovers[0].userId | Should -Be $script:fallbackId
+		}
+
+		It 'previews a manager-only workbook row without Graph writes' {
+			$script:csvPath = New-WorkbookFixture @{}
+			$result = Invoke-Creation -Preview
+			$result.Status | Should -Be 'Would be created'
+			$result.ApprovalStages | Should -Be 1
+			$script:graphFixture.Writes | Should -HaveCount 0
+		}
+
+		It 'retains the second-stage requirement above 500 users (default owner: <HasDefault>)' -TestCases @(
+			@{ HasDefault = $false }, @{ HasDefault = $true }
+		) {
+			param($HasDefault)
+			$script:graphFixture.UserCount = '501'
+			$script:csvPath = New-WorkbookFixture @{}
+			if ($HasDefault) {
+				$result = Invoke-Creation -Preview -DefaultOwners $script:ownerId
+				$result.Status | Should -Be 'Would be created'
+				$result.ApprovalStages | Should -Be 2
+			}
+			else {
+				$result = Invoke-Creation -Preview
+				$result.Status | Should -Be 'Failed'
+				$result.Reason | Should -Match 'require Approver 2 or DefaultAppOwnerIds'
+			}
+			$script:graphFixture.Writes | Should -HaveCount 0
+		}
+
+		It 'rejects unsafe workbook input before provisioning (<Case>)' -TestCases @(
+			@{ Case = 'unsupported manager token'; Overrides = @{ 'Approver 1 List' = '<Employee Manager> plus owner' }; Reason = 'must be <Employee Manager>' }
+			@{ Case = 'missing stage two'; Overrides = @{ 'Approver 3' = 'owner@example.test' }; Reason = 'Approver 3 requires Approver 2' }
+			@{ Case = 'ambiguous group'; Overrides = @{ 'Access Group' = "Finance's Readers" }; Reason = 'matched 2 groups' }
+		) {
+			param($Case, $Overrides, $Reason)
+			$script:graphFixture.NamedGroups = @(
+				@{ id = $script:groupId; displayName = "Finance's Readers" }
+				@{ id = '77777777-7777-7777-7777-777777777777'; displayName = "Finance's Readers" }
+			)
+			$script:csvPath = New-WorkbookFixture $Overrides
+			$result = Invoke-Creation
+			$result.Status | Should -Be 'Failed'
+			$result.Reason | Should -Match $Reason
+			$script:graphFixture.Writes | Should -HaveCount 0
+		}
 	}
 
 	It 'creates a one-stage policy at exactly 500 users with all requested Graph settings' {

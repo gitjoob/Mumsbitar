@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-Creates group-based access packages from a CSV file.
+Creates group-based access packages from a CSV or XLSX file.
 .DESCRIPTION
 Connect to Microsoft Graph first. Requires EntitlementManagement.ReadWrite.All,
 group read permissions, user read permissions, and appropriate licensing and roles.
@@ -16,14 +16,19 @@ Otherwise Name is required. Description plus all details not already in the name
 description. Blank optional values are omitted.
 DefaultAppOwnerIds supplies owners when a row's AppOwnerIds is empty.
 FallbackApproverIds is mandatory and is used when a recipient has no manager.
+For XLSX, install ImportExcel and use the first worksheet. Access Package Name
+sets the name; Access Group accepts an object ID or exact unique group name.
+Approver 1 List must be <Employee Manager>. Approver 2 and Approver 3 accept
+user object IDs or UPNs separated by semicolons, commas, or line breaks.
 Names and descriptions must use business-friendly application and access terms.
 Names must not contain "Access Package", "AP", or "SG", or identify the owner.
 
 All directory member users, excluding guests, can request access. Managers can
 request on behalf of their employees; authorized administrators retain their
 standard assignment permissions. Justification and approval are required.
-Up to 500 transitive user members uses manager approval; more than 500 adds
-the specified application owners as a second stage. Each stage allows 14 days.
+CSV uses manager approval, adding application owners above 500 transitive
+users. XLSX uses its specified stages, with stage 2 still required above
+500 users (DefaultAppOwnerIds can fill a blank stage 2). Each stage allows 14 days.
 Assignments expire after 365 days. Custom schedules and approved extensions
 are enabled. Assignment emails are enabled; access reviews are disabled.
 
@@ -43,7 +48,8 @@ WhatIf performs reads and validation but never writes to Microsoft Graph.
 param(
 	[Parameter(Mandatory)]
 	[ValidateNotNullOrEmpty()]
-	[string]$CsvPath,
+	[Alias('CsvPath')]
+	[string]$InputPath,
 	[Parameter(Mandatory)]
 	[ValidateNotNullOrEmpty()]
 	[string]$CatalogName,
@@ -58,22 +64,41 @@ $CatalogName = $CatalogName.Trim()
 if (-not $CatalogName) {
 	throw 'CatalogName must not be whitespace.'
 }
-if (-not (Test-Path -LiteralPath $CsvPath -PathType Leaf)) {
-	throw "CSV file '$CsvPath' was not found."
+if (-not (Test-Path -LiteralPath $InputPath -PathType Leaf)) {
+	throw "Input file '$InputPath' was not found."
 }
-$rows = @(Import-Csv -LiteralPath $CsvPath)
-if ($rows.Count -eq 0) {
-	throw 'The CSV file contains no access packages.'
-}
-foreach ($column in 'GroupId', 'AppOwnerIds') {
-	if (-not $rows[0].PSObject.Properties[$column]) {
-		throw "The CSV file must contain a '$column' column."
+$extension = [IO.Path]::GetExtension($InputPath)
+$isWorkbook = $extension -eq '.xlsx'
+if ($isWorkbook) {
+	if (-not (Get-Module -ListAvailable -Name ImportExcel)) {
+		throw 'Reading XLSX requires the ImportExcel module. Install it with: Install-Module ImportExcel -Scope CurrentUser'
+	}
+	Import-Module ImportExcel -WarningAction SilentlyContinue
+	$workbookPath = (Get-Item -LiteralPath $InputPath).FullName
+	$rows = @(ImportExcel\Import-Excel -Path ([WildcardPattern]::Escape($workbookPath)) | Where-Object {
+		@($_.PSObject.Properties | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.Value) }).Count
+	})
+	if (-not $rows.Count) { throw 'The first worksheet contains no access packages.' }
+	foreach ($column in 'Access Package Name', 'Access Group', 'Approver 1 List') {
+		if (-not $rows[0].PSObject.Properties[$column]) {
+			throw "The first worksheet is missing the '$column' column."
+		}
 	}
 }
-if (-not $rows[0].PSObject.Properties['Name'] -and
-	-not ($rows[0].PSObject.Properties['Application'] -and $rows[0].PSObject.Properties['Role'])) {
-	throw "The CSV file must contain a 'Name' column, or both 'Application' and 'Role' columns."
+elseif ($extension -eq '.csv') {
+	$rows = @(Import-Csv -LiteralPath $InputPath)
+	if (-not $rows.Count) { throw 'The CSV file contains no access packages.' }
+	foreach ($column in 'GroupId', 'AppOwnerIds') {
+		if (-not $rows[0].PSObject.Properties[$column]) {
+			throw "The CSV file must contain a '$column' column."
+		}
+	}
+	if (-not $rows[0].PSObject.Properties['Name'] -and
+		-not ($rows[0].PSObject.Properties['Application'] -and $rows[0].PSObject.Properties['Role'])) {
+		throw "The CSV file must contain a 'Name' column, or both 'Application' and 'Role' columns."
+	}
 }
+else { throw "Unsupported input file extension '$extension'. Use .csv or .xlsx." }
 
 Import-Module Microsoft.Graph.Authentication
 $context = Get-MgContext
@@ -156,12 +181,14 @@ function Get-GraphCollection {
 	param(
 		[Parameter(Mandatory)][string]$Uri,
 		[string]$Filter,
-		[string]$Expand
+		[string]$Expand,
+		[string]$Select
 	)
 
 	$query = @()
 	if ($Filter) { $query += '$filter=' + [uri]::EscapeDataString($Filter) }
 	if ($Expand) { $query += '$expand=' + [uri]::EscapeDataString($Expand) }
+	if ($Select) { $query += '$select=' + [uri]::EscapeDataString($Select) }
 	if ($query.Count) { $Uri += '?' + ($query -join '&') }
 	do {
 		$page = Invoke-PackageGraphRequest -Method GET -Uri $Uri -OutputType Hashtable
@@ -182,7 +209,7 @@ function Send-GraphBody {
 	Invoke-PackageGraphRequest -Method POST -Uri $Uri -Body ($Body | ConvertTo-Json -Depth 20) -ContentType 'application/json' -OutputType Hashtable
 }
 
-function Get-CsvText {
+function Get-InputText {
 	param([Parameter(Mandatory)]$Row, [Parameter(Mandatory)][string]$Column)
 
 	$property = $Row.PSObject.Properties[$Column]
@@ -206,6 +233,44 @@ function ConvertTo-UserApprovers {
 			$validatedUsers[$key] = $true
 		}
 		@{ '@odata.type' = '#microsoft.graph.singleUser'; userId = $key }
+	}
+}
+
+function Get-WorkbookApproverIds {
+	param([string]$Text, [string]$Column)
+
+	$values = @($Text -split '[;,\r\n]+' | ForEach-Object { $_.Trim() } | Where-Object { $_ } | Select-Object -Unique)
+	if (-not $values.Count) { throw "$Column must contain at least one Entra user object ID or UPN." }
+	foreach ($value in $values) {
+		$id = [guid]::Empty
+		if ([guid]::TryParse($value, [ref]$id) -and $id -ne [guid]::Empty) {
+			$id
+		}
+		elseif ($value -match '^[^\s@]+@[^\s@]+$') {
+			$upn = [uri]::EscapeDataString($value)
+			$user = Invoke-PackageGraphRequest -Method GET -Uri "/v1.0/users/${upn}?`$select=id,userPrincipalName" -OutputType Hashtable
+			if ($user.userPrincipalName -ne $value -or -not [guid]::TryParse($user.id, [ref]$id) -or $id -eq [guid]::Empty) {
+				throw "$Column could not resolve '$value' to an exact Entra user UPN."
+			}
+			$validatedUsers["$id"] = $true
+			$id
+		}
+		else { throw "$Column contains '$value'; use Entra user object IDs or UPNs." }
+	}
+}
+
+function New-PackageApprovalStage {
+	param([object[]]$Approvers, [object[]]$Fallbacks = @())
+
+	@{
+		durationBeforeAutomaticDenial = 'P14D'
+		isApproverJustificationRequired = $false
+		isEscalationEnabled = $false
+		durationBeforeEscalation = 'PT0S'
+		escalationApprovers = @()
+		fallbackEscalationApprovers = @()
+		primaryApprovers = @($Approvers)
+		fallbackPrimaryApprovers = @($Fallbacks)
 	}
 }
 
@@ -272,9 +337,11 @@ $results = [System.Collections.Generic.List[object]]::new()
 $processedNames = @{}
 
 foreach ($row in $rows) {
+	$nameColumn = if ($isWorkbook) { 'Access Package Name' } else { 'Name' }
+	$groupColumn = if ($isWorkbook) { 'Access Group' } else { 'GroupId' }
 	$result = [ordered]@{
-		Name = Get-CsvText $row 'Name'
-		GroupId = "$($row.GroupId)".Trim()
+		Name = Get-InputText $row $nameColumn
+		GroupId = Get-InputText $row $groupColumn
 		CatalogId = if ($catalog) { $catalog.id } else { $null }
 		AccessPackageId = $null
 		PolicyId = $null
@@ -286,8 +353,8 @@ foreach ($row in $rows) {
 	}
 	$newPackageId = $null
 	try {
-		$application = Get-CsvText $row 'Application'
-		$role = Get-CsvText $row 'Role'
+		$application = if (-not $isWorkbook) { Get-InputText $row 'Application' }
+		$role = Get-InputText $row 'Role'
 		$namedFromDetails = $application -and $role
 		if ($namedFromDetails) {
 			$result.Name = "$application - $role"
@@ -296,26 +363,47 @@ foreach ($row in $rows) {
 		$details = @(
 			if (-not $namedFromDetails -and $application) { "Application: $application" }
 			if (-not $namedFromDetails -and $role) { "Role: $role" }
-			if (Get-CsvText $row 'Region') { "Region: $(Get-CsvText $row 'Region')" }
-			if (Get-CsvText $row 'Comments') { "Comments: $(Get-CsvText $row 'Comments')" }
+			foreach ($column in 'Region', 'Comments') {
+				$text = Get-InputText $row $column
+				if ($text) { "${column}: $text" }
+			}
+			if ($isWorkbook) {
+				foreach ($column in 'Brand', 'Potential Teams') {
+					$text = Get-InputText $row $column
+					if ($text) { "${column}: $text" }
+				}
+			}
 		)
-		$description = (@(Get-CsvText $row 'Description') + $details | Where-Object { $_ }) -join [Environment]::NewLine
+		$description = (@(Get-InputText $row 'Description') + $details | Where-Object { $_ }) -join [Environment]::NewLine
 		if (-not $description -and $namedFromDetails) { $description = $name }
 		if (-not $name -or -not $description) {
+			if ($isWorkbook) { throw 'Access Package Name and description text (Description or details) are required.' }
 			throw 'A name (Name, or both Application and Role) and description text (Description or details) are required.'
 		}
 		if ($name -match '(?i)(?<![a-z0-9])(?:access[\s_-]*package|ap|sg)(?![a-z0-9])') {
 			throw "Name '$name' must not contain 'Access Package', 'AP', or 'SG'."
 		}
 		$groupId = [guid]::Empty
-		if (-not [guid]::TryParse($result.GroupId, [ref]$groupId) -or $groupId -eq [guid]::Empty) {
+		$isGroupId = [guid]::TryParse($result.GroupId, [ref]$groupId)
+		if ($isWorkbook -and -not $isGroupId -and $result.GroupId) {
+			$groupName = $result.GroupId
+			$groups = @(Get-GraphCollection -Uri '/v1.0/groups' -Filter "displayName eq '$($groupName.Replace("'", "''"))'" -Select 'id,displayName' |
+				Where-Object { $_.displayName -eq $groupName })
+			if ($groups.Count -ne 1) {
+				throw "Access Group '$groupName' matched $($groups.Count) groups by exact name. Use the group object ID."
+			}
+			$isGroupId = [guid]::TryParse($groups[0].id, [ref]$groupId)
+		}
+		if (-not $isGroupId -or $groupId -eq [guid]::Empty) {
+			if ($isWorkbook) { throw 'Access Group must identify one Entra group by object ID or exact display name.' }
 			throw "GroupId '$($result.GroupId)' must be a nonempty GUID."
 		}
 		$result.GroupId = "$groupId"
 
 		if ($processedNames.ContainsKey($name)) {
 			$result.Status = 'Skipped'
-			$result.Reason = 'A package with this name was already processed in this CSV.'
+			$result.Reason = if ($isWorkbook) { 'A package with this name was already processed in this worksheet.' }
+				else { 'A package with this name was already processed in this CSV.' }
 		}
 		elseif ($catalog) {
 			$existing = @(Get-GraphCollection -Uri "$baseUri/accessPackages" `
@@ -328,6 +416,16 @@ foreach ($row in $rows) {
 		}
 
 		if (-not $result.Status) {
+			$stageTwo = ''
+			$stageThree = ''
+			if ($isWorkbook) {
+				if ((Get-InputText $row 'Approver 1 List') -notmatch '^(?:<\s*Employee\s+Manager\s*>|Employee\s+Manager)$') {
+					throw 'Approver 1 List must be <Employee Manager>. Other stage 1 approvers are not supported.'
+				}
+				$stageTwo = Get-InputText $row 'Approver 2'
+				$stageThree = Get-InputText $row 'Approver 3'
+				if ($stageThree -and -not $stageTwo) { throw 'Approver 3 requires Approver 2 to be populated.' }
+			}
 			$group = Invoke-PackageGraphRequest -Method GET `
 				-Uri "/v1.0/groups/$groupId`?`$select=id,displayName,groupTypes,onPremisesSyncEnabled,mailEnabled,securityEnabled,isAssignableToRole" -OutputType Hashtable
 			if ($group.id -ne "$groupId") {
@@ -351,9 +449,12 @@ foreach ($row in $rows) {
 				throw "Graph returned an invalid transitive user count for group '$groupId'."
 			}
 			$result.UserCount = $userCount
-			$result.ApprovalStages = if ($userCount -gt 500) { 2 } else { 1 }
 			$ownerIds = @($DefaultAppOwnerIds)
-			if (-not [string]::IsNullOrWhiteSpace($row.AppOwnerIds)) {
+			if ($isWorkbook) {
+				if ($stageTwo) { $ownerIds = @(Get-WorkbookApproverIds -Text $stageTwo -Column 'Approver 2') }
+				elseif ($userCount -le 500) { $ownerIds = @() }
+			}
+			elseif (-not [string]::IsNullOrWhiteSpace($row.AppOwnerIds)) {
 				$ownerIds = @(foreach ($value in $row.AppOwnerIds.Split(';')) {
 					$ownerId = [guid]::Empty
 					if (-not [guid]::TryParse($value.Trim(), [ref]$ownerId) -or $ownerId -eq [guid]::Empty) {
@@ -364,33 +465,17 @@ foreach ($row in $rows) {
 			}
 			$ownerApprovers = if ($ownerIds.Count) { @(ConvertTo-UserApprovers -Ids $ownerIds) } else { @() }
 			if ($userCount -gt 500 -and -not $ownerApprovers.Count) {
+				if ($isWorkbook) { throw 'Groups with more than 500 users require Approver 2 or DefaultAppOwnerIds.' }
 				throw 'Groups with more than 500 users require AppOwnerIds or DefaultAppOwnerIds.'
 			}
 
-			$stages = @(
-				@{
-					durationBeforeAutomaticDenial = 'P14D'
-					isApproverJustificationRequired = $false
-					isEscalationEnabled = $false
-					durationBeforeEscalation = 'PT0S'
-					escalationApprovers = @()
-					fallbackEscalationApprovers = @()
-					primaryApprovers = @(@{ '@odata.type' = '#microsoft.graph.targetManager'; managerLevel = 1 })
-					fallbackPrimaryApprovers = $fallbackApprovers
-				}
-			)
-			if ($userCount -gt 500) {
-				$stages += @{
-					durationBeforeAutomaticDenial = 'P14D'
-					isApproverJustificationRequired = $false
-					isEscalationEnabled = $false
-					durationBeforeEscalation = 'PT0S'
-					escalationApprovers = @()
-					fallbackEscalationApprovers = @()
-					primaryApprovers = @($ownerApprovers)
-					fallbackPrimaryApprovers = @()
-				}
+			$stages = @(New-PackageApprovalStage -Approvers @(@{ '@odata.type' = '#microsoft.graph.targetManager'; managerLevel = 1 }) -Fallbacks $fallbackApprovers)
+			if ($userCount -gt 500 -or $stageTwo) { $stages += New-PackageApprovalStage -Approvers $ownerApprovers }
+			if ($stageThree) {
+				$thirdIds = @(Get-WorkbookApproverIds -Text $stageThree -Column 'Approver 3')
+				$stages += New-PackageApprovalStage -Approvers @(ConvertTo-UserApprovers -Ids $thirdIds)
 			}
+			$result.ApprovalStages = $stages.Count
 
 			$resource = if ($catalog) { Get-GroupResource -CatalogId $catalog.id -GroupId $groupId } else { $null }
 			$roleScope = if ($resource) { Get-MemberRoleScope -Resource $resource } else { $null }
