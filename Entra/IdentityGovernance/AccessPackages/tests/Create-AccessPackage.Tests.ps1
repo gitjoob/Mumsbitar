@@ -52,6 +52,8 @@ Finance reporting - Read reports,View financial reports.,$script:groupId,$script
 			ResourceDelay = 0
 			NeverReady = $false
 			UserCount = '500'
+			GroupCounts = @{}
+			AdditionalGroups = @{}
 			DeniedUserId = $null
 			NamedGroups = @()
 			AddressUsers = @(
@@ -119,10 +121,12 @@ Finance reporting - Read reports,View financial reports.,$script:groupId,$script
 					$address = $Matches[1]
 					return @{ value = @($fixture.AddressUsers | Where-Object { $_.userPrincipalName -eq $address -or $_.mail -eq $address }) }
 				}
-				if ($uriText -match '/transitiveMembers/microsoft.graph.user/\$count$') {
+				if ($uriText -match '/groups/([^/]+)/transitiveMembers/microsoft.graph.user/\$count$') {
+					if ($fixture.GroupCounts.ContainsKey($Matches[1])) { return $fixture.GroupCounts[$Matches[1]] }
 					return $fixture.UserCount
 				}
-				if ($uriText -match '/groups/[^/?]+\?') {
+				if ($uriText -match '/groups/([^/?]+)\?') {
+					if ($fixture.AdditionalGroups.ContainsKey($Matches[1])) { return $fixture.AdditionalGroups[$Matches[1]] }
 					return $fixture.Group
 				}
 				if ($decodedUri.Contains("/groups?`$filter=displayName eq 'Finance''s Readers'&")) {
@@ -144,13 +148,14 @@ Finance reporting - Read reports,View financial reports.,$script:groupId,$script
 					return @{ value = $items }
 				}
 				if ($uriText -match '/resourceRoles\?') {
-					if ($decodedUri -notmatch "originSystem eq 'AadGroup' and resource/id eq 'resource-id'") {
+					if ($decodedUri -notmatch "originSystem eq 'AadGroup' and resource/id eq 'resource-id(?:-([^']+))?'") {
 						throw 'Resource-role lookup must filter by origin system and resource ID.'
 					}
+					$roleGroupId = if ($Matches[1]) { $Matches[1] } else { $fixtureGroupId }
 					return @{
 						value = @(
-							@{ id = 'owner-role'; originId = "Owner_$fixtureGroupId"; originSystem = 'AadGroup' },
-							@{ id = 'member-role'; originId = "Member_$fixtureGroupId"; originSystem = 'AadGroup' }
+							@{ id = 'owner-role'; originId = "Owner_$roleGroupId"; originSystem = 'AadGroup' },
+							@{ id = 'member-role'; originId = "Member_$roleGroupId"; originSystem = 'AadGroup' }
 						)
 					}
 				}
@@ -160,14 +165,16 @@ Finance reporting - Read reports,View financial reports.,$script:groupId,$script
 						return @{ value = @() }
 					}
 					if (-not $fixture.ResourceExists -or $fixture.NeverReady) { return @{ value = @() } }
+					$resourceGroupId = if ($decodedUri -match "originId eq '([^']+)'") { $Matches[1] } else { $fixtureGroupId }
+					$resourceId = if ($resourceGroupId -eq $fixtureGroupId) { 'resource-id' } else { "resource-id-$resourceGroupId" }
 					return @{
 						value = @(
 							@{
-								id = 'resource-id'
-								originId = $fixtureGroupId
+								id = $resourceId
+								originId = $resourceGroupId
 								originSystem = 'AadGroup'
 								roles = @()
-								scopes = @(@{ id = 'root-scope'; originId = $fixtureGroupId; originSystem = 'AadGroup'; isRootScope = $true })
+								scopes = @(@{ id = 'root-scope'; originId = $resourceGroupId; originSystem = 'AadGroup'; isRootScope = $true })
 							}
 						)
 					}
@@ -243,6 +250,49 @@ Finance reporting - Read reports,View financial reports.,$script:groupId,$script
 			$result = Invoke-Creation
 			$result.Status | Should -Be 'Failed'
 			$result.Reason | Should -Match "matched $MatchCount Entra users"
+			$script:graphFixture.Writes | Should -HaveCount 0
+		}
+
+		It 'identifies the approver column when Graph returns a matching user without an id' {
+			$script:graphFixture.AddressUsers = @(@{ mail = 'owner-mail@example.test' })
+			$script:csvPath = New-WorkbookFixture @{ 'Approver 2' = 'owner-mail@example.test' }
+			$result = Invoke-Creation -Preview
+			$result.Status | Should -Be 'Failed'
+			$result.Reason | Should -Match 'Approver 2 .*Graph did not return a valid user object ID'
+			$script:graphFixture.Writes | Should -HaveCount 0
+		}
+
+		It 'provisions one package with every distinct listed group and uses the largest group for approval' {
+			$second = '77777777-7777-7777-7777-777777777777'
+			$script:graphFixture.CatalogExists = $false
+			$script:graphFixture.ResourceExists = $false
+			$script:graphFixture.AdditionalGroups[$second] = $script:graphFixture.Group.Clone()
+			$script:graphFixture.AdditionalGroups[$second].id = $second
+			$script:graphFixture.GroupCounts[$second] = '501'
+			$script:csvPath = New-WorkbookFixture @{ 'Access Group' = "$script:groupId,$second;`n$script:groupId"; 'Approver 2' = 'owner-mail@example.test' }
+			$result = Invoke-Creation
+			$result.Status | Should -Be 'Created'
+			$result.GroupIds | Should -Be @($script:groupId, $second)
+			$result.UserCount | Should -Be 501
+			$result.ApprovalStages | Should -Be 2
+			$writes = $script:graphFixture.Writes
+			@($writes | Where-Object Uri -Like '*/accessPackages') | Should -HaveCount 1
+			$imports = @($writes | Where-Object Uri -Like '*/resourceRequests')
+			$imports.Body.resource.originId | Should -Be @($script:groupId, $second)
+			$bindings = @($writes | Where-Object Uri -Like '*/new-package-id/resourceRoleScopes')
+			$bindings.Body.role.originId | Should -Be @("Member_$script:groupId", "Member_$second")
+		}
+
+		It 'fails the entire row when the second listed group cannot be managed' {
+			$second = '77777777-7777-7777-7777-777777777777'
+			$script:graphFixture.AdditionalGroups[$second] = $script:graphFixture.Group.Clone()
+			$script:graphFixture.AdditionalGroups[$second].id = $second
+			$script:graphFixture.AdditionalGroups[$second].displayName = 'Synced second group'
+			$script:graphFixture.AdditionalGroups[$second].onPremisesSyncEnabled = $true
+			$script:csvPath = New-WorkbookFixture @{ 'Access Group' = "$script:groupId,$second" }
+			$result = Invoke-Creation
+			$result.Status | Should -Be 'Failed'
+			$result.Reason | Should -Match 'Synced second group.*synchronized'
 			$script:graphFixture.Writes | Should -HaveCount 0
 		}
 

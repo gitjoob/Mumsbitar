@@ -17,7 +17,8 @@ description. Blank optional values are omitted.
 DefaultAppOwnerIds supplies owners when a row's AppOwnerIds is empty.
 FallbackApproverIds is mandatory and is used when a recipient has no manager.
 For XLSX, install ImportExcel and use the first worksheet. Access Package Name
-sets the name; Access Group accepts an object ID or exact unique group name.
+sets the name; Access Group accepts one exact unique group name or one or
+more group object IDs separated by commas, semicolons, or line breaks.
 Approver 1 List must be <Employee Manager>. Approver 2 and Approver 3 accept
 user object IDs, UPNs, or mail addresses separated by semicolons, commas, or line breaks.
 Names and descriptions must use business-friendly application and access terms.
@@ -255,20 +256,74 @@ function Get-WorkbookApproverIds {
 		}
 		elseif ($value -match '^[^\s@]+@[^\s@]+$') {
 			$address = $value.Replace("'", "''")
-			$userIds = @(Get-GraphCollection -Uri '/v1.0/users' -Filter "userPrincipalName eq '$address' or mail eq '$address'" -Select 'id,userPrincipalName,mail' |
-				Where-Object { $_.userPrincipalName -eq $value -or $_.mail -eq $value } |
-				Select-Object -ExpandProperty id -Unique)
+			$users = @(Get-GraphCollection -Uri '/v1.0/users' -Filter "userPrincipalName eq '$address' or mail eq '$address'" -Select 'id,userPrincipalName,mail' |
+				Where-Object { $_.userPrincipalName -eq $value -or $_.mail -eq $value })
+			$userIds = @{}
+			foreach ($user in $users) {
+				if (-not [guid]::TryParse($user['id'], [ref]$id) -or $id -eq [guid]::Empty) {
+					throw "$Column address '$value' matched an Entra user, but Graph did not return a valid user object ID. Specify the user object ID."
+				}
+				$userIds["$id"] = $id
+			}
 			if ($userIds.Count -ne 1) {
 				throw "$Column address '$value' matched $($userIds.Count) Entra users by UPN or mail. Specify the user object ID."
 			}
-			if (-not [guid]::TryParse($userIds[0], [ref]$id) -or $id -eq [guid]::Empty) {
-				throw "$Column address '$value' resolved to an invalid Entra user object ID."
-			}
+			$id = @($userIds.Values)[0]
 			$validatedUsers["$id"] = $true
 			$id
 		}
 		else { throw "$Column contains '$value'; use Entra user object IDs, UPNs, or mail addresses." }
 	}
+}
+
+function Get-WorkbookGroupIds {
+	param([string]$Text)
+
+	if (-not $Text) { throw 'Access Group must contain group object IDs or one exact group display name.' }
+	$tokens = @($Text -split '[;,\r\n]+' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+	$guidTokens = @($tokens | Where-Object { $parsed = [guid]::Empty; [guid]::TryParse($_, [ref]$parsed) })
+	if ($guidTokens.Count) {
+		if ($guidTokens.Count -ne $tokens.Count) {
+			throw "Access Group '$Text' mixes group object IDs with invalid values. Use only group object IDs when listing multiple groups."
+		}
+		foreach ($token in $guidTokens) {
+			$id = [guid]$token
+			if ($id -eq [guid]::Empty) { throw 'Access Group contains the empty GUID.' }
+			"$id"
+		}
+		return
+	}
+
+	$groups = @(Get-GraphCollection -Uri '/v1.0/groups' -Filter "displayName eq '$($Text.Replace("'", "''"))'" -Select 'id,displayName' |
+		Where-Object { $_.displayName -eq $Text })
+	if ($groups.Count -ne 1) {
+		throw "Access Group '$Text' matched $($groups.Count) groups by exact name. Use the group object ID."
+	}
+	$id = [guid]::Empty
+	if (-not [guid]::TryParse($groups[0].id, [ref]$id) -or $id -eq [guid]::Empty) {
+		throw "Access Group '$Text' matched a group, but Graph did not return a valid group object ID."
+	}
+	"$id"
+}
+
+function Get-PackageGroup {
+	param([guid]$GroupId)
+
+	$group = Invoke-PackageGraphRequest -Method GET `
+		-Uri "/v1.0/groups/$GroupId`?`$select=id,displayName,groupTypes,onPremisesSyncEnabled,mailEnabled,securityEnabled,isAssignableToRole" -OutputType Hashtable
+	if ($group.id -ne "$GroupId") {
+		throw "Unable to validate group '$GroupId'."
+	}
+	if ($group.onPremisesSyncEnabled -eq $true -or $group.groupTypes -contains 'DynamicMembership') {
+		throw "Group '$($group.displayName)' has synchronized or dynamic membership; entitlement management cannot manage its members."
+	}
+	if ($group.groupTypes -notcontains 'Unified' -and ($group.mailEnabled -eq $true -or $group.securityEnabled -ne $true)) {
+		throw "Group '$($group.displayName)' must be a cloud-managed security group or Microsoft 365 group."
+	}
+	if ($group.isAssignableToRole -eq $true) {
+		throw "Group '$($group.displayName)' is role-assignable; this script does not provision privileged group access."
+	}
+	$group
 }
 
 function New-PackageApprovalStage {
@@ -354,6 +409,7 @@ foreach ($row in $rows) {
 	$result = [ordered]@{
 		Name = Get-InputText $row $nameColumn
 		GroupId = Get-InputText $row $groupColumn
+		GroupIds = @()
 		CatalogId = if ($catalog) { $catalog.id } else { $null }
 		AccessPackageId = $null
 		PolicyId = $null
@@ -395,22 +451,17 @@ foreach ($row in $rows) {
 		if ($name -match '(?i)(?<![a-z0-9])(?:access[\s_-]*package|ap|sg)(?![a-z0-9])') {
 			throw "Name '$name' must not contain 'Access Package', 'AP', or 'SG'."
 		}
-		$groupId = [guid]::Empty
-		$isGroupId = [guid]::TryParse($result.GroupId, [ref]$groupId)
-		if ($isWorkbook -and -not $isGroupId -and $result.GroupId) {
-			$groupName = $result.GroupId
-			$groups = @(Get-GraphCollection -Uri '/v1.0/groups' -Filter "displayName eq '$($groupName.Replace("'", "''"))'" -Select 'id,displayName' |
-				Where-Object { $_.displayName -eq $groupName })
-			if ($groups.Count -ne 1) {
-				throw "Access Group '$groupName' matched $($groups.Count) groups by exact name. Use the group object ID."
+		if ($isWorkbook) {
+			$result.GroupIds = @(Get-WorkbookGroupIds -Text $result.GroupId | Select-Object -Unique)
+		}
+		else {
+			$groupId = [guid]::Empty
+			if (-not [guid]::TryParse($result.GroupId, [ref]$groupId) -or $groupId -eq [guid]::Empty) {
+				throw "GroupId '$($result.GroupId)' must be a nonempty GUID."
 			}
-			$isGroupId = [guid]::TryParse($groups[0].id, [ref]$groupId)
+			$result.GroupIds = @("$groupId")
 		}
-		if (-not $isGroupId -or $groupId -eq [guid]::Empty) {
-			if ($isWorkbook) { throw 'Access Group must identify one Entra group by object ID or exact display name.' }
-			throw "GroupId '$($result.GroupId)' must be a nonempty GUID."
-		}
-		$result.GroupId = "$groupId"
+		$result.GroupId = $result.GroupIds -join ','
 
 		if ($processedNames.ContainsKey($name)) {
 			$result.Status = 'Skipped'
@@ -438,28 +489,24 @@ foreach ($row in $rows) {
 				$stageThree = Get-InputText $row 'Approver 3'
 				if ($stageThree -and -not $stageTwo) { throw 'Approver 3 requires Approver 2 to be populated.' }
 			}
-			$group = Invoke-PackageGraphRequest -Method GET `
-				-Uri "/v1.0/groups/$groupId`?`$select=id,displayName,groupTypes,onPremisesSyncEnabled,mailEnabled,securityEnabled,isAssignableToRole" -OutputType Hashtable
-			if ($group.id -ne "$groupId") {
-				throw "Unable to validate group '$groupId'."
-			}
-			if ($group.onPremisesSyncEnabled -eq $true -or $group.groupTypes -contains 'DynamicMembership') {
-				throw "Group '$($group.displayName)' has synchronized or dynamic membership; entitlement management cannot manage its members."
-			}
-			if ($group.groupTypes -notcontains 'Unified' -and ($group.mailEnabled -eq $true -or $group.securityEnabled -ne $true)) {
-				throw "Group '$($group.displayName)' must be a cloud-managed security group or Microsoft 365 group."
-			}
-			if ($group.isAssignableToRole -eq $true) {
-				throw "Group '$($group.displayName)' is role-assignable; this script does not provision privileged group access."
-			}
-
-			$countResponse = Invoke-PackageGraphRequest -Method GET `
-				-Uri "/v1.0/groups/$groupId/transitiveMembers/microsoft.graph.user/`$count" `
-				-Headers @{ ConsistencyLevel = 'eventual' } -OutputType PSObject
 			$userCount = 0
-			if (-not [int]::TryParse("$countResponse", [ref]$userCount) -or $userCount -lt 0) {
-				throw "Graph returned an invalid transitive user count for group '$groupId'."
-			}
+			$groupPlans = @(foreach ($groupId in $result.GroupIds) {
+				$group = Get-PackageGroup -GroupId $groupId
+				$countResponse = Invoke-PackageGraphRequest -Method GET `
+					-Uri "/v1.0/groups/$groupId/transitiveMembers/microsoft.graph.user/`$count" `
+					-Headers @{ ConsistencyLevel = 'eventual' } -OutputType PSObject
+				$groupCount = 0
+				if (-not [int]::TryParse("$countResponse", [ref]$groupCount) -or $groupCount -lt 0) {
+					throw "Graph returned an invalid transitive user count for group '$groupId'."
+				}
+				$userCount = [Math]::Max($userCount, $groupCount)
+				$resource = if ($catalog) { Get-GroupResource -CatalogId $catalog.id -GroupId $groupId } else { $null }
+				$roleScope = if ($resource) { Get-MemberRoleScope -Resource $resource } else { $null }
+				if ($resource -and -not $roleScope) {
+					throw "Existing catalog resource for '$groupId' has no Member role/root scope. Check its provisioning state."
+				}
+				@{ Group = $group; RoleScope = $roleScope }
+			})
 			$result.UserCount = $userCount
 			$ownerIds = @($DefaultAppOwnerIds)
 			if ($isWorkbook) {
@@ -489,13 +536,8 @@ foreach ($row in $rows) {
 			}
 			$result.ApprovalStages = $stages.Count
 
-			$resource = if ($catalog) { Get-GroupResource -CatalogId $catalog.id -GroupId $groupId } else { $null }
-			$roleScope = if ($resource) { Get-MemberRoleScope -Resource $resource } else { $null }
-			if ($resource -and -not $roleScope) {
-				throw "Existing catalog resource for '$groupId' has no Member role/root scope. Check its provisioning state."
-			}
 			if ($PSCmdlet.ShouldProcess(
-				"$name (group $groupId, catalog '$CatalogName')",
+				"$name (groups $($result.GroupId), catalog '$CatalogName')",
 				"Create missing catalog/resource, access package and $($result.ApprovalStages)-stage policy; manager bypass requires a manual portal step"
 			)) {
 				if (-not $catalog) {
@@ -508,7 +550,10 @@ foreach ($row in $rows) {
 					if (-not $catalog.id) { throw 'Graph did not return an ID for the new catalog. Check the portal before rerunning.' }
 				}
 				$result.CatalogId = $catalog.id
-				if (-not $resource) {
+				foreach ($plan in $groupPlans) {
+					if ($plan.RoleScope) { continue }
+					$group = $plan.Group
+					$groupId = $group.id
 					$null = Send-GraphBody -Uri "$baseUri/resourceRequests" -Body @{
 						requestType = 'adminAdd'
 						resource = @{ originId = "$groupId"; originSystem = 'AadGroup'; displayName = $group.displayName }
@@ -518,10 +563,10 @@ foreach ($row in $rows) {
 					for ($attempt = 0; $attempt -lt 6; $attempt++) {
 						if ($attempt -gt 0) { Start-Sleep -Seconds 2 }
 						$resource = Get-GroupResource -CatalogId $catalog.id -GroupId $groupId
-						$roleScope = if ($resource) { Get-MemberRoleScope -Resource $resource } else { $null }
-						if ($roleScope) { break }
+						$plan.RoleScope = if ($resource) { Get-MemberRoleScope -Resource $resource } else { $null }
+						if ($plan.RoleScope) { break }
 					}
-					if (-not $roleScope) {
+					if (-not $plan.RoleScope) {
 						throw "The catalog resource for group '$groupId' did not expose a Member role/root scope within the retry window. Check provisioning before rerunning."
 					}
 				}
@@ -534,7 +579,9 @@ foreach ($row in $rows) {
 				if (-not $package.id) { throw 'Graph did not return an ID for the new package. Check the portal before rerunning.' }
 				$newPackageId = $package.id
 				$result.AccessPackageId = $newPackageId
-				$null = Send-GraphBody -Uri "$baseUri/accessPackages/$newPackageId/resourceRoleScopes" -Body $roleScope
+				foreach ($plan in $groupPlans) {
+					$null = Send-GraphBody -Uri "$baseUri/accessPackages/$newPackageId/resourceRoleScopes" -Body $plan.RoleScope
+				}
 				$policy = Send-GraphBody -Uri "$baseUri/assignmentPolicies" -Body @{
 					displayName = "$name - Requests"
 					description = 'All directory members excluding guests; self, administrator and manager requests.'
