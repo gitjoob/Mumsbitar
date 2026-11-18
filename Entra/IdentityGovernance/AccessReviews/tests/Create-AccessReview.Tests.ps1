@@ -1552,6 +1552,45 @@ Describe 'Unified access review creation and local logging' {
 		$html | Should -Match '2 directly assigned users'
 	}
 
+	It 'matches explicit membership scopes instead of a different enumeration ID (shape: <Shape>)' -TestCases @(
+		@{ Shape = 'query' }, @{ Shape = 'resourceScopes' }
+	) {
+		param($Shape)
+		Set-NestedGroupFixture
+		$second = '44444444-4444-4444-4444-444444444444'
+		$existing = New-ExistingResourceReview -Query "/v1.0/groups/$second/members"
+		if ($Shape -eq 'resourceScopes') {
+			$existing.Scope = @{
+				principalScopes = @(@{ query = '/v1.0/users' })
+				resourceScopes = @($existing.Scope)
+			}
+		}
+		$existing | Add-Member instanceEnumerationScope @{ query = "/v1.0/groups/$script:groupId" }
+		$fixture.ExistingReviews = @($existing)
+		$results = @(& $script:testScript -GroupId $script:groupId -Confirm:$false)
+		$results.Status | Should -Be @('Created', 'Skipped')
+		$results[0].MatchedReviewId | Should -BeNullOrEmpty
+		$results[1].DuplicateMatchType | Should -Be 'Resource'
+		$results[1].MatchedReviewScope | Should -Be "/v1.0/groups/$second/members"
+		Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times 1 -Exactly
+	}
+
+	It 'does not block membership on a scope that targets group owners (relative: <Relative>)' -TestCases @(
+		@{ Relative = $false }, @{ Relative = $true }
+	) {
+		param($Relative)
+		$existing = New-ExistingResourceReview -Query "/v1.0/groups/$script:groupId/owners"
+		if ($Relative) {
+			$existing.Scope.query = './owners'
+			$existing | Add-Member instanceEnumerationScope @{ query = "/v1.0/groups/$script:groupId" }
+		}
+		$fixture.ExistingReviews = @($existing)
+		$result = & $script:testScript -GroupId $script:groupId -Confirm:$false
+		$result.Status | Should -Be 'Created'
+		$result.MatchedReviewId | Should -BeNullOrEmpty
+		Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times 1 -Exactly
+	}
+
 	It 'writes the requested HTML before emitting the full result batch' {
 		$fixture.Assignments += [pscustomobject]@{ PrincipalType = 'User'; PrincipalId = $script:ownerId }
 		$fixture.ApplicationOwners = @(

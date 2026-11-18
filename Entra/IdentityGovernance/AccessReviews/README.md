@@ -123,6 +123,8 @@ Group reviews remove user membership, not group-to-group or group-to-app assignm
 - Duplicate matching requires the same **group or service-principal Object ID**
   in the existing review's resource scope. Names and legacy aliases protect
   same-resource reruns, including completed reviews, but never block another ID.
+  An enumeration ID is used only to resolve a relative membership or assignment
+  scope; it does not override an explicit resource scope.
 - Shared users, nested users, access-package assignments, and broad or unknown
   enumerations with no identifiable resource ID are not duplicate evidence.
   Active/scheduled or future recurring reviews on the same ID are checked

@@ -132,9 +132,12 @@ function Get-ReviewQueryPath {
 function Get-ReviewResourceCoverage {
 	param([object]$Definition)
 	$scope = Get-ReviewProperty $Definition 'scope'
+	$scopeQuery = [string](Get-ReviewProperty $scope 'query')
+	$resourceScopes = @(Get-ReviewProperty $scope 'resourceScopes')
 	$enumeration = Get-ReviewProperty $Definition 'instanceEnumerationScope'
 	$query = [string](Get-ReviewProperty $enumeration 'query')
-	if (-not [string]::IsNullOrWhiteSpace($query)) {
+	# Enumeration supplies a base only for a relative scope, not a second resource target.
+	if ($query -and -not $resourceScopes.Count -and $scopeQuery -like './*') {
 		$path = Get-ReviewQueryPath $query
 		if ($path -match '^/(groups|servicePrincipals)\?\$filter=(.+)$') {
 			$collection = $Matches[1]
@@ -151,36 +154,28 @@ function Get-ReviewResourceCoverage {
 				return
 			}
 		}
-		if ($path -match '^/(groups|servicePrincipals)/([0-9a-fA-F-]{36})(?=[/?]|$)') {
+		if ($path -match '^/(groups|servicePrincipals)/([0-9a-fA-F-]{36})/?(?:\?.*)?$') {
 			$kind = $Matches[1]
 			$id = [guid]::Empty
-			$root = $Matches[0]
 			if (-not [guid]::TryParse($Matches[2], [ref]$id) -or $id -eq [guid]::Empty) {
 				throw "Review '$($Definition.Id)' contains an invalid enumerated resource ID."
 			}
-			$key = if ($kind -eq 'groups') { "GroupMembership:$id" } else { "ApplicationDirectUsers:$id" }
-			$coverage = 'Partial'
-			if ($path.Substring($root.Length) -in @('', '/') -and $scope) {
-				$resolvedScope = @{}
-				foreach ($property in @('query', 'queryType', 'queryRoot', 'inactiveDuration', '@odata.type', 'principalScopes', 'resourceScopes')) {
-					$value = Get-ReviewProperty $scope $property
-					if ($null -ne $value) { $resolvedScope[$property] = $value }
-				}
-				if ($resolvedScope.query -like './*') { $resolvedScope.query = $root + $resolvedScope.query.Substring(1) }
-				if ($resolvedScope.query -or $resolvedScope.resourceScopes) {
-					$resolved = @(Get-ReviewResourceCoverage ([pscustomobject]@{ Id = $Definition.Id; Scope = $resolvedScope }))
-					if (@($resolved | Where-Object { $_.Key -eq $key -and $_.Coverage -eq 'Full' }).Count) { $coverage = 'Full' }
-				}
+			$resolvedScope = @{ query = "/$kind/$id" + $scopeQuery.Substring(1) }
+			foreach ($property in @('queryRoot', 'inactiveDuration', '@odata.type')) {
+				$value = Get-ReviewProperty $scope $property
+				if ($null -ne $value) { $resolvedScope[$property] = $value }
 			}
-			return [pscustomobject]@{
-				Key = $key; Coverage = $coverage
-				Query = "instanceEnumerationScope: $query; scope: $($scope | ConvertTo-Json -Depth 10 -Compress)"
+			foreach ($entry in @(Get-ReviewResourceCoverage ([pscustomobject]@{ Id = $Definition.Id; Scope = $resolvedScope }))) {
+				if ($path.Contains('?')) { $entry.Coverage = 'Partial' }
+				$entry.Query = "instanceEnumerationScope: $query; resolved scope: $($entry.Query)"
+				$entry
 			}
+			return
 		}
 		# A broad enumeration does not identify a target. Still inspect any explicit resource scopes.
 	}
 	if (-not $scope) { throw "Review '$($Definition.Id)' did not return its scope." }
-	$resourceScopes = @(Get-ReviewProperty $scope 'resourceScopes')
+	$hasExplicitResources = $resourceScopes.Count -gt 0
 	$allUsers = $true
 	if ($resourceScopes.Count) {
 		$principalScopes = @(Get-ReviewProperty $scope 'principalScopes')
@@ -205,12 +200,15 @@ function Get-ReviewResourceCoverage {
 			$key = if ($kind -eq 'groups') { "GroupMembership:$id" } else { "ApplicationDirectUsers:$id" }
 			$membershipPath = if ($kind -eq 'groups') { '^/(?:transitiveMembers|members)(?:/microsoft\.graph\.user)?/?$' }
 				else { '^/appRoleAssignedTo/?$' }
+			$resourcePath = ($suffix -split '\?', 2)[0]
+			$resourceRoot = $hasExplicitResources -and $resourcePath -in @('', '/')
+			if (-not $resourceRoot -and $resourcePath -notmatch $membershipPath) { continue }
 			$restricted = (Get-ReviewProperty $scope 'inactiveDuration') -or
 				(Get-ReviewProperty $scope '@odata.type') -match 'InactiveUsers' -or
 				(Get-ReviewProperty $resourceScope 'inactiveDuration') -or
 				(Get-ReviewProperty $resourceScope 'queryRoot')
 			$full = $allUsers -and -not $restricted -and ($suffix -match $membershipPath -or
-				((Get-ReviewProperty $scope 'resourceScopes') -and $suffix -in @('', '/')))
+				($resourceRoot -and $suffix -in @('', '/')))
 			[pscustomobject]@{ Key = $key; Coverage = if ($full) { 'Full' } else { 'Partial' }; Query = $query }
 		}
 	}
