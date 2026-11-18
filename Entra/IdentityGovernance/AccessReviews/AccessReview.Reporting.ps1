@@ -138,27 +138,17 @@ function New-AccessReviewHtml {
 	)
 
 	$followUpTypes = @('ServicePrincipalOwner', 'ApplicationNonUserAssignment')
-	$Results = @(
-		$Results | Where-Object { $_.TargetType -notin $followUpTypes -or -not $_.ServicePrincipalId }
-		foreach ($followUp in @($Results | Where-Object { $_.TargetType -in $followUpTypes -and $_.ServicePrincipalId } |
-			Group-Object -Property ServicePrincipalId, TargetType, Status)) {
-			$first = $followUp.Group[0]
-			$ownerItems = $null
-			$assignmentItems = $null
-			if ($first.TargetType -eq 'ServicePrincipalOwner') {
-				$ownerItems = @($followUp.Group)
-			}
-			else {
-				$assignmentItems = @($followUp.Group)
-			}
-			[pscustomobject]@{
-				TargetType = $first.TargetType; Target = $first.Target
-				ServicePrincipalId = $first.ServicePrincipalId
-				ServicePrincipalName = $first.ServicePrincipalName
-				Status = $first.Status; Reason = $first.Reason; Role = $first.Role
-				OwnerItems = $ownerItems
-				AssignmentItems = $assignmentItems
-			}
+	$followUpItems = @($Results | Where-Object { $_.TargetType -in $followUpTypes })
+	$Results = @($Results | Where-Object { $_.TargetType -notin $followUpTypes })
+	$followUpApplications = @(
+		foreach ($bucket in @($followUpItems | Where-Object ServicePrincipalId | Group-Object ServicePrincipalId)) {
+			$first = $bucket.Group[0]
+			$label = if ($first.ServicePrincipalName) { $first.ServicePrincipalName } elseif ($first.Target) { $first.Target } else { $first.ServicePrincipalId }
+			[pscustomobject]@{ Label = $label; ServicePrincipalId = $first.ServicePrincipalId; Items = $bucket.Group }
+		}
+		foreach ($item in @($followUpItems | Where-Object { -not $_.ServicePrincipalId })) {
+			$label = if ($item.Target) { $item.Target } else { 'Unknown application' }
+			[pscustomobject]@{ Label = $label; ServicePrincipalId = $null; Items = @($item) }
 		}
 	)
 	$body = [System.Text.StringBuilder]::new()
@@ -183,10 +173,10 @@ function New-AccessReviewHtml {
 		$null = $body.AppendLine("<div class=`"metric`"><strong>$count</strong><span>$(ConvertTo-AccessReviewHtmlText $status)</span></div>")
 	}
 	$null = $body.AppendLine('</section>')
-	if (@($Results | Where-Object { $_.OwnerItems -or $_.AssignmentItems }).Count) {
-		$null = $body.AppendLine('<p class="muted">App follow-up is grouped by application, type and outcome. Open an entry to see individual owners or non-user assignments. Raw results and logs retain each record.</p>')
+	if ($followUpItems.Count) {
+		$null = $body.AppendLine("<p class=`"muted`"><a href=`"#app-follow-up`">Application follow-up: $($followUpItems.Count) recorded item(s)</a>. These are not counted as review targets above.</p>")
 	}
-	$groups = @($Results | Where-Object { $_.GroupId -and $_.TargetType -notin @('ApplicationDirectUsers', 'ServicePrincipalOwner', 'ApplicationNonUserAssignment') })
+	$groups = @($Results | Where-Object { $_.GroupId -and $_.TargetType -ne 'ApplicationDirectUsers' })
 	$knownGroups = @($groups | Where-Object { $_.GroupCountBasis -eq 'DirectUsers' -and $null -ne $_.MemberCount })
 	$unknownGroups = @($groups | Where-Object { $_.GroupCountBasis -ne 'DirectUsers' -and $null -ne $_.MemberCount })
 	$groupTotal = [long](($knownGroups | Measure-Object MemberCount -Sum).Sum)
@@ -195,6 +185,9 @@ function New-AccessReviewHtml {
 	$null = $body.AppendLine('<nav><a href="#topology">Resource topology</a><a href="#configuration">Stages and details</a><a href="#inventory">Search inventory</a></nav>')
 	$applications = @{}
 	$applicationSources = @(
+		foreach ($application in @($followUpApplications | Where-Object ServicePrincipalId)) {
+			[pscustomobject]@{ ServicePrincipalId = $application.ServicePrincipalId; ServicePrincipalName = $application.Label }
+		}
 		$Context.Applications | Where-Object { $_ }
 		for ($i = 0; $i -lt $Results.Count; $i++) {
 			$result = $Results[$i]
@@ -360,23 +353,7 @@ function New-AccessReviewHtml {
 			$null = $body.AppendLine('</div><p class="notice">A child review covers its direct users, not its membership in the parent. Removal can affect every resource using the group. Nested groups do not necessarily convey enterprise-application assignments.</p>')
 		}
 		$config = $result.ReviewConfiguration
-		if ($result.OwnerItems) {
-			$null = $body.AppendLine("<p class=`"notice warning`">Ownership requires manual review; these owners are not subjects certified by the application user-access review. No ownership changes are applied.</p><details><summary>Recorded owners ($($result.OwnerItems.Count))</summary><div class=`"table-wrap`"><table><thead><tr><th>Owner</th><th>Type</th><th>Object ID</th><th>Notes</th></tr></thead><tbody>")
-			foreach ($owner in $result.OwnerItems) {
-				$name = if ($owner.PrincipalDisplayName) { $owner.PrincipalDisplayName } else { 'Name not recorded' }
-				$null = $body.AppendLine("<tr><td>$(ConvertTo-AccessReviewHtmlText $name)</td><td>$(ConvertTo-AccessReviewHtmlText $owner.PrincipalType)</td><td>$(ConvertTo-AccessReviewHtmlText $owner.PrincipalId)</td><td>$(ConvertTo-AccessReviewHtmlText $owner.Reason)</td></tr>")
-			}
-			$null = $body.AppendLine('</tbody></table></div></details>')
-		}
-		elseif ($result.AssignmentItems) {
-			$null = $body.AppendLine("<p class=`"notice warning`">These non-user assignments require manual follow-up. They are not covered by the application user-access review.</p><details><summary>Recorded non-user assignments ($($result.AssignmentItems.Count))</summary><div class=`"table-wrap`"><table><thead><tr><th>Principal</th><th>Type</th><th>Object ID</th><th>Assignment ID</th><th>App role ID</th><th>Notes</th></tr></thead><tbody>")
-			foreach ($assignment in $result.AssignmentItems) {
-				$principalName = if ($assignment.PrincipalDisplayName) { $assignment.PrincipalDisplayName } else { 'Name not recorded' }
-				$null = $body.AppendLine("<tr><td>$(ConvertTo-AccessReviewHtmlText $principalName)</td><td>$(ConvertTo-AccessReviewHtmlText $assignment.PrincipalType)</td><td>$(ConvertTo-AccessReviewHtmlText $assignment.PrincipalId)</td><td>$(ConvertTo-AccessReviewHtmlText $assignment.AssignmentId)</td><td>$(ConvertTo-AccessReviewHtmlText $assignment.AppRoleId)</td><td>$(ConvertTo-AccessReviewHtmlText $assignment.Reason)</td></tr>")
-			}
-			$null = $body.AppendLine('</tbody></table></div></details>')
-		}
-		elseif ($config -and @($config.Stages).Count) {
+		if ($config -and @($config.Stages).Count) {
 			$label = if ($result.Status -eq 'Created') { 'Submitted configuration (not fetched live)' } else { 'Computed configuration (not evidence of creation)' }
 			$null = $body.AppendLine("<h4>$label</h4><p>Frequency: $(ConvertTo-AccessReviewHtmlText $config.Frequency). First planned instance: $(ConvertTo-AccessReviewHtmlText $config.StartDate), $([int]$config.InstanceDurationInDays) days.</p>")
 			if ($config.DescriptionForReviewers) {
@@ -441,10 +418,7 @@ function New-AccessReviewHtml {
 		$name = if ($result.ReviewName) { $result.ReviewName } elseif ($result.Target) { $result.Target } else { 'Unnamed recorded item' }
 		$outcome = ConvertTo-AccessReviewHtmlText (Get-AccessReviewReportOutcome $result)
 		$type = ConvertTo-AccessReviewHtmlText $result.TargetType
-		$typeLabel = if ($result.TargetType -eq 'ApplicationNonUserAssignment') { 'Non-user app-role assignments' } else { $type }
-		$population = if ($result.OwnerItems) { "$($result.OwnerItems.Count) recorded owner$(if ($result.OwnerItems.Count -ne 1) { 's' })" }
-		elseif ($result.AssignmentItems) { "$($result.AssignmentItems.Count) recorded non-user assignment$(if ($result.AssignmentItems.Count -ne 1) { 's' })" }
-		elseif ($null -ne $result.MemberCount) {
+		$population = if ($null -ne $result.MemberCount) {
 			if ($result.GroupCountBasis -eq 'DirectUsers') { "$($result.MemberCount) direct users" }
 			else { "$($result.MemberCount) recorded members (basis unknown)" }
 		}
@@ -463,10 +437,29 @@ function New-AccessReviewHtml {
 		) -join ' '
 		$searchText = ConvertTo-AccessReviewHtmlText (($result | ConvertTo-Json -Depth 10 -Compress))
 		$groupLink = if ($result.GroupId) { New-AccessReviewGroupLink -GroupId $result.GroupId } else { '' }
-		$stageFlow = if ($result.TargetType -in $followUpTypes) { '<small>Not applicable</small>' } else { ConvertTo-AccessReviewStageFlowHtml $result }
-		$null = $body.AppendLine("<tr data-status=`"$outcome`" data-type=`"$type`" data-search=`"$searchText`"><td><button class=`"link view`" data-target=`"review-$i`">$(ConvertTo-AccessReviewHtmlText $name)</button><small>$typeLabel</small>$groupLink</td><td>$(ConvertTo-AccessReviewHtmlText $population)</td><td>$stageFlow</td><td><span class=`"badge`">$outcome</span></td><td>$(ConvertTo-AccessReviewHtmlText $notes)</td></tr>")
+		$stageFlow = ConvertTo-AccessReviewStageFlowHtml $result
+		$null = $body.AppendLine("<tr data-status=`"$outcome`" data-type=`"$type`" data-search=`"$searchText`"><td><button class=`"link view`" data-target=`"review-$i`">$(ConvertTo-AccessReviewHtmlText $name)</button><small>$type</small>$groupLink</td><td>$(ConvertTo-AccessReviewHtmlText $population)</td><td>$stageFlow</td><td><span class=`"badge`">$outcome</span></td><td>$(ConvertTo-AccessReviewHtmlText $notes)</td></tr>")
 	}
-	$null = $body.AppendLine('</tbody></table></div><div id="pagination"><button id="previous" type="button">Previous</button><span id="page"></span><button id="next" type="button">Next</button></div><noscript><p>JavaScript is required for filtering, pagination, theme switching and selecting details. All inventory rows remain visible without JavaScript.</p></noscript></section><footer>Offline report. Existing reviews were not modified by report generation. Counts describe discovery-time populations, not guaranteed current membership.</footer></main>')
+	$null = $body.AppendLine('</tbody></table></div><div id="pagination"><button id="previous" type="button">Previous</button><span id="page"></span><button id="next" type="button">Next</button></div><noscript><p>JavaScript is required for filtering, pagination, theme switching and selecting details. All inventory rows remain visible without JavaScript.</p></noscript></section>')
+	if ($followUpApplications.Count) {
+		$null = $body.AppendLine('<section id="app-follow-up" class="panel"><h2>Application follow-up</h2><p class="muted">Ownership and other app-role assignments listed here are not covered by the user-access review. No review was created for these items. Expand an application to see the individual records.</p>')
+		foreach ($application in $followUpApplications) {
+			$ownerCount = @($application.Items | Where-Object TargetType -eq 'ServicePrincipalOwner').Count
+			$assignmentCount = $application.Items.Count - $ownerCount
+			$summary = @(if ($ownerCount) { "Owners: $ownerCount" }; if ($assignmentCount) { "Other app-role assignments: $assignmentCount" }) -join '; '
+			$appId = if ($application.ServicePrincipalId) { ConvertTo-AccessReviewHtmlText $application.ServicePrincipalId } else { 'Not recorded' }
+			$null = $body.AppendLine("<details class=`"app-follow-up-details`"><summary>$(ConvertTo-AccessReviewHtmlText $application.Label) &mdash; $summary</summary><p>Application Object ID: $appId</p><div class=`"table-wrap`"><table><thead><tr><th>Item</th><th>Principal</th><th>Type</th><th>Object ID</th><th>Assignment ID</th><th>App role ID</th><th>Reason</th></tr></thead><tbody>")
+			foreach ($item in $application.Items) {
+				$itemLabel = if ($item.TargetType -eq 'ServicePrincipalOwner') { 'Owner' } else { 'App-role assignment' }
+				$principalName = if ($item.PrincipalDisplayName) { $item.PrincipalDisplayName } else { 'Name not recorded' }
+				$principalType = if ($item.PrincipalType) { $item.PrincipalType } else { 'Not recorded' }
+				$null = $body.AppendLine("<tr><td>$itemLabel</td><td>$(ConvertTo-AccessReviewHtmlText $principalName)</td><td>$(ConvertTo-AccessReviewHtmlText $principalType)</td><td>$(ConvertTo-AccessReviewHtmlText $item.PrincipalId)</td><td>$(ConvertTo-AccessReviewHtmlText $item.AssignmentId)</td><td>$(ConvertTo-AccessReviewHtmlText $item.AppRoleId)</td><td>$(ConvertTo-AccessReviewHtmlText $item.Reason)</td></tr>")
+			}
+			$null = $body.AppendLine('</tbody></table></div></details>')
+		}
+		$null = $body.AppendLine('</section>')
+	}
+	$null = $body.AppendLine('<footer>Offline report. Existing reviews were not modified by report generation. Counts describe discovery-time populations, not guaranteed current membership.</footer></main>')
 	$template = @'
 <!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">

@@ -288,7 +288,7 @@ Describe 'Offline access review reporting' {
 		$html | Should -Match '<strong>3</strong> direct-application user counts, separately'
 		$html | Should -Match 'Synced / report only'
 		$html | Should -Match 'Remediate denied access in on-premises AD'
-		$html | Should -Match 'Ownership requires manual review'
+		$html | Should -Match '<h2>Application follow-up</h2>'
 	}
 
 	It 'groups owners by application without merging same-named applications or changing audit results (offline: <Offline>)' -TestCases @(
@@ -320,17 +320,16 @@ Describe 'Offline access review reporting' {
 		}
 		else { $html = New-AccessReviewHtml -Results $results -Context $script:context }
 		$inventory = [regex]::Match($html, '(?s)<tbody id="rows">(.*?)</tbody>').Groups[1].Value
-		[regex]::Matches($inventory, '<tr data-status=').Count | Should -Be 3
-		[regex]::Matches($inventory, 'data-type="ServicePrincipalOwner"').Count | Should -Be 2
-		[regex]::Matches($html, 'class="review-detail" hidden').Count | Should -Be 3
-		$html | Should -Match '<strong>2</strong><span>Manual review required'
-		$html | Should -Match 'Recorded owners \(2\)'
-		$html | Should -Match '2 recorded owners'
+		[regex]::Matches($inventory, '<tr data-status=').Count | Should -Be 1
+		[regex]::Matches($html, 'class="app-follow-up-details"').Count | Should -Be 2
+		$html | Should -Match '<strong>0</strong><span>Manual review required'
+		$html | Should -Match '<summary>Payroll &mdash; Owners: 2</summary>'
+		$html | Should -Match '<summary>Payroll &mdash; Owners: 1</summary>'
 		$html | Should -Match '&lt;Owner &amp; One&gt;'
 		$html | Should -Not -Match '<Owner'
 		foreach ($id in @('owner-one', 'owner-two', 'owner-three')) {
 			$html | Should -Match $id
-			$inventory | Should -Match $id
+			$inventory | Should -Not -Match $id
 		}
 		($results | ConvertTo-Json -Depth 10) | Should -Be $before
 	}
@@ -344,16 +343,26 @@ Describe 'Offline access review reporting' {
 		})
 		$html = New-AccessReviewHtml -Results $results -Context $script:context
 		$inventory = [regex]::Match($html, '(?s)<tbody id="rows">(.*?)</tbody>').Groups[1].Value
-		[regex]::Matches($inventory, '<tr data-status=').Count | Should -Be 2
-		$inventory | Should -Match 'First application'
-		$inventory | Should -Match 'Second application'
+		$inventory.Trim() | Should -BeNullOrEmpty
+		[regex]::Matches($html, 'Application Object ID: Not recorded').Count | Should -Be 2
+		$html | Should -Match '<summary>First application &mdash; Owners: 1</summary>'
+		$html | Should -Match '<summary>Second application &mdash; Owners: 1</summary>'
 	}
 
-	It 'rolls up 58 non-user assignments into one searchable row per application in offline export' {
+	It 'puts 58 assignments and an owner in one follow-up entry while retaining actual review targets in offline export' {
 		$app = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
 		$other = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb'
 		@(
 			@{ Event = 'RunStarted'; RunId = 'assignment-run' }
+			@{ Event = 'ManualReviewRequired'; RunId = 'assignment-run'; Result = @{
+				TargetType = 'ServicePrincipalOwner'; Target = 'Payroll'; Status = 'Manual review required'
+				ServicePrincipalId = $app; PrincipalId = 'owner-one'
+			} }
+			@{ Event = 'ApplicationResult'; RunId = 'assignment-run'; Result = @{
+				TargetType = 'ApplicationDirectUsers'; Target = 'Payroll'; Status = 'Manual review required'
+				ServicePrincipalId = $app; SubjectCount = 3; DuplicateMatchType = 'UncertainResourceScope'
+				Reason = 'The same application has partial existing coverage.'
+			} }
 			foreach ($i in 1..59) {
 				@{ Event = 'ManualReviewRequired'; RunId = 'assignment-run'; Result = @{
 					TargetType = 'ApplicationNonUserAssignment'; Target = 'Payroll'; Status = 'Manual review required'
@@ -367,10 +376,14 @@ Describe 'Offline access review reporting' {
 		& $script:exporter -LogPath $script:logPath -OutputPath $script:outputPath
 		$html = Get-Content $script:outputPath -Raw
 		$inventory = [regex]::Match($html, '(?s)<tbody id="rows">(.*?)</tbody>').Groups[1].Value
-		[regex]::Matches($inventory, 'data-type="ApplicationNonUserAssignment"').Count | Should -Be 2
-		$inventory | Should -Match '58 recorded non-user assignments'
-		$inventory | Should -Match 'assignment-58'
-		$html | Should -Match 'Recorded non-user assignments \(58\)'
+		[regex]::Matches($inventory, '<tr data-status=').Count | Should -Be 1
+		$inventory | Should -Match 'data-status="Manual review required" data-type="ApplicationDirectUsers"'
+		$inventory | Should -Match 'The same application has partial existing coverage\.'
+		$inventory | Should -Not -Match 'ApplicationNonUserAssignment|assignment-58|owner-one'
+		[regex]::Matches($html, 'class="app-follow-up-details"').Count | Should -Be 2
+		$html | Should -Match '<summary>Payroll &mdash; Owners: 1; Other app-role assignments: 58</summary>'
+		$html | Should -Match '<summary>Payroll &mdash; Other app-role assignments: 1</summary>'
+		$html | Should -Match '<strong>1</strong><span>Manual review required'
 		$html | Should -Match '<td>Automation &lt;58&gt;</td><td>ServicePrincipal</td><td>principal-58</td><td>assignment-58</td><td>role-58</td>'
 		$html | Should -Not -Match 'class="stage-flow"'
 	}
