@@ -17,10 +17,12 @@ description. Blank optional values are omitted.
 DefaultAppOwnerIds supplies owners when a row's AppOwnerIds is empty.
 FallbackApproverIds is mandatory and is used when a recipient has no manager.
 For XLSX, install ImportExcel and use the first worksheet. Access Package Name
-sets the name; Access Group accepts one exact unique group name or one or
-more group object IDs separated by commas, semicolons, or line breaks.
+sets the name; GroupId accepts one or more Entra group object IDs separated
+by commas, semicolons, or line breaks. When GroupId is present, Access Group
+is ignored. Older workbooks can still use Access Group.
 Approver 1 List must be <Employee Manager>. Approver 2 and Approver 3 accept
 user object IDs, UPNs, or mail addresses separated by semicolons, commas, or line breaks.
+Use NA in Approver 3 to omit the third stage.
 Names and descriptions must use business-friendly application and access terms.
 Names must not contain "Access Package", "AP", or "SG", or identify the owner.
 
@@ -87,13 +89,15 @@ if ($isWorkbook) {
 		@($_.PSObject.Properties | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.Value) }).Count
 	})
 	if (-not $rows.Count) { throw 'The first worksheet contains no access packages.' }
-	foreach ($column in 'Access Package Name', 'Access Group', 'Approver 1 List') {
+	$groupColumn = if ($rows[0].PSObject.Properties['GroupId']) { 'GroupId' } else { 'Access Group' }
+	foreach ($column in @('Access Package Name', $groupColumn, 'Approver 1 List')) {
 		if (-not $rows[0].PSObject.Properties[$column]) {
 			throw "The first worksheet is missing the '$column' column."
 		}
 	}
 }
 elseif ($extension -eq '.csv') {
+	$groupColumn = 'GroupId'
 	$rows = @(Import-Csv -LiteralPath $InputPath)
 	if (-not $rows.Count) { throw 'The CSV file contains no access packages.' }
 	foreach ($column in 'GroupId', 'AppOwnerIds') {
@@ -109,6 +113,7 @@ elseif ($extension -eq '.csv') {
 else { throw "Unsupported input file extension '$extension'. Use .csv or .xlsx." }
 
 Import-Module Microsoft.Graph.Authentication
+Import-Module Microsoft.Graph.Groups
 $context = Get-MgContext
 if (-not $context) {
 	throw 'Connect to Microsoft Graph first.'
@@ -277,18 +282,18 @@ function Get-WorkbookApproverIds {
 }
 
 function Get-WorkbookGroupIds {
-	param([string]$Text)
+	param([string]$Text, [string]$Column)
 
-	if (-not $Text) { throw 'Access Group must contain group object IDs or one exact group display name.' }
+	if (-not $Text) { throw "$Column must not be blank." }
 	$tokens = @($Text -split '[;,\r\n]+' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 	$guidTokens = @($tokens | Where-Object { $parsed = [guid]::Empty; [guid]::TryParse($_, [ref]$parsed) })
-	if ($guidTokens.Count) {
-		if ($guidTokens.Count -ne $tokens.Count) {
-			throw "Access Group '$Text' mixes group object IDs with invalid values. Use only group object IDs when listing multiple groups."
+	if ($Column -eq 'GroupId' -or $guidTokens.Count) {
+		if (-not $tokens.Count -or $guidTokens.Count -ne $tokens.Count) {
+			throw "$Column '$Text' must contain only valid Entra group object IDs."
 		}
 		foreach ($token in $guidTokens) {
 			$id = [guid]$token
-			if ($id -eq [guid]::Empty) { throw 'Access Group contains the empty GUID.' }
+			if ($id -eq [guid]::Empty) { throw "$Column contains the empty GUID." }
 			"$id"
 		}
 		return
@@ -309,8 +314,7 @@ function Get-WorkbookGroupIds {
 function Get-PackageGroup {
 	param([guid]$GroupId)
 
-	$group = Invoke-PackageGraphRequest -Method GET `
-		-Uri "/v1.0/groups/$GroupId`?`$select=id,displayName,groupTypes,onPremisesSyncEnabled,mailEnabled,securityEnabled,isAssignableToRole" -OutputType Hashtable
+	$group = Get-MgGroup -GroupId "$GroupId" -Property id, displayName, groupTypes, onPremisesSyncEnabled, mailEnabled, securityEnabled, isAssignableToRole -ErrorAction Stop
 	if ($group.id -ne "$GroupId") {
 		throw "Unable to validate group '$GroupId'."
 	}
@@ -405,11 +409,11 @@ $processedNames = @{}
 
 foreach ($row in $rows) {
 	$nameColumn = if ($isWorkbook) { 'Access Package Name' } else { 'Name' }
-	$groupColumn = if ($isWorkbook) { 'Access Group' } else { 'GroupId' }
 	$result = [ordered]@{
 		Name = Get-InputText $row $nameColumn
 		GroupId = Get-InputText $row $groupColumn
 		GroupIds = @()
+		GroupNames = @()
 		CatalogId = if ($catalog) { $catalog.id } else { $null }
 		AccessPackageId = $null
 		PolicyId = $null
@@ -452,7 +456,7 @@ foreach ($row in $rows) {
 			throw "Name '$name' must not contain 'Access Package', 'AP', or 'SG'."
 		}
 		if ($isWorkbook) {
-			$result.GroupIds = @(Get-WorkbookGroupIds -Text $result.GroupId | Select-Object -Unique)
+			$result.GroupIds = @(Get-WorkbookGroupIds -Text $result.GroupId -Column $groupColumn | Select-Object -Unique)
 		}
 		else {
 			$groupId = [guid]::Empty
@@ -487,6 +491,7 @@ foreach ($row in $rows) {
 				}
 				$stageTwo = Get-InputText $row 'Approver 2'
 				$stageThree = Get-InputText $row 'Approver 3'
+				if ($stageThree -eq 'NA') { $stageThree = '' }
 				if ($stageThree -and -not $stageTwo) { throw 'Approver 3 requires Approver 2 to be populated.' }
 			}
 			$userCount = 0
@@ -507,6 +512,7 @@ foreach ($row in $rows) {
 				}
 				@{ Group = $group; RoleScope = $roleScope }
 			})
+			$result.GroupNames = @(foreach ($plan in $groupPlans) { $plan.Group.DisplayName })
 			$result.UserCount = $userCount
 			$ownerIds = @($DefaultAppOwnerIds)
 			if ($isWorkbook) {
@@ -536,8 +542,9 @@ foreach ($row in $rows) {
 			}
 			$result.ApprovalStages = $stages.Count
 
+			$groupLabels = @($groupPlans | ForEach-Object { "$($_.Group.DisplayName) [$($_.Group.Id)]" }) -join '; '
 			if ($PSCmdlet.ShouldProcess(
-				"$name (groups $($result.GroupId), catalog '$CatalogName')",
+				"$name (groups: $groupLabels; catalog '$CatalogName')",
 				"Create missing catalog/resource, access package and $($result.ApprovalStages)-stage policy; manager bypass requires a manual portal step"
 			)) {
 				if (-not $catalog) {

@@ -1,5 +1,6 @@
 BeforeAll {
 	Import-Module Microsoft.Graph.Authentication
+	Import-Module Microsoft.Graph.Groups
 	$script:scriptPath = Join-Path $PSScriptRoot '../Create-AccessPackage.ps1'
 	$script:groupId = '11111111-1111-1111-1111-111111111111'
 	$script:ownerId = '22222222-2222-2222-2222-222222222222'
@@ -28,7 +29,7 @@ BeforeAll {
 			'Approver 1 List' = '<Employee Manager>'; 'Approver 2' = ''; 'Approver 3' = ''
 		}
 		foreach ($key in $Overrides.Keys) { $columns[$key] = $Overrides[$key] }
-		$path = Join-Path $TestDrive 'package [template].xlsx'
+		$path = Join-Path $TestDrive "package [template] $([guid]::NewGuid()).xlsx"
 		[pscustomobject]$columns | Export-Excel -Path $path -WorksheetName 'Packages'
 		$path
 	}
@@ -86,6 +87,13 @@ Finance reporting - Read reports,View financial reports.,$script:groupId,$script
 		}
 		Mock Start-Sleep {}
 		$fixture = $script:graphFixture
+		Mock Get-MgGroup ({
+			param($GroupId)
+			if ($fixture.AdditionalGroups.ContainsKey($GroupId)) {
+				return $fixture.AdditionalGroups[$GroupId]
+			}
+			$fixture.Group
+		}.GetNewClosure())
 		$fixtureGroupId = $script:groupId
 		Mock Invoke-MgGraphRequest ({
 			param($Uri, $Method, $Body)
@@ -124,10 +132,6 @@ Finance reporting - Read reports,View financial reports.,$script:groupId,$script
 				if ($uriText -match '/groups/([^/]+)/transitiveMembers/microsoft.graph.user/\$count$') {
 					if ($fixture.GroupCounts.ContainsKey($Matches[1])) { return $fixture.GroupCounts[$Matches[1]] }
 					return $fixture.UserCount
-				}
-				if ($uriText -match '/groups/([^/?]+)\?') {
-					if ($fixture.AdditionalGroups.ContainsKey($Matches[1])) { return $fixture.AdditionalGroups[$Matches[1]] }
-					return $fixture.Group
 				}
 				if ($decodedUri.Contains("/groups?`$filter=displayName eq 'Finance''s Readers'&")) {
 					return @{ value = $fixture.NamedGroups }
@@ -230,6 +234,17 @@ Finance reporting - Read reports,View financial reports.,$script:groupId,$script
 			$stages[2].primaryApprovers[0].userId | Should -Be $script:fallbackId
 		}
 
+		It 'submits exactly two stages when Approver 3 is NA' {
+			$script:csvPath = New-WorkbookFixture @{ GroupId = $script:groupId; 'Approver 2' = 'owner-mail@example.test'; 'Approver 3' = ' na ' }
+			$result = Invoke-Creation
+			$result.Status | Should -Be 'Created'
+			$result.ApprovalStages | Should -Be 2
+			$stages = (Get-PostedBody '/assignmentPolicies').requestApprovalSettings.stages
+			$stages | Should -HaveCount 2
+			$stages[0].primaryApprovers[0].'@odata.type' | Should -Be '#microsoft.graph.targetManager'
+			$stages[1].primaryApprovers[0].userId | Should -Be $script:ownerId
+		}
+
 		It 'stops on an unreadable workbook before worksheet validation or Graph access' {
 			$script:csvPath = Join-Path $TestDrive 'not-a-workbook.xlsx'
 			'not an Excel package' | Set-Content -LiteralPath $script:csvPath
@@ -268,11 +283,20 @@ Finance reporting - Read reports,View financial reports.,$script:groupId,$script
 			$script:graphFixture.ResourceExists = $false
 			$script:graphFixture.AdditionalGroups[$second] = $script:graphFixture.Group.Clone()
 			$script:graphFixture.AdditionalGroups[$second].id = $second
+			$script:graphFixture.AdditionalGroups[$second].displayName = 'Second group from Entra'
 			$script:graphFixture.GroupCounts[$second] = '501'
-			$script:csvPath = New-WorkbookFixture @{ 'Access Group' = "$script:groupId,$second;`n$script:groupId"; 'Approver 2' = 'owner-mail@example.test' }
+			$script:csvPath = New-WorkbookFixture @{
+				GroupId = "$script:groupId,$second;`n$script:groupId"
+				'Access Group' = "Finance's Readers"
+				'Approver 2' = 'owner-mail@example.test'
+			}
 			$result = Invoke-Creation
 			$result.Status | Should -Be 'Created'
 			$result.GroupIds | Should -Be @($script:groupId, $second)
+			$result.GroupNames | Should -Be @('SG_Finance_Reports', 'Second group from Entra')
+			Should -Invoke Get-MgGroup -Times 1 -Exactly -ParameterFilter { $GroupId -eq $script:groupId }
+			Should -Invoke Get-MgGroup -Times 1 -Exactly -ParameterFilter { $GroupId -eq '77777777-7777-7777-7777-777777777777' }
+			Should -Invoke Invoke-MgGraphRequest -Times 0 -Exactly -ParameterFilter { $Uri -like '/v1.0/groups?*' -and $Uri -like '*displayName%20eq*' }
 			$result.UserCount | Should -Be 501
 			$result.ApprovalStages | Should -Be 2
 			$writes = $script:graphFixture.Writes
@@ -281,6 +305,19 @@ Finance reporting - Read reports,View financial reports.,$script:groupId,$script
 			$imports.Body.resource.originId | Should -Be @($script:groupId, $second)
 			$bindings = @($writes | Where-Object Uri -Like '*/new-package-id/resourceRoleScopes')
 			$bindings.Body.role.originId | Should -Be @("Member_$script:groupId", "Member_$second")
+		}
+
+		It 'does not fall back to Access Group when GroupId is <Case>' -TestCases @(
+			@{ Case = 'blank'; Value = ''; Reason = 'GroupId must not be blank' }
+			@{ Case = 'a group name'; Value = "Finance's Readers"; Reason = 'must contain only valid Entra group object IDs' }
+		) {
+			param($Case, $Value, $Reason)
+			$script:csvPath = New-WorkbookFixture @{ GroupId = $Value }
+			$result = Invoke-Creation -Preview
+			$result.Status | Should -Be 'Failed'
+			$result.Reason | Should -Match $Reason
+			Should -Invoke Get-MgGroup -Times 0 -Exactly
+			$script:graphFixture.Writes | Should -HaveCount 0
 		}
 
 		It 'fails the entire row when the second listed group cannot be managed' {

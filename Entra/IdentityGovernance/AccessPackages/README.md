@@ -10,7 +10,7 @@ never overwritten. Duplicate names within an input file are processed once.
 ## Prerequisites and use
 
 Connect to Microsoft Graph before running the script. Requires the
-`Microsoft.Graph.Authentication` module, appropriate Entra ID Governance
+`Microsoft.Graph.Authentication` and `Microsoft.Graph.Groups` modules, appropriate Entra ID Governance
 licensing, and an account permitted to create catalogs, packages and policies.
 Adding a group to a catalog also requires ownership of that group or a role
 that permits modifying it.
@@ -71,13 +71,15 @@ The script reads the first worksheet with headers in row 1:
 | Column | Meaning |
 | --- | --- |
 | `Access Package Name` | The package name; the same naming rules as CSV apply. |
-| `Access Group` | One exact, unique Entra group display name, or one or more group object IDs separated by commas, semicolons, or line breaks. |
+| `GroupId` | One or more Entra group object IDs separated by commas, semicolons, or line breaks. If the column exists, it must be populated for each package and `Access Group` is ignored. |
+| `Access Group` | Used only by older workbooks without `GroupId`: one exact, unique group display name or one or more group object IDs. |
 | `Description`, `Role`, `Brand`, `Region`, `Potential Teams` | Description text and optional details. |
 | `Approver 1 List` | `<Employee Manager>` (case and extra whitespace are ignored). Uses the existing direct-manager stage and fallback approvers. |
-| `Approver 2`, `Approver 3` | Optional additional stages, in order. Separate user object IDs, UPNs, or `mail` addresses with semicolons, commas or line breaks. Stage 3 requires an explicit stage 2. |
+| `Approver 2`, `Approver 3` | Optional additional stages, in order. Separate user object IDs, UPNs, or `mail` addresses with semicolons, commas or line breaks. Stage 3 requires an explicit stage 2. `NA` in `Approver 3` omits the third stage. |
 
-All listed groups are added as Member roles to the same package. Every group
-must pass validation. For multiple groups, the reported `UserCount` is the
+The script uses `Get-MgGroup` to fetch and validate each group by ID. The
+preview shows the Entra display names and IDs. All listed groups are added as
+Member roles to the same package. For multiple groups, the reported `UserCount` is the
 largest individual transitive user count, not the sum.
 If any group exceeds 500 transitive users, a blank stage 2 requires
 `-DefaultAppOwnerIds`. An address must match exactly one Entra user across UPN
