@@ -1326,15 +1326,17 @@ Describe 'Unified access review creation and local logging' {
 		Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times 1 -Exactly
 	}
 
-	It 'allows renamed completed historical coverage but keeps future recurring coverage (kind: <Kind>)' -TestCases @(
-		@{ Kind = 'completed one-time'; Block = $false },
-		@{ Kind = 'expired recurring'; Block = $false },
-		@{ Kind = 'future recurring'; Block = $true },
-		@{ Kind = 'unbounded recurring'; Block = $true },
-		@{ Kind = 'numbered remaining'; Block = $true },
-		@{ Kind = 'numbered finished'; Block = $false }
+	It 'allows renamed historical coverage but keeps future recurring coverage (status: <Status>, kind: <Kind>)' -TestCases @(
+		foreach ($status in @('Completed', 'Applied')) {
+			@{ Status = $status; Kind = 'completed one-time'; Block = $false }
+			@{ Status = $status; Kind = 'expired recurring'; Block = $false }
+			@{ Status = $status; Kind = 'future recurring'; Block = $true }
+			@{ Status = $status; Kind = 'unbounded recurring'; Block = $true }
+			@{ Status = $status; Kind = 'numbered remaining'; Block = $true }
+			@{ Status = $status; Kind = 'numbered finished'; Block = $false }
+		}
 	) {
-		param($Kind, $Block)
+		param($Status, $Kind, $Block)
 		$recurrence = switch ($Kind) {
 			'expired recurring' { @{ pattern = @{ type = 'weekly'; interval = 1 }; range = @{ type = 'endDate'; endDate = (Get-Date).AddDays(-1).ToString('yyyy-MM-dd') } } }
 			'future recurring' { @{ pattern = @{ type = 'weekly'; interval = 1 }; range = @{ type = 'endDate'; endDate = (Get-Date).AddDays(30).ToString('yyyy-MM-dd') } } }
@@ -1342,17 +1344,40 @@ Describe 'Unified access review creation and local logging' {
 			'numbered remaining' { @{ pattern = @{ type = 'weekly'; interval = 1 }; range = @{ type = 'numbered'; numberOfOccurrences = 2 } } }
 			'numbered finished' { @{ pattern = @{ type = 'weekly'; interval = 1 }; range = @{ type = 'numbered'; numberOfOccurrences = 1 } } }
 		}
-		$fixture.ExistingInstances = @([pscustomobject]@{ Id = 'past'; Status = 'Completed' })
-		$fixture.ExistingReviews = @(New-ExistingResourceReview -Status Completed -Recurrence $recurrence)
+		$fixture.ExistingInstances = @([pscustomobject]@{ Id = 'past'; Status = $Status })
+		$fixture.ExistingReviews = @(New-ExistingResourceReview -Status $Status -Recurrence $recurrence)
 		$result = & $script:testScript -GroupId $script:groupId -Confirm:$false
 		$result.Status | Should -Be $(if ($Block) { 'Skipped' } else { 'Created' })
 		Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times $(if ($Block) { 0 } else { 1 }) -Exactly
 	}
 
-	It 'blocks scheduled resource coverage even when it has not started' {
-		$fixture.ExistingReviews = @(New-ExistingResourceReview -Status NotStarted)
+	It 'blocks scheduled or applying resource coverage (status: <Status>)' -TestCases @(
+		@{ Status = 'NotStarted' }, @{ Status = 'Applying' }
+	) {
+		param($Status)
+		$fixture.ExistingReviews = @(New-ExistingResourceReview -Status $Status)
 		$result = & $script:testScript -GroupId $script:groupId -WhatIf
 		$result.DuplicateMatchType | Should -Be 'Resource'
+		Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times 0
+	}
+
+	It 'keeps numbered recurring coverage while an instance is applying' {
+		$recurrence = @{ pattern = @{ type = 'weekly'; interval = 1 }; range = @{ type = 'numbered'; numberOfOccurrences = 1 } }
+		$fixture.ExistingReviews = @(New-ExistingResourceReview -Status Applied -Recurrence $recurrence)
+		$fixture.ExistingInstances = @([pscustomobject]@{ Id = 'past'; Status = 'Applying' })
+		$result = & $script:testScript -GroupId $script:groupId -Confirm:$false
+		$result.Status | Should -Be 'Skipped'
+		$result.DuplicateMatchType | Should -Be 'Resource'
+		Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times 0
+	}
+
+	It 'preserves name protection for applied historical reviews' {
+		$existing = New-ExistingResourceReview -Status Applied
+		$existing.DisplayName = 'AR Demo group'
+		$fixture.ExistingReviews = @($existing)
+		$result = & $script:testScript -GroupId $script:groupId -Confirm:$false
+		$result.Status | Should -Be 'Skipped'
+		$result.DuplicateMatchType | Should -Be 'Name'
 		Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times 0
 	}
 
@@ -1426,13 +1451,14 @@ Describe 'Unified access review creation and local logging' {
 	}
 
 	It 'fails closed before any writes when existing coverage cannot be read (kind: <Kind>)' -TestCases @(
-		@{ Kind = 'scope missing' }, @{ Kind = 'status missing' }, @{ Kind = 'numbered instances denied' }
+		@{ Kind = 'scope missing' }, @{ Kind = 'status missing' }, @{ Kind = 'status unknown' }, @{ Kind = 'numbered instances denied' }
 	) {
 		param($Kind)
 		$existing = New-ExistingResourceReview
 		switch ($Kind) {
 			'scope missing' { $existing.Scope = $null }
 			'status missing' { $existing.Status = $null }
+			'status unknown' { $existing.Status = 'UnexpectedStatus' }
 			'numbered instances denied' {
 				$existing.Status = 'Completed'
 				$existing.Settings.recurrence = @{ pattern = @{ type = 'weekly' }; range = @{ type = 'numbered'; numberOfOccurrences = 2 } }

@@ -178,8 +178,8 @@ function Get-ReviewResourceCoverage {
 function Test-ReviewCurrentCoverage {
 	param([object]$Definition)
 	$status = [string]$Definition.Status
-	if ($status -in @('Initializing', 'NotStarted', 'Starting', 'InProgress', 'Completing', 'AutoReviewing', 'AutoReviewed')) { return $true }
-	if ($status -ne 'Completed') { throw "Review '$($Definition.Id)' returned an unknown or missing status '$status'; duplicate protection cannot determine whether it is active." }
+	if ($status -in @('Initializing', 'NotStarted', 'Starting', 'InProgress', 'Completing', 'AutoReviewing', 'AutoReviewed', 'Applying')) { return $true }
+	if ($status -notin @('Completed', 'Applied')) { throw "Review '$($Definition.Id)' returned an unknown or missing status '$status'; duplicate protection cannot determine whether it is active." }
 	$settings = Get-ReviewProperty $Definition 'settings'
 	$recurrence = Get-ReviewProperty $settings 'recurrence'
 	if (-not (Get-ReviewProperty $recurrence 'pattern')) { return $false }
@@ -195,7 +195,7 @@ function Test-ReviewCurrentCoverage {
 			$count = Get-ReviewProperty $range 'numberOfOccurrences'
 			if (-not $count -or [int]$count -lt 1) { throw "Review '$($Definition.Id)' has an invalid recurrence occurrence count." }
 			$instances = @(Get-MgIdentityGovernanceAccessReviewDefinitionInstance -AccessReviewScheduleDefinitionId $Definition.Id -All -Property id,status -ErrorAction Stop)
-			return @($instances | Where-Object Status -NE 'Completed').Count -gt 0 -or @($instances.Id | Sort-Object -Unique).Count -lt [int]$count
+			return @($instances | Where-Object { $_.Status -notin @('Completed', 'Applied') }).Count -gt 0 -or @($instances.Id | Sort-Object -Unique).Count -lt [int]$count
 		}
 		default { throw "Review '$($Definition.Id)' has an unsupported recurrence range; duplicate protection cannot determine future coverage." }
 	}

@@ -123,7 +123,7 @@ Group reviews remove user membership, not group-to-group or group-to-app assignm
 - Existing names and legacy aliases block creation, including completed reviews.
 - Resource ID/scope checks also block active/scheduled or potentially future
   recurring coverage, regardless of prefix or reviewer policy.
-- Completed historical coverage alone does not block by resource. Future/no-end
+- Completed/Applied historical coverage alone does not block by resource. Future/no-end
   recurring ranges are treated conservatively; numbered series check instances.
 - Partial or unsupported overlapping scopes require manual assessment; no new
   review is created. Unreadable duplicate-check data stops creation.
