@@ -53,6 +53,31 @@ It adds the group's **Member** role, never its Owner role.
 Roles are read from the catalog's `resourceRoles` endpoint, filtered by origin
 system and resource ID; expanded resource role lists can be empty in Graph.
 
+## Backfill existing group members
+
+Assignment backfill is enabled by default (`$CreateAssignments = $true` near
+the top of the script). Set that variable to `$false` in the script to disable
+backfill. There is no `-CreateAssignments` argument.
+
+Rerun the same input and catalog with `-WhatIf` to preview backfill without
+writes. Review the proposed users and get approval before removing `-WhatIf`.
+Limit the input to the packages you intend to backfill; missing packages are
+still created in a live run.
+
+A matching package is not recreated. The backfill verifies that its actual
+resources match the input and that it has exactly one matching `<name> - Requests`
+policy with a 365-day lifecycle. It submits one administrative request per
+eligible user, skipping users with an existing non-expired assignment or a
+pending add request. `Submitted` is not confirmation of delivery.
+
+Only direct directory member users are eligible. For packages with multiple
+groups, a user must already be a direct member of every group, since an
+assignment grants all the package's roles. The backfill does not change group
+membership directly, update an existing policy, or remove assignments.
+The Graph connection must be able to read each member's `userType` (use
+`User.Read.All` if basic reads do not return it). Run only one backfill at a
+time and verify delivery in Entra before retrying uncertain requests.
+
 ## Excel input
 
 Install `ImportExcel` once in the PowerShell environment you use to run the

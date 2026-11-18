@@ -43,6 +43,9 @@ Existing packages with the same name in the catalog are skipped, not updated.
 Each row produces a result object. The console shows approvers by stage for
 created and previewed packages, plus skipped/failed rows and a summary.
 WhatIf performs reads and validation but never writes to Microsoft Graph.
+Backfill of eligible direct group members under the 365-day Requests policy
+is enabled by default for new and existing packages. Set $CreateAssignments
+to $false in the script to disable it.
 .EXAMPLE
 .\Create-AccessPackage.ps1 -CsvPath '.\access-packages.csv' -CatalogName 'Business applications' -FallbackApproverIds '11111111-1111-1111-1111-111111111111' -WhatIf
 .EXAMPLE
@@ -62,6 +65,8 @@ param(
 	[guid[]]$FallbackApproverIds,
 	[guid[]]$DefaultAppOwnerIds = @()
 )
+
+$CreateAssignments = $true
 
 $ErrorActionPreference = 'Stop'
 $CatalogName = $CatalogName.Trim()
@@ -409,6 +414,94 @@ function Get-MemberRoleScope {
 	}
 }
 
+function Invoke-PackageAssignmentBackfill {
+	param([System.Collections.IDictionary]$Result, [System.Management.Automation.PSCmdlet]$Caller)
+
+	$coveredUsers = @{}
+	$policyId = $null
+	$packageId = $Result.AccessPackageId
+	if ($packageId) {
+		$expand = [uri]::EscapeDataString('catalog,assignmentPolicies,resourceRoleScopes($expand=role,scope)')
+		$package = Invoke-PackageGraphRequest -Method GET -Uri "$baseUri/accessPackages/$packageId`?`$expand=$expand" -OutputType Hashtable
+		$packageCatalogId = if ($package.catalog.id) { $package.catalog.id } else { $package.catalogId }
+		if ($package.id -ne $packageId -or $packageCatalogId -ne $Result.CatalogId -or $package.displayName -ne $Result.Name) {
+			throw 'Could not verify the package identity in the requested catalog.'
+		}
+		if ($package.'resourceRoleScopes@odata.nextLink' -or $package.'assignmentPolicies@odata.nextLink') {
+			throw 'The package resources or policies were returned only partially; no assignments submitted.'
+		}
+		# A package assignment grants every role, not just the groups named in the input.
+		$actualGroups = @{}
+		foreach ($binding in $package.resourceRoleScopes) {
+			$originId = [string]$binding.scope.originId
+			if ($binding.scope.originSystem -ne 'AadGroup' -or $binding.role.originSystem -ne 'AadGroup' -or
+				$binding.scope.isRootScope -ne $true -or $binding.role.originId -ne "Member_$originId" -or $originId -notin $Result.GroupIds) {
+				throw 'The package contains a role outside the requested group Member roles; no assignments submitted.'
+			}
+			$actualGroups[$originId] = $true
+		}
+		if ($actualGroups.Count -ne $Result.GroupIds.Count) {
+			throw 'The actual package group Member roles do not match the input; no assignments submitted.'
+		}
+		$policies = @($package.assignmentPolicies | Where-Object { $_.displayName -eq "$($Result.Name) - Requests" })
+		if ($policies.Count -ne 1 -or -not $policies[0].id -or $policies[0].expiration.type -ne 'afterDuration' -or
+			$policies[0].expiration.duration -ne 'P365D' -or $policies[0].allowedTargetScope -ne 'allMemberUsers') {
+			throw 'Expected exactly one matching 365-day Requests policy for directory members; no assignments submitted.'
+		}
+		$policyId = $policies[0].id
+		$Result.PolicyId = $policyId
+		$filter = "accessPackage/id eq '$packageId'"
+		foreach ($assignment in @(Get-GraphCollection -Uri "$baseUri/assignments" -Filter $filter -Expand 'target')) {
+			if ($assignment.state -eq 'expired') { continue }
+			if (-not $assignment.target.objectId) { throw 'An existing assignment has no directory object ID; duplicate checks are incomplete.' }
+			$coveredUsers[$assignment.target.objectId] = $true
+		}
+		foreach ($request in @(Get-GraphCollection -Uri "$baseUri/assignmentRequests" -Filter $filter -Expand 'accessPackage,assignment($expand=target)')) {
+			if ($request.requestType -notin 'adminAdd', 'userAdd' -or
+				$request.state -in 'delivered', 'denied', 'canceled', 'deliveryFailed') { continue }
+			if (-not $request.assignment.target.objectId) { throw 'An outstanding assignment request has no directory object ID; duplicate checks are incomplete.' }
+			$coveredUsers[$request.assignment.target.objectId] = $true
+		}
+	}
+
+	$memberCounts = @{}
+	foreach ($groupId in $Result.GroupIds) {
+		$groupUsers = @{}
+		foreach ($user in @(Get-MgGroupMemberAsUser -GroupId $groupId -All -Property id, userType -ConsistencyLevel eventual -CountVariable groupMemberCount -ErrorAction Stop)) {
+			if ($user.UserType -eq 'Guest') { continue }
+			$userId = [guid]::Empty
+			if ($user.UserType -ne 'Member' -or -not [guid]::TryParse($user.Id, [ref]$userId) -or $userId -eq [guid]::Empty) {
+				throw "Could not verify a direct member's user type or object ID for group '$groupId'. Check directory read permissions."
+			}
+			$groupUsers["$userId"] = $true
+		}
+		foreach ($userId in $groupUsers.Keys) {
+			$memberCounts[$userId] = 1 + [int]$memberCounts[$userId]
+		}
+	}
+	foreach ($userId in @($memberCounts.Keys | Sort-Object)) {
+		if ($memberCounts[$userId] -ne $Result.GroupIds.Count) { $Result.AssignmentPartialMembership++; continue }
+		if ($coveredUsers.ContainsKey($userId)) { $Result.AssignmentsAlreadyCovered++; continue }
+		if ($Caller.ShouldProcess("$userId on '$($Result.Name)'", 'Submit access package assignment under the 365-day Requests policy')) {
+			try {
+				$request = Send-GraphBody -Uri "$baseUri/assignmentRequests" -Body @{
+					requestType = 'adminAdd'
+					assignment = @{ accessPackageId = $packageId; assignmentPolicyId = $policyId; targetId = $userId }
+				}
+				if (-not $request.id -or $request.state -in 'denied', 'canceled', 'deliveryFailed') {
+					throw "Graph did not confirm an accepted request (state: '$($request.state)'). Check Entra before retrying."
+				}
+				$Result.AssignmentsSubmitted++
+			}
+			catch {
+				$Result.AssignmentsFailed++
+				Write-Warning "Assignment for '$userId' on '$($Result.Name)': $($_.Exception.Message)"
+			}
+		}
+		elseif ($WhatIfPreference) { $Result.AssignmentsWouldSubmit++ }
+	}
+}
+
 $fallbackApprovers = @(ConvertTo-UserApprovers -Ids $FallbackApproverIds)
 $catalogs = @(Get-GraphCollection -Uri "$baseUri/catalogs" -Filter "displayName eq '$($CatalogName.Replace("'", "''"))'")
 if ($catalogs.Count -gt 1) {
@@ -422,6 +515,7 @@ if ($catalog -and $catalog.state -ne 'published') {
 Write-Warning "Manual step required for every new policy: $manualAction"
 $results = [System.Collections.Generic.List[object]]::new()
 $processedNames = @{}
+$backfillNames = @{}
 
 foreach ($row in $rows) {
 	$nameColumn = if ($isWorkbook) { 'Access Package Name' } else { 'Name' }
@@ -439,6 +533,13 @@ foreach ($row in $rows) {
 		Status = $null
 		Reason = $null
 		ManualAction = $null
+		AssignmentBackfill = $null
+		AssignmentsSubmitted = 0
+		AssignmentsWouldSubmit = 0
+		AssignmentsAlreadyCovered = 0
+		AssignmentPartialMembership = 0
+		AssignmentsFailed = 0
+		AssignmentBackfillError = $null
 	}
 	$newPackageId = $null
 	try {
@@ -495,6 +596,9 @@ foreach ($row in $rows) {
 			if ($existing.Count) {
 				$result.Status = 'Skipped'
 				$result.Reason = "$($existing.Count) package(s) with this name already exist in the catalog; no changes made."
+				if ($CreateAssignments -and $existing.Count -eq 1) {
+					$result.Reason = 'A package with this name already exists in the catalog; package and policy not recreated.'
+				}
 				if ($existing.Count -eq 1) { $result.AccessPackageId = $existing[0].id }
 			}
 		}
@@ -675,6 +779,21 @@ foreach ($row in $rows) {
 		Write-Warning "Failed '$($result.Name)': $($result.Reason)"
 	}
 
+	if ($CreateAssignments -and $result.Name -and -not $backfillNames.ContainsKey($result.Name) -and (
+		$result.Status -in 'Created', 'Would be created' -or ($result.Status -eq 'Skipped' -and $result.AccessPackageId)
+	)) {
+		$backfillNames[$result.Name] = $true
+		try {
+			Invoke-PackageAssignmentBackfill -Result $result -Caller $PSCmdlet
+			$result.AssignmentBackfill = if ($result.AssignmentsFailed) { 'Completed with errors' } elseif ($WhatIfPreference) { 'Preview' } else { 'Processed' }
+		}
+		catch {
+			$result.AssignmentBackfill = 'Failed'
+			$result.AssignmentBackfillError = $_.Exception.Message
+			Write-Warning "Assignment backfill for '$($result.Name)' failed: $($result.AssignmentBackfillError)"
+		}
+		Write-Host "Assignment backfill for '$($result.Name)': $($result.AssignmentBackfill); $($result.AssignmentsSubmitted) submitted, $($result.AssignmentsWouldSubmit) would submit, $($result.AssignmentsAlreadyCovered) already covered, $($result.AssignmentPartialMembership) not in every group, $($result.AssignmentsFailed) failed."
+	}
 	$resultObject = [pscustomobject]$result
 	$results.Add($resultObject)
 	$resultObject

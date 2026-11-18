@@ -2,14 +2,18 @@ BeforeAll {
 	Import-Module Microsoft.Graph.Authentication
 	Import-Module Microsoft.Graph.Groups
 	$script:scriptPath = Join-Path $PSScriptRoot '../Create-AccessPackage.ps1'
+	$script:noBackfillScriptPath = Join-Path $TestDrive 'Create-AccessPackage.NoBackfill.ps1'
+	(Get-Content -LiteralPath $script:scriptPath -Raw).Replace('$CreateAssignments = $true', '$CreateAssignments = $false') |
+		Set-Content -LiteralPath $script:noBackfillScriptPath
 	$script:groupId = '11111111-1111-1111-1111-111111111111'
 	$script:ownerId = '22222222-2222-2222-2222-222222222222'
 	$script:fallbackId = '33333333-3333-3333-3333-333333333333'
 
 	function Invoke-Creation {
-		param([switch]$Preview, [guid[]]$DefaultOwners = @())
+		param([switch]$Preview, [guid[]]$DefaultOwners = @(), [switch]$Backfill)
 
-		& $script:scriptPath -CsvPath $script:csvPath -CatalogName $script:graphFixture.CatalogName `
+		$path = if ($Backfill) { $script:scriptPath } else { $script:noBackfillScriptPath }
+		& $path -CsvPath $script:csvPath -CatalogName $script:graphFixture.CatalogName `
 			-FallbackApproverIds $script:fallbackId -DefaultAppOwnerIds $DefaultOwners `
 			-WhatIf:$Preview -Confirm:$false -WarningAction SilentlyContinue
 	}
@@ -55,6 +59,11 @@ Finance reporting - Read reports,View financial reports.,$script:groupId,$script
 			UserCount = '500'
 			GroupCounts = @{}
 			AdditionalGroups = @{}
+			DirectMembers = @{}
+			PackageGroups = @($script:groupId)
+			PolicyDuration = 'P365D'
+			Assignments = @()
+			AssignmentRequests = @()
 			DeniedUserId = $null
 			NamedGroups = @()
 			AddressUsers = @(
@@ -93,6 +102,10 @@ Finance reporting - Read reports,View financial reports.,$script:groupId,$script
 				return $fixture.AdditionalGroups[$GroupId]
 			}
 			$fixture.Group
+		}.GetNewClosure())
+		Mock Get-MgGroupMemberAsUser ({
+			param($GroupId)
+			$fixture.DirectMembers[$GroupId]
 		}.GetNewClosure())
 		$fixtureGroupId = $script:groupId
 		Mock Invoke-MgGraphRequest ({
@@ -151,6 +164,27 @@ Finance reporting - Read reports,View financial reports.,$script:groupId,$script
 					$items = if ($fixture.ExistingPackage) { @(@{ id = 'existing-package-id' }) } else { @() }
 					return @{ value = $items }
 				}
+				if ($uriText -match '/accessPackages/([^?]+)\?') {
+					$packageId = $Matches[1]
+					$packageGroups = @($fixture.PackageGroups)
+					$policyId = 'existing-policy-id'
+					if ($packageId -eq 'new-package-id') {
+						$packageGroups = @($fixture.Writes | Where-Object Uri -Like '*/resourceRoleScopes' | ForEach-Object { $_.Body.scope.originId })
+						$policyId = 'new-policy-id'
+					}
+					return @{
+						id = $packageId; displayName = 'Finance reporting - Read reports'; catalogId = 'catalog-id'
+						assignmentPolicies = @(@{
+							id = $policyId; displayName = 'Finance reporting - Read reports - Requests'
+							allowedTargetScope = 'allMemberUsers'; expiration = @{ type = 'afterDuration'; duration = $fixture.PolicyDuration }
+						})
+						resourceRoleScopes = @(foreach ($groupId in $packageGroups) {
+							@{ role = @{ originSystem = 'AadGroup'; originId = "Member_$groupId" }; scope = @{ originSystem = 'AadGroup'; originId = $groupId; isRootScope = $true } }
+						})
+					}
+				}
+				if ($decodedUri -match "/assignments\?\`$filter=accessPackage/id eq '(existing|new)-package-id'&") { return @{ value = $fixture.Assignments } }
+				if ($decodedUri -match "/assignmentRequests\?\`$filter=accessPackage/id eq '(existing|new)-package-id'&") { return @{ value = $fixture.AssignmentRequests } }
 				if ($uriText -match '/resourceRoles\?') {
 					if ($decodedUri -notmatch "originSystem eq 'AadGroup' and resource/id eq 'resource-id(?:-([^']+))?'") {
 						throw 'Resource-role lookup must filter by origin system and resource ID.'
@@ -199,6 +233,7 @@ Finance reporting - Read reports,View financial reports.,$script:groupId,$script
 				if ($uriText.EndsWith('/accessPackages')) { return @{ id = 'new-package-id' } }
 				if ($uriText.EndsWith('/resourceRoleScopes')) { return @{ id = 'binding-id' } }
 				if ($uriText.EndsWith('/assignmentPolicies')) { return @{ id = 'new-policy-id' } }
+				if ($uriText.EndsWith('/assignmentRequests')) { return @{ id = 'new-request-id'; state = 'submitted' } }
 			}
 			elseif ($Method -eq 'DELETE') {
 				$fixture.Deleted.Add($uriText)
@@ -209,8 +244,90 @@ Finance reporting - Read reports,View financial reports.,$script:groupId,$script
 		}.GetNewClosure())
 	}
 
+	Context 'Assignment backfill' {
+		BeforeEach {
+			$script:graphFixture.ExistingPackage = $true
+			$script:graphFixture.DirectMembers[$script:groupId] = @(
+				[pscustomobject]@{ Id = $script:ownerId; UserType = 'Member' }
+				[pscustomobject]@{ Id = $script:fallbackId; UserType = 'Member' }
+				[pscustomobject]@{ Id = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'; UserType = 'Guest' }
+			)
+		}
+
+		It 'does not scan group membership when the script variable is false' {
+			$result = Invoke-Creation
+			$result.Status | Should -Be 'Skipped'
+			Should -Invoke Get-MgGroupMemberAsUser -Exactly -Times 0
+			$script:graphFixture.Writes | Should -HaveCount 0
+		}
+
+		It 'backfills by default without recreating the package and skips live and pending users' {
+			$pending = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb'
+			$script:graphFixture.DirectMembers[$script:groupId] += [pscustomobject]@{ Id = $pending; UserType = 'Member' }
+			$script:graphFixture.Assignments = @(@{ state = 'delivered'; target = @{ objectId = $script:ownerId } })
+			$script:graphFixture.AssignmentRequests = @(@{ requestType = 'adminAdd'; state = 'submitted'; assignment = @{ target = @{ objectId = $pending } } })
+			$result = Invoke-Creation -Backfill
+			$result.Status | Should -Be 'Skipped'
+			$result.AssignmentsSubmitted | Should -Be 1
+			$result.AssignmentsAlreadyCovered | Should -Be 2
+			$script:graphFixture.Writes | Should -HaveCount 1
+			$request = Get-PostedBody '/assignmentRequests'
+			$request.requestType | Should -Be 'adminAdd'
+			$request.assignment.accessPackageId | Should -Be 'existing-package-id'
+			$request.assignment.assignmentPolicyId | Should -Be 'existing-policy-id'
+			$request.assignment.targetId | Should -Be $script:fallbackId
+		}
+
+		It 'previews eligible assignments on an existing package without writes' {
+			$result = Invoke-Creation -Backfill -Preview
+			$result.AssignmentBackfill | Should -Be 'Preview'
+			$result.AssignmentsWouldSubmit | Should -Be 2
+			$script:graphFixture.Writes | Should -HaveCount 0
+		}
+
+		It 'fails closed when the existing Requests policy does not last 365 days' {
+			$script:graphFixture.PolicyDuration = 'P30D'
+			$result = Invoke-Creation -Backfill
+			$result.AssignmentBackfill | Should -Be 'Failed'
+			$result.AssignmentBackfillError | Should -Match '365-day Requests policy'
+			$script:graphFixture.Writes | Should -HaveCount 0
+		}
+
+		It 'does not backfill a package that grants a group absent from the input' {
+			$script:graphFixture.PackageGroups += '77777777-7777-7777-7777-777777777777'
+			$result = Invoke-Creation -Backfill
+			$result.AssignmentBackfill | Should -Be 'Failed'
+			$result.AssignmentBackfillError | Should -Match 'role outside'
+			$script:graphFixture.Writes | Should -HaveCount 0
+		}
+
+		It 'does not roll back a new package if assignment submission fails' {
+			$script:graphFixture.ExistingPackage = $false
+			$script:graphFixture.FailOn = '/assignmentRequests'
+			$result = Invoke-Creation -Backfill
+			$result.Status | Should -Be 'Created'
+			$result.AssignmentsFailed | Should -Be 2
+			$script:graphFixture.Deleted | Should -HaveCount 0
+		}
+	}
+
 	Context 'Excel workbook' -Skip:(-not (Get-Module -ListAvailable -Name ImportExcel)) {
 		BeforeAll { Import-Module ImportExcel -WarningAction SilentlyContinue }
+
+		It 'backfills a user in both groups once and does not grant extra group access' {
+			$otherGroup = '77777777-7777-7777-7777-777777777777'
+			$script:csvPath = New-WorkbookFixture @{ GroupId = "$script:groupId,$otherGroup" }
+			$script:graphFixture.ExistingPackage = $true
+			$script:graphFixture.PackageGroups = @($script:groupId, $otherGroup)
+			$sharedUser = [pscustomobject]@{ Id = $script:ownerId; UserType = 'Member' }
+			$script:graphFixture.DirectMembers[$script:groupId] = @($sharedUser, [pscustomobject]@{ Id = $script:fallbackId; UserType = 'Member' })
+			$script:graphFixture.DirectMembers[$otherGroup] = @($sharedUser, $sharedUser)
+			$result = Invoke-Creation -Backfill
+			$result.AssignmentsSubmitted | Should -Be 1
+			$result.AssignmentPartialMembership | Should -Be 1
+			$script:graphFixture.Writes | Should -HaveCount 1
+			(Get-PostedBody '/assignmentRequests').assignment.targetId | Should -Be $script:ownerId
+		}
 
 		It 'resolves UPN and mail values to user IDs for ordered approval stages' {
 			$script:graphFixture.NamedGroups = @(@{ id = $script:groupId; displayName = "Finance's Readers" })
