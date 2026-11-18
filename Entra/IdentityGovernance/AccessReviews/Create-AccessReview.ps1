@@ -1285,22 +1285,22 @@ catch {
 	throw
 }
 finally {
-	foreach ($result in $results) {
-		$display = [System.Management.Automation.PSPropertySet]::new('DefaultDisplayPropertySet', [string[]]@('TargetType', 'Target', 'Status', 'Reason'))
-		$result | Add-Member -MemberType MemberSet -Name PSStandardMembers -Value @($display)
-	}
-	$results.ToArray()
-	if ($HtmlReportPath -and $runStarted) {
-		try {
-			Write-AccessReviewReport -Path $HtmlReportPath -Results @($results.ToArray()) -Context $reportRun
-		}
-		catch {
-			$message = "HTML report export failed: $($_.Exception.Message) Reviews may already have been created; check returned IDs and the JSONL log before rerunning."
-			if ($reportRun.Failure) {
-				# WarningAction Stop must not replace the original provisioning error.
-				Write-Warning $message -WarningAction Continue
+	try {
+		if ($HtmlReportPath -and $runStarted) {
+			try {
+				Write-AccessReviewReport -Path $HtmlReportPath -Results @($results.ToArray()) -Context $reportRun
 			}
-			else { throw $message }
+			catch {
+				$message = "HTML report export failed: $($_.Exception.Message) Reviews may already have been created; check returned IDs and the JSONL log before rerunning."
+				if ($reportRun.Failure) {
+					# WarningAction Stop must not replace the original provisioning error.
+					Write-Warning $message -WarningAction Continue
+				}
+				else { throw $message }
+			}
 		}
+	}
+	finally {
+		$results.ToArray()
 	}
 }

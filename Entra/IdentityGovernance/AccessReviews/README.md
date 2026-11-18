@@ -162,12 +162,13 @@ targets; discovery metadata is retained for offline export.
 Real runs write a separate JSONL file under `logs/` and print its path. Results
 contain review/resource IDs, counts, discovery paths and skip/failure reasons.
 Check returned IDs and logs before retrying a failed run. Logs are not deleted
-automatically. Results are returned together at the end, with a compact default
-console table; all detailed properties remain available for export or `Format-List *`.
-Uncertain duplicate-scope warnings are grouped by existing review. To export results:
+automatically. Results are returned together at the end, after any requested
+HTML export is attempted. Uncertain duplicate-scope warnings are grouped by
+existing review. For a compact console table or a full CSV export:
 
 ```powershell
 $results = .\Create-AccessReview.ps1 -CsvPath '.\reviews.csv' -ReviewerType ResourceOwner
+$results | Format-Table TargetType, Target, Status, Reason -Wrap
 $results | Export-Csv '.\results.csv' -NoTypeInformation
 ```
 

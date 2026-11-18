@@ -1546,19 +1546,22 @@ Describe 'Unified access review creation and local logging' {
 		$html | Should -Match '2 directly assigned users'
 	}
 
-	It 'batches compactly displayed results without losing their full exportable properties' {
+	It 'writes the requested HTML before emitting the full result batch' {
 		$fixture.Assignments += [pscustomobject]@{ PrincipalType = 'User'; PrincipalId = $script:ownerId }
 		$fixture.ApplicationOwners = @(
 			[pscustomobject]@{ Id = $script:ownerId; AdditionalProperties = @{ '@odata.type' = '#microsoft.graph.user' } }
 		)
+		$path = Join-Path $script:testScriptRoot 'batch.html'
 		$observed = [System.Collections.Generic.List[int]]::new()
-		$results = @(& $script:testScript -ServicePrincipalId $script:reviewId -Confirm:$false -WarningVariable warnings |
-			ForEach-Object { $observed.Add($fixture.Bodies.Count); $_ })
+		$results = @(& $script:testScript -ServicePrincipalId $script:reviewId -HtmlReportPath $path -Confirm:$false -ErrorAction Stop -WarningVariable warnings |
+			ForEach-Object {
+				$path | Should -Exist
+				$observed.Add($fixture.Bodies.Count)
+				$_
+			})
 		$results | Should -HaveCount 3
 		@($observed | Sort-Object -Unique) | Should -Be @(2)
 		@($warnings).Count | Should -Be 0
-		$results[0].PSStandardMembers.DefaultDisplayPropertySet.ReferencedPropertyNames | Should -Be @('TargetType', 'Target', 'Status', 'Reason')
-		($results | Out-String -Width 160) | Should -Not -Match 'ReportSchemaVersion|GroupPaths|PrincipalIds'
 		($results | ConvertTo-Csv -NoTypeInformation)[0] | Should -Match 'ReportSchemaVersion'
 	}
 
