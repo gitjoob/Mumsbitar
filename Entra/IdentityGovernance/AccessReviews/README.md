@@ -401,12 +401,39 @@ be performed in on-premises Active Directory. Automatic apply is disabled.
 For `ResourceOwner` routing at any size, synchronized groups require CSV
 owners or explicit fallback users as described above.
 
-All modes skip an existing review with the same display name (case-insensitive),
-including completed reviews; existing reviews are not updated. The script stops
-without creating reviews if it cannot retrieve existing names. A preview also
-skips duplicate names within the batch. Matching is by name, not resource ID, so
-renaming a review or changing its prefix can allow another review for the same
-resource. Concurrent runs can still create duplicates.
+All modes retain the case-insensitive existing-name guard, including completed
+reviews and legacy aliases. A second guard checks **resource ID and scope across
+all review names/prefixes**, so renaming a review or running another application
+that reuses a group does not bypass duplicate protection:
+
+- Active/scheduled definitions block equivalent full group-membership or direct
+  application-user coverage. Reviewer/stage policies are deliberately **not**
+  compared: the target is skipped even if the existing policy differs, and the
+  existing review is never changed.
+- Completed one-time reviews and completed recurring definitions with expired
+  ranges do not trigger the resource guard. The name guard still applies.
+  Completed recurring definitions with a future end date or no end are
+  conservatively treated as potential future coverage. Numbered series check
+  returned instances against the configured occurrence count; unreadable data
+  stops creation rather than guessing that coverage ended.
+- Full membership scopes (`members`, user-only members, or `transitiveMembers`)
+  only cover the **same resource ID**. Reviewing a parent's transitive users
+  does not replace reviewing/remediating the child group's own membership.
+  Different groups containing the same people are not duplicates.
+- Guest-only, inactive-user, restricted-principal or unsupported potentially
+  overlapping scopes are **not** accepted as full coverage. The target becomes
+  `Manual review required`, with no new review created. Enumerated/multi-group
+  scopes that cannot be safely resolved also require manual assessment.
+- Missing scope/status metadata or failed required lookups stop the run before
+  review creation. Preview uses the same checks without Graph writes or JSONL.
+
+The script continues to create separate group reviews; selecting several
+resources in the standard portal also creates separate reviews
+([Microsoft Learn](https://learn.microsoft.com/en-us/entra/id-governance/create-access-review)).
+Catalog access reviews are a separate multi-resource workflow, not enabled by
+this script. No existing duplicate reviews are stopped, deleted or consolidated.
+Checks are a preflight snapshot, not an atomic Graph uniqueness constraint:
+**do not run concurrent creation jobs** against overlapping resources.
 Application-discovery mode also skips dynamic root groups; nested-only dynamic
 groups are skipped in every mode. All modes skip a group's own review when it
 has no direct users, without skipping discovery of its descendants.
@@ -440,12 +467,15 @@ separately from manual-review items and print direct-user totals separately from
 group direct-user totals.
 
 All result shapes include `IsNested`, `RootGroupIds`, `ParentGroupIds`,
-`SourceServicePrincipalIds`, `GroupPaths`, and `MatchedReviewName` (empty where
+`SourceServicePrincipalIds`, `GroupPaths`, `MatchedReviewName`, `MatchedReviewId`,
+`MatchedReviewScope`, and `DuplicateMatchType` (empty where
 not applicable). `GroupPaths` retains group IDs and display names from each root
 to the reviewed group, along with its originating application ID and
 `ServicePrincipalName` where applicable.
 Shared children retain every discovery path while producing one review.
-`MatchedReviewName` identifies the canonical/legacy name causing a duplicate skip.
+The match fields identify the existing definition and scope causing a skip or
+manual assessment. `DuplicateMatchType` distinguishes `Name`, `Resource`, and
+`UncertainResourceScope`; a name-only/legacy match may have no matched scope.
 JSONL preserves these structured arrays; flatten them explicitly when exporting
 these fields to CSV.
 
@@ -521,7 +551,7 @@ overwritten; use a new filename for each export.
 
 ### Views and themes
 
-- **Summary:** recorded outcomes, with existing-name matches separated from other
+- **Summary:** recorded outcomes, with existing-name/resource matches separated from other
   skips, and separate group/direct-application populations. Totals cover all
   recorded targets, not only created reviews; people can be counted in several
   reviews. Manual ownership/workload items remain outside user-review coverage.

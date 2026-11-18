@@ -183,6 +183,25 @@ Describe 'Offline access review reporting' {
 		$html | Should -Not -Match 'class="timeline"'
 	}
 
+	It 'shows resource duplicate evidence without calling it a name match or inventing a timeline' {
+		$result = New-ReportFixture
+		$result.Status = 'Skipped'
+		$result.ReviewConfiguration = $null
+		$result.MatchedReviewName = 'Other campaign'
+		$result | Add-Member DuplicateMatchType Resource
+		$result | Add-Member MatchedReviewId '99999999-9999-9999-9999-999999999999'
+		$result | Add-Member MatchedReviewScope '/groups/11111111-1111-1111-1111-111111111111/members'
+		$html = New-AccessReviewHtml -Results @($result) -Context $script:context
+		$html | Should -Match 'Existing resource match'
+		$html | Should -Match '<span class="badge">Existing resource match</span>'
+		$html | Should -Not -Match '<span class="badge">Existing name match</span>'
+		$html | Should -Match '<strong>1</strong><span>Existing resource match'
+		$html | Should -Match 'Other campaign'
+		$html | Should -Match '99999999-9999-9999-9999-999999999999'
+		$html | Should -Match 'Existing stage/reviewer policy not compared or changed'
+		$html | Should -Not -Match 'Submitted configuration'
+	}
+
 	It 'leaves existing-name matches without an invented running-review timeline' {
 		$result = New-ReportFixture
 		$result.Status = 'Skipped'

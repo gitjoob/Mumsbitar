@@ -21,6 +21,12 @@ This guidance applies to this tool and its tests, not the rest of the repository
   failures and policy conflicts still fail closed before creation.
 - Preserve case-insensitive existing-name guards and aliases. Do not repair,
   stop, delete or recreate existing/running reviews as a side effect of a rerun.
+- Also guard by resource ID/scope across prefixes for active/scheduled and
+  potentially future recurring coverage, irrespective of reviewer policy.
+  Completed historical coverage alone must not block by resource. Partial or
+  unresolvable overlapping scopes require explicit manual assessment, not an
+  assumption of full coverage. Keep group membership and application assignment
+  scopes distinct; a transitive parent review does not certify child membership.
 - New nested-only names omit `[Nested]`; preserve that suffix as a legacy alias.
   Explain recorded parent/application relationships in descriptions without
   claiming nested assignments prove effective application access. Preserve

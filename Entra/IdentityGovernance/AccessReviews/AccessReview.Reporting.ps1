@@ -23,7 +23,9 @@ function ConvertTo-AccessReviewHtmlText {
 
 function Get-AccessReviewReportOutcome {
 	param([object]$Result)
-	if ($Result.MatchedReviewName) { 'Existing name match' }
+	if ($Result.DuplicateMatchType -eq 'Resource') { 'Existing resource match' }
+	elseif ($Result.DuplicateMatchType -eq 'UncertainResourceScope') { 'Manual review required' }
+	elseif ($Result.MatchedReviewName) { 'Existing name match' }
 	elseif ($Result.Status) { [string]$Result.Status }
 	else { 'Unknown outcome' }
 }
@@ -127,7 +129,7 @@ function New-AccessReviewHtml {
 		$outcomes[$outcome]++
 	}
 	$null = $body.AppendLine('<section aria-label="Run summary" class="metrics">')
-	foreach ($status in @('Created', 'Would be created', 'Existing name match', 'Failed', 'Skipped', 'Not created', 'Manual review required', 'Unknown outcome')) {
+	foreach ($status in @('Created', 'Would be created', 'Existing name match', 'Existing resource match', 'Failed', 'Skipped', 'Not created', 'Manual review required', 'Unknown outcome')) {
 		$count = if ($outcomes.ContainsKey($status)) { $outcomes[$status] } else { 0 }
 		$null = $body.AppendLine("<div class=`"metric`"><strong>$count</strong><span>$(ConvertTo-AccessReviewHtmlText $status)</span></div>")
 	}
@@ -285,7 +287,7 @@ function New-AccessReviewHtml {
 		}
 		if (-not @($result.GroupPaths).Count) { $null = $body.AppendLine('<li>Unavailable or not applicable.</li>') }
 		$null = $body.AppendLine('</ul></details><details><summary>Recorded IDs and diagnostics</summary><dl>')
-		foreach ($field in @('TargetType', 'ReviewId', 'GroupId', 'ServicePrincipalId', 'PrincipalId', 'PrincipalType', 'AssignmentId', 'Role', 'MatchedReviewName', 'Reason')) {
+		foreach ($field in @('TargetType', 'ReviewId', 'GroupId', 'ServicePrincipalId', 'PrincipalId', 'PrincipalType', 'AssignmentId', 'Role', 'DuplicateMatchType', 'MatchedReviewName', 'MatchedReviewId', 'MatchedReviewScope', 'Reason')) {
 			$null = $body.AppendLine("<dt>$field</dt><dd>$(ConvertTo-AccessReviewHtmlText $result.$field)</dd>")
 		}
 		$null = $body.AppendLine('</dl></details></article>')
@@ -315,7 +317,12 @@ function New-AccessReviewHtml {
 		$notes = @(
 			if ($result.IsNested) { 'Nested group' }
 			if ($result.IsSyncedGroup -eq $true) { 'Synced / report only' }
-			if ($result.MatchedReviewName) { "Matched: $($result.MatchedReviewName). Existing configuration not fetched." }
+			if ($result.MatchedReviewName) {
+				if ($result.DuplicateMatchType -in @('Resource', 'UncertainResourceScope')) {
+					"Matched: $($result.MatchedReviewName) ($($result.MatchedReviewId)). Existing stage/reviewer policy not compared or changed."
+				}
+				else { "Matched: $($result.MatchedReviewName). Existing configuration not fetched." }
+			}
 			$result.Reason
 		) -join ' '
 		$searchText = ConvertTo-AccessReviewHtmlText (($result | ConvertTo-Json -Depth 10 -Compress))

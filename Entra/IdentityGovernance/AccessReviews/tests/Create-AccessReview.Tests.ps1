@@ -40,6 +40,19 @@ BeforeAll {
 			[pscustomobject]@{ Id = $script:reviewId; AdditionalProperties = @{ '@odata.type' = '#microsoft.graph.user' } }
 		)
 	}
+	function New-ExistingResourceReview {
+		param(
+			[string]$Query = "/groups/$script:groupId/members",
+			[string]$Status = 'InProgress',
+			[object]$Recurrence = $null
+		)
+		[pscustomobject]@{
+			Id = '99999999-9999-9999-9999-999999999999'; DisplayName = 'Unrelated prefix - original campaign'
+			Status = $Status
+			Scope = @{ query = $Query; queryType = 'MicrosoftGraph' }
+			Settings = @{ recurrence = $Recurrence }
+		}
+	}
 }
 
 Describe 'Unified access review creation and local logging' {
@@ -71,6 +84,8 @@ Describe 'Unified access review creation and local logging' {
 			Assignments = @([pscustomobject]@{ PrincipalType = 'Group'; PrincipalId = $script:groupId })
 			ApplicationOwners = @()
 			ExistingNames = @()
+			ExistingReviews = @()
+			ExistingInstances = @()
 			HostMessages = [System.Collections.Generic.List[string]]::new()
 		}
 		$fixture = $script:fixture
@@ -108,8 +123,10 @@ Describe 'Unified access review creation and local logging' {
 		Mock Get-MgServicePrincipalAppRoleAssignedTo ({ $fixture.Assignments }.GetNewClosure())
 		Mock Get-MgServicePrincipalOwner ({ $fixture.ApplicationOwners }.GetNewClosure())
 		Mock Get-MgIdentityGovernanceAccessReviewDefinition ({
-			foreach ($name in $fixture.ExistingNames) { [pscustomobject]@{ DisplayName = $name } }
+			foreach ($name in $fixture.ExistingNames) { [pscustomobject]@{ Id = $fixture.ReviewId; DisplayName = $name; Status = 'Completed' } }
+			$fixture.ExistingReviews
 		}.GetNewClosure())
+		Mock Get-MgIdentityGovernanceAccessReviewDefinitionInstance ({ $fixture.ExistingInstances }.GetNewClosure())
 		Mock New-MgIdentityGovernanceAccessReviewDefinition ({
 			param($BodyParameter)
 			if ($fixture.CreateFailure) { throw 'Create review forbidden.' }
@@ -1260,6 +1277,172 @@ Describe 'Unified access review creation and local logging' {
 		$result.Reason | Should -Match 'already exists'
 		Should -Invoke Get-MgIdentityGovernanceAccessReviewDefinition -Times 1 -Exactly
 		Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times 0 -Exactly
+	}
+
+	It 'skips the same resource under another name in <Mode> mode regardless of reviewer policy (preview: <Preview>)' -TestCases @(
+		@{ Mode = 'Single'; Preview = $false }, @{ Mode = 'Single'; Preview = $true },
+		@{ Mode = 'Csv'; Preview = $false }, @{ Mode = 'Csv'; Preview = $true },
+		@{ Mode = 'Application'; Preview = $false }, @{ Mode = 'Application'; Preview = $true }
+	) {
+		param($Mode, $Preview)
+		$fixture.ExistingReviews = @(New-ExistingResourceReview)
+		$parameters = switch ($Mode) {
+			'Single' { @{ GroupId = $script:groupId; ReviewName = 'New campaign name' } }
+			'Csv' {
+				$csv = Join-Path $script:testScriptRoot 'resource.csv'
+				"GroupId,ReviewName`n$script:groupId,New campaign name" | Set-Content $csv
+				@{ CsvPath = $csv }
+			}
+			'Application' { @{ ServicePrincipalId = $script:reviewId } }
+		}
+		$result = & $script:testScript @parameters -ReviewerType ResourceOwner -ForceTwoStage -WhatIf:$Preview -Confirm:$false
+		$result.Status | Should -Be 'Skipped'
+		$result.DuplicateMatchType | Should -Be 'Resource'
+		$result.MatchedReviewId | Should -Be $fixture.ExistingReviews[0].Id
+		$result.MatchedReviewName | Should -Be 'Unrelated prefix - original campaign'
+		$result.Reason | Should -Match 'regardless of reviewer/stage policy'
+		Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times 0
+		Should -Invoke Get-MgGroupOwner -Times 0
+		if ($Preview) { Test-Path (Join-Path $script:testScriptRoot 'logs') | Should -BeFalse }
+		else { (Get-LogEntries | Where-Object Event -EQ GroupResult).Result.DuplicateMatchType | Should -Be 'Resource' }
+	}
+
+	It 'catches a shared group across separate application runs with different prefixes' {
+		Mock New-MgIdentityGovernanceAccessReviewDefinition ({
+			param($BodyParameter)
+			$fixture.Bodies.Add($BodyParameter)
+			$fixture.ExistingReviews += [pscustomobject]@{
+				Id = $fixture.ReviewId; DisplayName = $BodyParameter.displayName
+				Status = 'InProgress'; Scope = $BodyParameter.scope; Settings = $BodyParameter.settings
+			}
+			[pscustomobject]@{ Id = $fixture.ReviewId }
+		}.GetNewClosure())
+		$first = & $script:testScript -ServicePrincipalId $script:reviewId -ReviewNamePrefix First -Confirm:$false
+		$second = & $script:testScript -ServicePrincipalId 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa' -ReviewNamePrefix Second -Confirm:$false
+		$first.Status | Should -Be 'Created'
+		$second.Status | Should -Be 'Skipped'
+		$second.DuplicateMatchType | Should -Be 'Resource'
+		$second.MatchedReviewId | Should -Be $first.ReviewId
+		Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times 1 -Exactly
+	}
+
+	It 'allows renamed completed historical coverage but keeps future recurring coverage (kind: <Kind>)' -TestCases @(
+		@{ Kind = 'completed one-time'; Block = $false },
+		@{ Kind = 'expired recurring'; Block = $false },
+		@{ Kind = 'future recurring'; Block = $true },
+		@{ Kind = 'unbounded recurring'; Block = $true },
+		@{ Kind = 'numbered remaining'; Block = $true },
+		@{ Kind = 'numbered finished'; Block = $false }
+	) {
+		param($Kind, $Block)
+		$recurrence = switch ($Kind) {
+			'expired recurring' { @{ pattern = @{ type = 'weekly'; interval = 1 }; range = @{ type = 'endDate'; endDate = (Get-Date).AddDays(-1).ToString('yyyy-MM-dd') } } }
+			'future recurring' { @{ pattern = @{ type = 'weekly'; interval = 1 }; range = @{ type = 'endDate'; endDate = (Get-Date).AddDays(30).ToString('yyyy-MM-dd') } } }
+			'unbounded recurring' { @{ pattern = @{ type = 'weekly'; interval = 1 }; range = @{ type = 'noEnd' } } }
+			'numbered remaining' { @{ pattern = @{ type = 'weekly'; interval = 1 }; range = @{ type = 'numbered'; numberOfOccurrences = 2 } } }
+			'numbered finished' { @{ pattern = @{ type = 'weekly'; interval = 1 }; range = @{ type = 'numbered'; numberOfOccurrences = 1 } } }
+		}
+		$fixture.ExistingInstances = @([pscustomobject]@{ Id = 'past'; Status = 'Completed' })
+		$fixture.ExistingReviews = @(New-ExistingResourceReview -Status Completed -Recurrence $recurrence)
+		$result = & $script:testScript -GroupId $script:groupId -Confirm:$false
+		$result.Status | Should -Be $(if ($Block) { 'Skipped' } else { 'Created' })
+		Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times $(if ($Block) { 0 } else { 1 }) -Exactly
+	}
+
+	It 'blocks scheduled resource coverage even when it has not started' {
+		$fixture.ExistingReviews = @(New-ExistingResourceReview -Status NotStarted)
+		$result = & $script:testScript -GroupId $script:groupId -WhatIf
+		$result.DuplicateMatchType | Should -Be 'Resource'
+		Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times 0
+	}
+
+	It 'does not let a parent review suppress missing nested child reviews' {
+		Set-NestedGroupFixture
+		$fixture.ExistingReviews = @(New-ExistingResourceReview -Query "/groups/$script:groupId/transitiveMembers")
+		$results = @(& $script:testScript -GroupId $script:groupId -Confirm:$false)
+		$results[0].Status | Should -Be 'Skipped'
+		$results[0].DuplicateMatchType | Should -Be 'Resource'
+		$results[1].Status | Should -Be 'Created'
+		$results[1].GroupId | Should -Be '44444444-4444-4444-4444-444444444444'
+	}
+
+	It 'does not treat partial or enumerated scopes as full coverage (kind: <Kind>)' -TestCases @(
+		@{ Kind = 'guests only' }, @{ Kind = 'enumeration' }, @{ Kind = 'restricted principals' }, @{ Kind = 'inactive users' }
+	) {
+		param($Kind)
+		$existing = New-ExistingResourceReview -Query "/groups/$script:groupId/members?`$filter=userType eq 'Guest'"
+		if ($Kind -eq 'enumeration') {
+			$existing | Add-Member instanceEnumerationScope @{ query = "/groups?`$filter=groupTypes/any(c:c eq 'Unified')" }
+			$existing.Scope.query = './members/microsoft.graph.user'
+		}
+		if ($Kind -eq 'restricted principals') {
+			$existing.Scope = @{
+				principalScopes = @(@{ query = "/users/$script:ownerId" })
+				resourceScopes = @(@{ query = "/groups/$script:groupId" })
+			}
+		}
+		if ($Kind -eq 'inactive users') {
+			$existing.Scope = @{ query = "/groups/$script:groupId/members"; inactiveDuration = 'P30D'; '@odata.type' = '#microsoft.graph.accessReviewInactiveUsersQueryScope' }
+		}
+		$fixture.ExistingReviews = @($existing)
+		$result = & $script:testScript -GroupId $script:groupId -Confirm:$false -WarningAction SilentlyContinue
+		$result.Status | Should -Be 'Manual review required'
+		$result.DuplicateMatchType | Should -Be 'UncertainResourceScope'
+		$result.Reason | Should -Match 'rather than assume'
+		Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times 0
+	}
+
+	It 'reads SDK AdditionalProperties and versioned group scopes' {
+		$existing = New-ExistingResourceReview
+		$existing.Scope = [Microsoft.Graph.PowerShell.Models.MicrosoftGraphAccessReviewScope]::new()
+		$existing.Scope.AdditionalProperties['query'] = "/v1.0/groups/$script:groupId/members/microsoft.graph.user"
+		$fixture.ExistingReviews = @($existing)
+		$result = & $script:testScript -GroupId $script:groupId -Confirm:$false
+		$result.DuplicateMatchType | Should -Be 'Resource'
+		Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times 0
+	}
+
+	It 'does not confuse different groups with the same users or application access with membership' {
+		$fixture.ExistingReviews = @(
+			(New-ExistingResourceReview -Query '/groups/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/members'),
+			(New-ExistingResourceReview -Query "/servicePrincipals/$script:groupId/appRoleAssignedTo")
+		)
+		$result = & $script:testScript -GroupId $script:groupId -Confirm:$false
+		$result.Status | Should -Be 'Created'
+	}
+
+	It 'protects direct application-user reviews independently of their names' {
+		$fixture.Assignments = @([pscustomobject]@{ PrincipalType = 'User'; PrincipalId = $script:ownerId })
+		$existing = New-ExistingResourceReview
+		$existing.Scope = @{
+			principalScopes = @(@{ query = '/v1.0/users' })
+			resourceScopes = @(@{ query = "/v1.0/servicePrincipals/$script:groupId" })
+		}
+		$fixture.ExistingReviews = @($existing)
+		$result = & $script:testScript -ServicePrincipalId $script:groupId -Confirm:$false
+		$result.TargetType | Should -Be 'ApplicationDirectUsers'
+		$result.DuplicateMatchType | Should -Be 'Resource'
+		Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times 0
+	}
+
+	It 'fails closed before any writes when existing coverage cannot be read (kind: <Kind>)' -TestCases @(
+		@{ Kind = 'scope missing' }, @{ Kind = 'status missing' }, @{ Kind = 'numbered instances denied' }
+	) {
+		param($Kind)
+		$existing = New-ExistingResourceReview
+		switch ($Kind) {
+			'scope missing' { $existing.Scope = $null }
+			'status missing' { $existing.Status = $null }
+			'numbered instances denied' {
+				$existing.Status = 'Completed'
+				$existing.Settings.recurrence = @{ pattern = @{ type = 'weekly' }; range = @{ type = 'numbered'; numberOfOccurrences = 2 } }
+				Mock Get-MgIdentityGovernanceAccessReviewDefinitionInstance { throw 'Instances forbidden' }
+			}
+		}
+		$fixture.ExistingReviews = @($existing)
+		{ & $script:testScript -GroupId $script:groupId -Confirm:$false } | Should -Throw '*resource coverage; no reviews were created*'
+		Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times 0
+		(Get-LogEntries)[-1].Event | Should -Be 'RunFailed'
 	}
 
 	It 'skips duplicate names within a CSV batch (preview: <Preview>)' -TestCases @(
