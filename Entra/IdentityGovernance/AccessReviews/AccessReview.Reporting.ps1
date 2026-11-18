@@ -176,10 +176,13 @@ function New-AccessReviewHtml {
 		for ($i = 0; $i -lt $Results.Count; $i++) {
 			$result = $Results[$i]
 			if ($result.ServicePrincipalId) {
+				$applicationName = $result.ServicePrincipalName
+				if (-not $applicationName -and $result.TargetType -ne 'GroupMembership') {
+					$applicationName = $result.Target
+				}
 				[pscustomobject]@{
 					ServicePrincipalId = $result.ServicePrincipalId
-					ServicePrincipalName = if ($result.ServicePrincipalName) { $result.ServicePrincipalName }
-						elseif ($result.TargetType -ne 'GroupMembership') { $result.Target }
+					ServicePrincipalName = $applicationName
 					DirectUserIndex = if ($result.TargetType -eq 'ApplicationDirectUsers') { $i } else { $null }
 				}
 			}

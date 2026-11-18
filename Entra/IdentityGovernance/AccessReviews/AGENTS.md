@@ -73,4 +73,6 @@ if ($r.FailedCount) { exit 1 }
 Tests mock Graph. Never connect to a tenant or create/modify real reviews for
 validation. Add focused behavioral tests in the existing test files and run
 `git diff --check`. Browser-check report interactions with fictional data.
+For Windows PowerShell deployments, also parse the entry point and its helpers
+in the target PowerShell version; a PowerShell 7 parse is not a compatibility check.
 Do not install dependencies unless the chosen validation reports them missing.
