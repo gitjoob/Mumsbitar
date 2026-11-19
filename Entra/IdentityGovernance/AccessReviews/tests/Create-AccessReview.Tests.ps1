@@ -2595,6 +2595,23 @@ Describe 'Unified access review creation and local logging' {
 		Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times 0 -Exactly
 	}
 
+	It 'can disable reminders without disabling initial notifications for <Count> users' -TestCases @(
+		@{ Count = 150 }, @{ Count = 500 }
+	) {
+		param($Count)
+		$script:fixture.Count = $Count
+		$result = & $script:testScript -GroupId $script:groupId -DisableReminders -Confirm:$false
+		$script:fixture.Bodies[0].settings.reminderNotificationsEnabled | Should -BeFalse
+		$script:fixture.Bodies[0].settings.mailNotificationsEnabled | Should -BeTrue
+		$result.ReviewConfiguration.ReminderNotificationsEnabled | Should -BeFalse
+	}
+
+	It 'previews disabled reminders without creating reviews' {
+		$result = & $script:testScript -GroupId $script:groupId -DisableReminders -WhatIf
+		$result.ReviewConfiguration.ReminderNotificationsEnabled | Should -BeFalse
+		Should -Invoke New-MgIdentityGovernanceAccessReviewDefinition -Times 0 -Exactly
+	}
+
 	It 'preserves quarterly recurrence and three-stage duration' {
 		$script:fixture.Count = 500
 		$start = (Get-Date).Date.AddDays(1)
@@ -2602,6 +2619,8 @@ Describe 'Unified access review creation and local logging' {
 		$null = & $script:testScript -GroupId $script:groupId -Frequency Quarterly -StartDate $start -EndDate $end -Confirm:$false
 		$settings = $script:fixture.Bodies[0].settings
 		$settings.instanceDurationInDays | Should -Be 15
+		$settings.reminderNotificationsEnabled | Should -BeTrue
+		$settings.mailNotificationsEnabled | Should -BeTrue
 		$settings.recurrence.pattern.interval | Should -Be 3
 		([datetime]$settings.recurrence.range.endDate).Date | Should -Be $end.Date
 	}

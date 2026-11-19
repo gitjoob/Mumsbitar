@@ -107,9 +107,20 @@ Defaults: one-time review, starting today, **five days per stage**.
 | `-SelfReviewDurationInDays` | Self-review duration. |
 | `-SelectedReviewerDurationInDays` | Manager duration. |
 | `-ApplicationOwnerDurationInDays` | Final owner-stage duration, for either owner type. |
+| `-DisableReminders` | Disable automatic reminder emails for new reviews; initial notification emails remain enabled. |
 
 Allow at least one day per stage. For recurring reviews, supply an end date that
 allows the intended cycles to run. Notifications and reminders are enabled.
+Add `-DisableReminders` to any creation command to turn off automatic reminders.
+This also appears in the returned/logged `ReviewConfiguration.ReminderNotificationsEnabled`.
+Rerunning creation never changes existing reviews.
+
+For existing reviews, Microsoft documents that [Graph schedule updates](https://learn.microsoft.com/en-us/graph/api/accessreviewscheduledefinition-update?view=graph-rest-1.0)
+apply only to future instances, not the current running instance. Turning off
+reminders in series settings must therefore not be treated as confirmation that
+the current run's reminders have been suppressed. The script does not attempt
+to modify running reviews or stop them to prevent emails.
+
 Edit `$ReviewerMessage` for extra email text (256-character total limit), or
 `$AdditionalNotificationRecipients` for completion notifications.
 

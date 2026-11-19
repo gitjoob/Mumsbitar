@@ -24,6 +24,9 @@ See README.md for CSV columns, schedules, fallback reviewers and report usage.
 .PARAMETER HtmlReportPath
 Optional new HTML report of planned settings and creation results, not live status.
 With WhatIf, only this explicitly requested file is written. Never overwrites files.
+.PARAMETER DisableReminders
+Disable automatic reminder emails for newly created reviews. Initial notification
+emails remain enabled. Existing reviews are never modified.
 .EXAMPLE
 .\Create-AccessReview.ps1 -GroupId '<group Object ID>' -ReviewerType ResourceOwner -WhatIf
 .EXAMPLE
@@ -51,6 +54,7 @@ param(
 	[ValidateSet('ApplicationOwner', 'LineManager', 'ResourceOwner')]
 	[string]$ReviewerType = 'ApplicationOwner',
 	[switch]$ForceTwoStage,
+	[switch]$DisableReminders,
 	[ValidateRange(1, [int]::MaxValue)]
 	[int]$SelfReviewDurationInDays = 5,
 	[ValidateRange(1, [int]::MaxValue)]
@@ -1119,7 +1123,7 @@ foreach ($target in $targets) {
 			scope = $reviewScope
 			settings = @{
 				mailNotificationsEnabled = $true
-				reminderNotificationsEnabled = $true
+				reminderNotificationsEnabled = -not $DisableReminders
 				justificationRequiredOnApproval = $true
 				defaultDecisionEnabled = $true
 				defaultDecision = "Deny"
@@ -1199,6 +1203,7 @@ foreach ($target in $targets) {
 			SeriesEndDate = if ($Frequency -ne 'OneTime') { $EndDate.ToString('yyyy-MM-dd') } else { $null }
 			Scope = $reviewScope
 			AutoApplyDecisionsEnabled = $params.settings.autoApplyDecisionsEnabled
+			ReminderNotificationsEnabled = $params.settings.reminderNotificationsEnabled
 			DefaultDecision = $params.settings.defaultDecision
 			DescriptionForReviewers = $params.descriptionForReviewers
 			DescriptionForAdmins = $params.descriptionForAdmins
