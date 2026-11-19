@@ -211,6 +211,9 @@ The first matching prefix wins for overlapping prefixes. The prefix summary
 shows `Not reviewed` separately for instance outcomes and in-progress stage
 tasks. Stage counts are not added to instance totals, and incomplete reads are
 marked partial or unavailable.
+The inventory shows instance outcomes and each active stage's recorded
+decisions separately; instance outcomes might not yet reflect active-stage
+decisions. Expand a review for the individual stage breakdown.
 **Current owners/managers are not proof of historical reviewer assignments;
 departments are current values.** Department and manager lookups require
 `User.Read.All`. Missing data appears as

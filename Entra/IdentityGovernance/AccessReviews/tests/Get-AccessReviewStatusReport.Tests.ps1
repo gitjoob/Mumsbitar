@@ -358,6 +358,26 @@ Describe 'Read-only historical access review status' {
 		$html | Should -Match '<strong>0</strong><span>Not reviewed \(instance outcomes\)'
 	}
 
+	It 'shows active-stage progress separately from instance outcomes in the inventory' {
+		$responses["$instanceRoot/$newId/decisions$decisionSelect"].value = @((New-StatusDecision 'i' 'NotReviewed'))
+		$responses["$instanceRoot/$newId/stages"].value[0].status = 'InProgress'
+		$responses["$instanceRoot/$newId/stages/$stageId/decisions$decisionSelect"].value = @(
+			(New-StatusDecision 's1' 'Approve'), (New-StatusDecision 's2' 'NotReviewed')
+		)
+		$null = & $reporter -HtmlReportPath $outputPath
+		$html = Get-Content $outputPath -Raw
+		$html | Should -Match '<th>Instance recorded / items</th><th>Active stage recorded / items</th>'
+		$html | Should -Match "<td>0 / 1</td><td>$stageId`: 1 / 2</td><td>1</td>"
+		$html | Should -Match '<td>No active stage returned</td>'
+	}
+
+	It 'shows unavailable active-stage progress when its decisions cannot be read' {
+		$responses["$instanceRoot/$newId/stages"].value[0].status = 'InProgress'
+		$failures["$instanceRoot/$newId/stages/$stageId/decisions$decisionSelect"] = 'Stage decisions unavailable'
+		$null = & $reporter -HtmlReportPath $outputPath -WarningAction SilentlyContinue
+		(Get-Content $outputPath -Raw) | Should -Match "<td>$stageId`: unavailable</td>"
+	}
+
 	It 'shows unavailable rather than a zero when both decision sources fail' {
 		$responses["$instanceRoot/$newId/stages"].value[0].status = 'InProgress'
 		foreach ($id in @($oldId, $newId)) {

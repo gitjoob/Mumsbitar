@@ -869,7 +869,7 @@ function New-AccessReviewStatusHtml {
 		$text = ConvertTo-AccessReviewHtmlText $status
 		$null = $body.AppendLine("<option value=`"$text`">$text</option>")
 	}
-	$null = $body.AppendLine('</select></label></div><p id="inventory-count" role="status"></p><div class="table-wrap"><table><thead><tr><th>Review / prefix</th><th>Definition status</th><th>Instance status</th><th>Instance dates (UTC)</th><th>Recorded / items</th><th>Runtime stages</th></tr></thead><tbody id="status-rows">')
+	$null = $body.AppendLine('</select></label></div><p class="muted">Instance outcomes and active-stage progress are separate; an instance may not yet reflect decisions made in a running stage. Open a review for stage details.</p><p id="inventory-count" role="status"></p><div class="table-wrap"><table><thead><tr><th>Review / prefix</th><th>Definition status</th><th>Instance status</th><th>Instance dates (UTC)</th><th>Instance recorded / items</th><th>Active stage recorded / items</th><th>Runtime stages</th></tr></thead><tbody id="status-rows">')
 	$details = [System.Text.StringBuilder]::new()
 	$detailPages = [System.Collections.Generic.List[string]]::new()
 	$index = 0
@@ -881,7 +881,20 @@ function New-AccessReviewStatusHtml {
 			$search = ConvertTo-AccessReviewHtmlText (@{ Review = $definition.DisplayName; Configuration = $definition.Configuration; Owners = $definition.CurrentResources; Instance = $instance } | ConvertTo-Json -Depth 15 -Compress)
 			$progress = if ($null -ne $instance.Summary) { "$($instance.Summary.Recorded) / $($instance.Summary.Total)" } else { 'Unavailable / not materialized' }
 			$stageCount = if ($instance.StageError) { 'Unavailable' } elseif ($instance) { "$($instance.Stages.Count)" } else { 'Not materialized' }
-			$null = $body.AppendLine("<tr data-prefix=`"$(ConvertTo-AccessReviewHtmlText $definition.Prefix)`" data-instance=`"$(ConvertTo-AccessReviewHtmlText $status)`" data-definition=`"$(ConvertTo-AccessReviewHtmlText $definition.Status)`" data-search=`"$search`"><td><button class=`"link view`" data-target=`"status-$index`">$(ConvertTo-AccessReviewHtmlText $definition.DisplayName)</button><small>$(ConvertTo-AccessReviewHtmlText $definition.Prefix)</small></td><td>$(ConvertTo-AccessReviewHtmlText $definition.Status)</td><td><span class=`"badge`">$(ConvertTo-AccessReviewHtmlText $status)</span></td><td>$(ConvertTo-AccessReviewHtmlText $instance.Start)<br>$(ConvertTo-AccessReviewHtmlText $instance.End)</td><td>$progress</td><td>$stageCount</td></tr>")
+			$activeProgress = if (-not $instance) { 'Not materialized' }
+				elseif ($instance.StageError) { 'Unavailable' }
+				else {
+					$activeStages = @($instance.Stages | Where-Object Status -EQ 'InProgress')
+					if (-not $activeStages.Count) { 'No active stage returned' }
+					else {
+						(@(foreach ($stage in $activeStages) {
+							$stageLabel = ConvertTo-AccessReviewHtmlText $stage.Id
+							if ($null -ne $stage.Summary) { "$stageLabel`: $($stage.Summary.Recorded) / $($stage.Summary.Total)" }
+							else { "$stageLabel`: unavailable" }
+						}) -join '<br>')
+					}
+				}
+			$null = $body.AppendLine("<tr data-prefix=`"$(ConvertTo-AccessReviewHtmlText $definition.Prefix)`" data-instance=`"$(ConvertTo-AccessReviewHtmlText $status)`" data-definition=`"$(ConvertTo-AccessReviewHtmlText $definition.Status)`" data-search=`"$search`"><td><button class=`"link view`" data-target=`"status-$index`">$(ConvertTo-AccessReviewHtmlText $definition.DisplayName)</button><small>$(ConvertTo-AccessReviewHtmlText $definition.Prefix)</small></td><td>$(ConvertTo-AccessReviewHtmlText $definition.Status)</td><td><span class=`"badge`">$(ConvertTo-AccessReviewHtmlText $status)</span></td><td>$(ConvertTo-AccessReviewHtmlText $instance.Start)<br>$(ConvertTo-AccessReviewHtmlText $instance.End)</td><td>$progress</td><td>$activeProgress</td><td>$stageCount</td></tr>")
 			$null = $details.AppendLine("<article id=`"status-$index`" class=`"review-detail`" hidden><h3 tabindex=`"-1`">$(ConvertTo-AccessReviewHtmlText $definition.DisplayName)</h3><p>Definition: <code>$(ConvertTo-AccessReviewHtmlText $definition.Id)</code> | $(ConvertTo-AccessReviewHtmlText $definition.Status)<br>Instance: <code>$(ConvertTo-AccessReviewHtmlText $instance.Id)</code> | $(ConvertTo-AccessReviewHtmlText $status)</p><p>$(ConvertTo-AccessReviewHtmlText $definition.Description)</p>")
 			if ($definition.Error) { $null = $details.AppendLine("<p class=`"notice warning`">Instance listing unavailable: $(ConvertTo-AccessReviewHtmlText $definition.Error)</p>") }
 			$null = $details.AppendLine('<details open><summary>All configured stages (current definition, not historical evidence)</summary><p class="notice">These stages include future stages not returned by the runtime API. Settings may have changed since older instances ran. Named users may be captured owners or fallbacks; their original policy label cannot be inferred from user IDs alone.</p>')
