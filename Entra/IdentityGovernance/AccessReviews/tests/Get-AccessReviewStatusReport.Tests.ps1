@@ -343,6 +343,46 @@ Describe 'Read-only historical access review status' {
 		@($requests | Where-Object Uri -Like '*/users/00000000-*').Count | Should -Be 0
 	}
 
+	It 'shows pending active-stage tasks separately when a matched prefix has zero instance-level NotReviewed outcomes' {
+		$responses["$instanceRoot/$newId/decisions$decisionSelect"].value = @((New-StatusDecision 'a' 'Approve'))
+		$responses["$instanceRoot/$newId/stages"].value[0].status = 'InProgress'
+		$responses["$instanceRoot/$newId/stages/$stageId/decisions$decisionSelect"].value = @(
+			(New-StatusDecision 'pending-one' 'NotReviewed'), (New-StatusDecision 'pending-two' 'notReviewed')
+		)
+		$responses["$instanceRoot/$oldId/stages/$stageId/decisions$decisionSelect"].value = @((New-StatusDecision 'historical' 'NotReviewed'))
+		$report = & $reporter -Prefixes @('ar', 'AR Finance') -HtmlReportPath $outputPath
+		$report.Definitions[0].Prefix | Should -BeExactly 'ar'
+		$report.Definitions[0].Instances[0].Summary.NotReviewed | Should -Be 0
+		$html = Get-Content $outputPath -Raw
+		$html | Should -Match 'data-show-chart="ar"[^>]*>ar</button></td><td>1</td><td>2</td><td>2 / 2</td><td>4</td><td>4</td><td>0</td><td>2</td>'
+		$html | Should -Match '<strong>0</strong><span>Not reviewed \(instance outcomes\)'
+	}
+
+	It 'shows unavailable rather than a zero when both decision sources fail' {
+		$responses["$instanceRoot/$newId/stages"].value[0].status = 'InProgress'
+		foreach ($id in @($oldId, $newId)) {
+			$failures["$instanceRoot/$id/decisions$decisionSelect"] = 'Instance decisions unavailable'
+		}
+		$failures["$instanceRoot/$newId/stages/$stageId/decisions$decisionSelect"] = 'Stage decisions unavailable'
+		$null = & $reporter -Prefixes 'AR' -HtmlReportPath $outputPath -WarningAction SilentlyContinue
+		(Get-Content $outputPath -Raw) | Should -Match 'data-show-chart="AR"[^>]*>AR</button></td><td>1</td><td>2</td><td>0 / 2</td>(<td>Unavailable</td>){4}'
+	}
+
+	It 'renders the combined chart and separate prefix counts and percentages' {
+		$prefix = 'Ops & "IT"'
+		$responses[$definitionsUri].value += @{ id = 'ops'; displayName = "$prefix access"; status = 'Completed' }
+		$responses["$definitionsUri/ops/instances"] = @{ value = @() }
+		$null = & $reporter -Prefixes @('AR ', $prefix) -HtmlReportPath $outputPath
+		$html = Get-Content $outputPath -Raw
+		$html | Should -Match '<option value="">All prefixes</option>'
+		$html | Should -Match 'data-show-chart="Ops &amp; &quot;IT&quot;"'
+		$all = [regex]::Match($html, '(?s)<div data-chart-prefix="">.*?</ul>').Value
+		$ops = [regex]::Match($html, '(?s)<div data-chart-prefix="Ops &amp; &quot;IT&quot;" hidden>.*?</ul>').Value
+		$all | Should -Match 'Completed: 1 \(50%\); InProgress: 1 \(50%\)'
+		$ops | Should -Match 'Completed: 1 \(100%\)'
+		$ops | Should -Not -Match 'InProgress'
+	}
+
 	It 'keeps failed decision pages unavailable rather than showing partial counts as complete' {
 		$responses["$instanceRoot/$newId/decisions$decisionSelect"]['@odata.nextLink'] = "$instanceRoot/$newId/decisions?page=2"
 		$failures["$instanceRoot/$newId/decisions?page=2"] = 'Decision page forbidden'
@@ -353,6 +393,7 @@ Describe 'Read-only historical access review status' {
 		$html | Should -Match 'Partial data / collection issues'
 		$html | Should -Match 'Decision-count coverage: 1 of 2'
 		$html | Should -Match '<strong>3</strong><span>Available instance decision items'
+		$html | Should -Match '<td>1 / 2</td><td>3</td><td>3</td><td>0 \(partial\)</td><td>No active stages returned</td>'
 	}
 
 	It 'surfaces stage-list failures without inventing a single runtime stage' {

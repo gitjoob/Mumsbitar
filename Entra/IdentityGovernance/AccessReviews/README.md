@@ -204,7 +204,13 @@ Connect-MgGraph -Scopes 'AccessReview.Read.All','User.Read.All','GroupMember.Rea
 Includes stages, individual users, decisions, recorded reviewers and current
 owners/managers, with reviewer departments from the current directory.
 The dashboard pie chart counts each matched review definition once by current
-status, not once per historical instance or stage.
+status, not once per historical instance or stage. It opens on **All prefixes**.
+Choose a prefix from **Chart prefix** or click a prefix in **Summary by prefix**
+to update the slices and legend offline. The inventory filters are independent.
+The first matching prefix wins for overlapping prefixes. The prefix summary
+shows `Not reviewed` separately for instance outcomes and in-progress stage
+tasks. Stage counts are not added to instance totals, and incomplete reads are
+marked partial or unavailable.
 **Current owners/managers are not proof of historical reviewer assignments;
 departments are current values.** Department and manager lookups require
 `User.Read.All`. Missing data appears as

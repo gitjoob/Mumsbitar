@@ -756,9 +756,7 @@ function ConvertTo-AccessReviewStatusSummaryHtml {
 }
 
 function ConvertTo-AccessReviewStatusChartHtml {
-	param([AllowEmptyCollection()][object[]]$Definitions)
-	$heading = '<section id="status-dashboard" class="panel"><h2>Reviews by current status</h2><p class="muted">All matched review definitions returned in this snapshot, counted once each. Historical instances and stages are not counted. Inventory filters do not change this chart.</p>'
-	if (-not $Definitions.Count) { return "$heading<p>No review definitions available for the status chart.</p></section>" }
+	param([object[]]$Definitions, [string]$Label)
 	$colors = @{
 		Initializing = '#a66340'; NotStarted = '#7b7f88'; Starting = '#9c6aae'
 		InProgress = '#b51f3b'; Completing = '#d66c42'; Completed = '#237868'
@@ -783,8 +781,8 @@ function ConvertTo-AccessReviewStatusChartHtml {
 		$name = ConvertTo-AccessReviewHtmlText $group.Name
 		$null = $legend.AppendLine("<li data-review-status=`"$name`" data-count=`"$($group.Count)`"><span class=`"status-swatch`" style=`"background:$color`" aria-hidden=`"true`"></span><span class=`"status-label`">$name</span><strong>$($group.Count)</strong><span>$percent%</span></li>")
 	}
-	$label = ConvertTo-AccessReviewHtmlText ("Reviews by current status. " + ($labels -join '; '))
-	"$heading<div class=`"status-dashboard-layout`"><div class=`"status-pie`" role=`"img`" aria-label=`"$label`" style=`"background:conic-gradient($($stops -join ', '))`"></div><ul class=`"status-legend`" aria-label=`"Review status counts and percentages`">$legend</ul></div></section>"
+	$accessibleLabel = ConvertTo-AccessReviewHtmlText ("Reviews by current status ($Label). " + ($labels -join '; '))
+	"<div class=`"status-dashboard-layout`"><div class=`"status-pie`" role=`"img`" aria-label=`"$accessibleLabel`" style=`"background:conic-gradient($($stops -join ', '))`"></div><ul class=`"status-legend`" aria-label=`"Review status counts and percentages`">$legend</ul></div>"
 }
 
 function New-AccessReviewStatusHtml {
@@ -794,7 +792,7 @@ function New-AccessReviewStatusHtml {
 	$known = @($instances | Where-Object { $null -ne $_.Summary })
 	$total = [long](($known | ForEach-Object { $_.Summary.Total } | Measure-Object -Sum).Sum)
 	$recorded = [long](($known | ForEach-Object { $_.Summary.Recorded } | Measure-Object -Sum).Sum)
-	$notReviewed = [long](($known | ForEach-Object { $_.Summary.NotReviewed } | Measure-Object -Sum).Sum)
+	$notReviewed = if ($known.Count) { [long](($known | ForEach-Object { $_.Summary.NotReviewed } | Measure-Object -Sum).Sum) } else { 'Unavailable' }
 	$dontKnow = [long](($known | ForEach-Object { $_.Summary.DontKnow } | Measure-Object -Sum).Sum)
 	$other = [long](($known | ForEach-Object { $_.Summary.Other } | Measure-Object -Sum).Sum)
 	$null = $body.AppendLine('<main><header><div><p class="eyebrow">Identity governance / read-only snapshot</p><h1>Access review status</h1></div><div class="theme-control"><button id="theme" type="button" role="switch" aria-checked="false" aria-label="Dark mode">Dark mode</button><small id="theme-notice" role="status"></small></div></header>')
@@ -807,21 +805,54 @@ function New-AccessReviewStatusHtml {
 	foreach ($metric in @(
 		@('Definitions', $Report.Definitions.Count), @('Historical instances', $instances.Count),
 		@('Available instance decision items', $total), @('Recorded outcomes', $recorded),
-		@('Not reviewed', $notReviewed), @("Don't know", $dontKnow),
+		@('Not reviewed (instance outcomes)', $notReviewed), @("Don't know", $dontKnow),
 		@('Other / unknown outcomes', $other), @('Collection issues', $Report.Issues.Count)
 	)) {
 		$null = $body.AppendLine("<div class=`"metric`"><strong>$($metric[1])</strong><span>$(ConvertTo-AccessReviewHtmlText $metric[0])</span></div>")
 	}
 	$null = $body.AppendLine("</section><p class=`"muted`">Decision-count coverage: $($known.Count) of $($instances.Count) instances. Future/current configured stages and runtime stages are shown separately. Current configuration and directory owners are not historical assignment snapshots.</p>")
-	$null = $body.AppendLine((ConvertTo-AccessReviewStatusChartHtml -Definitions @($Report.Definitions)))
-	$null = $body.AppendLine('<section class="panel"><h2>Summary by prefix</h2><div class="table-wrap"><table><thead><tr><th>Prefix</th><th>Definitions</th><th>Instances</th><th>Known / all instances</th><th>Items</th><th>Recorded outcomes</th><th>Not reviewed</th></tr></thead><tbody>')
-	foreach ($group in @($Report.Definitions | Group-Object Prefix | Sort-Object Name)) {
+	$prefixGroups = @($Report.Definitions | Group-Object Prefix | Sort-Object Name)
+	$null = $body.AppendLine('<section id="status-dashboard" class="panel"><h2>Reviews by current status</h2><p class="muted">Each matching review definition is counted once. Historical instances and stages are not counted. Inventory filters are separate.</p>')
+	if ($prefixGroups.Count) {
+		$null = $body.AppendLine('<div class="filters"><label>Chart prefix<select id="chart-prefix"><option value="">All prefixes</option>')
+		foreach ($group in $prefixGroups) {
+			$text = ConvertTo-AccessReviewHtmlText $group.Name
+			$null = $body.AppendLine("<option value=`"$text`">$text</option>")
+		}
+		$null = $body.AppendLine('</select></label></div><div aria-live="polite">')
+		$null = $body.AppendLine("<div data-chart-prefix=`"`">$(ConvertTo-AccessReviewStatusChartHtml -Definitions @($Report.Definitions) -Label 'All prefixes')</div>")
+		foreach ($group in $prefixGroups) {
+			$text = ConvertTo-AccessReviewHtmlText $group.Name
+			$null = $body.AppendLine("<div data-chart-prefix=`"$text`" hidden>$(ConvertTo-AccessReviewStatusChartHtml -Definitions $group.Group -Label $group.Name)</div>")
+		}
+		$null = $body.AppendLine('</div>')
+	}
+	else { $null = $body.AppendLine('<p>No review definitions available for the status chart.</p>') }
+	$null = $body.AppendLine('</section>')
+	$null = $body.AppendLine('<section class="panel"><h2>Summary by prefix</h2><p class="muted">Each review is counted under the first matching prefix. Active-stage counts show pending tasks in stages currently in progress and are not added to instance outcomes. A partial count covers only the records that could be read.</p><div class="table-wrap"><table><thead><tr><th>Prefix</th><th>Definitions</th><th>Instances</th><th>Known / all instances</th><th>Instance items</th><th>Recorded instance outcomes</th><th>Not reviewed (instances)</th><th>Not reviewed (active stages)</th></tr></thead><tbody>')
+	foreach ($group in $prefixGroups) {
 		$groupInstances = @($group.Group | ForEach-Object { $_.Instances })
 		$groupKnown = @($groupInstances | Where-Object { $null -ne $_.Summary })
-		$sum = [long](($groupKnown | ForEach-Object { $_.Summary.Total } | Measure-Object -Sum).Sum)
-		$done = [long](($groupKnown | ForEach-Object { $_.Summary.Recorded } | Measure-Object -Sum).Sum)
-		$pending = [long](($groupKnown | ForEach-Object { $_.Summary.NotReviewed } | Measure-Object -Sum).Sum)
-		$null = $body.AppendLine("<tr><td>$(ConvertTo-AccessReviewHtmlText $group.Name)</td><td>$($group.Count)</td><td>$($groupInstances.Count)</td><td>$($groupKnown.Count) / $($groupInstances.Count)</td><td>$sum</td><td>$done</td><td>$pending</td></tr>")
+		$activeInstances = @($groupInstances | Where-Object Status -EQ 'InProgress')
+		$activeStages = @($activeInstances | ForEach-Object { $_.Stages } | Where-Object Status -EQ 'InProgress')
+		$knownStages = @($activeStages | Where-Object { $null -ne $_.Summary })
+		$missingListings = @($group.Group | Where-Object Error).Count -gt 0
+		$sum = $done = $pending = 'Unavailable'
+		if ($groupKnown.Count) {
+			$sum = [long](($groupKnown | ForEach-Object { $_.Summary.Total } | Measure-Object -Sum).Sum)
+			$done = [long](($groupKnown | ForEach-Object { $_.Summary.Recorded } | Measure-Object -Sum).Sum)
+			$pending = [long](($groupKnown | ForEach-Object { $_.Summary.NotReviewed } | Measure-Object -Sum).Sum)
+			if ($missingListings -or $groupKnown.Count -lt $groupInstances.Count) { $pending = "$pending (partial)" }
+		}
+		$stagePartial = $missingListings -or $knownStages.Count -lt $activeStages.Count -or @($activeInstances | Where-Object StageError).Count -gt 0
+		$stagePending = 'No active stages returned'
+		if ($knownStages.Count) {
+			$stagePending = [long](($knownStages | ForEach-Object { $_.Summary.NotReviewed } | Measure-Object -Sum).Sum)
+			if ($stagePartial) { $stagePending = "$stagePending (partial)" }
+		}
+		elseif ($stagePartial) { $stagePending = 'Unavailable' }
+		$text = ConvertTo-AccessReviewHtmlText $group.Name
+		$null = $body.AppendLine("<tr><td><button class=`"link`" type=`"button`" data-show-chart=`"$text`" aria-controls=`"status-dashboard`" aria-pressed=`"false`">$text</button></td><td>$($group.Count)</td><td>$($groupInstances.Count)</td><td>$($groupKnown.Count) / $($groupInstances.Count)</td><td>$sum</td><td>$done</td><td>$pending</td><td>$stagePending</td></tr>")
 	}
 	$null = $body.AppendLine('</tbody></table></div></section><section id="inventory" class="panel"><h2>Review and instance inventory</h2><div class="filters"><label>Search reviews, owners, reviewers or departments<input id="search" type="search"></label><label>Prefix<select id="prefix"><option value="">All prefixes</option>')
 	foreach ($prefix in @($Report.Definitions.Prefix | Sort-Object -Unique)) {
@@ -892,6 +923,22 @@ function New-AccessReviewStatusHtml {
 <title>Access review status</title><style><!--STYLE--></style></head><body><!--REPORT--><script type="application/json" id="status-details"><!--DETAILS--></script><script>
 (() => {
 /*THEME*/
+const chartPrefix = document.getElementById('chart-prefix');
+if (chartPrefix) {
+  const charts = [...document.querySelectorAll('[data-chart-prefix]')];
+  const chartButtons = [...document.querySelectorAll('[data-show-chart]')];
+  function showChart() {
+    for (const chart of charts) chart.hidden = chart.dataset.chartPrefix !== chartPrefix.value;
+    for (const button of chartButtons) button.setAttribute('aria-pressed', String(button.dataset.showChart === chartPrefix.value));
+  }
+  chartPrefix.addEventListener('change', showChart);
+  for (const button of chartButtons) button.addEventListener('click', () => {
+    chartPrefix.value = button.dataset.showChart;
+    showChart();
+    chartPrefix.focus();
+  });
+  showChart();
+}
 const rows = [...document.querySelectorAll('#status-rows tr')];
 const search = document.getElementById('search');
 const prefix = document.getElementById('prefix');
