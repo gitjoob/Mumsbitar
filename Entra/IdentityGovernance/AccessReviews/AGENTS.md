@@ -52,7 +52,10 @@ This guidance applies to this tool and its tests, not the rest of the repository
   stages, recorded instance reviewers, decision actors and current directory
   owners separate. Do not infer the original owner-policy label from named
   user scopes or map runtime stage GUIDs to current configuration by position.
-  Count instance decisions once, never add stage totals to overview completion,
+  For running instances, use the single in-progress runtime stage for progress
+  when returned, otherwise instance outcomes; label the source and preserve raw
+  outcomes separately. Failed active-stage reads must remain unavailable.
+  Count each instance once, never add stage totals to overview completion,
   and distinguish unavailable data from zero. Retain individual decision
   subjects and actors, including pending subjects. Resolve user profiles with
   Get-MgUser; keep current managers explicitly separate from historical

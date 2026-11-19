@@ -315,7 +315,7 @@ Describe 'Read-only historical access review status' {
 		$pages[0] | Should -Match 'Department \(current directory\): &lt;/script&gt;&lt;img'
 	}
 
-	It 'counts only instance outcomes in overview metrics and treats unknown outcomes as other' {
+	It 'uses instance outcomes when no stage is in progress and treats unknown outcomes as other' {
 		$report = & $reporter -HtmlReportPath $outputPath
 		$current = $report.Definitions[0].Instances[0].Summary
 		$current.Total | Should -Be 4
@@ -324,7 +324,7 @@ Describe 'Read-only historical access review status' {
 		$current.Other | Should -Be 2
 		$current.Completion | Should -Be 25
 		$current.ApplyResults.AppliedSuccessfully | Should -Be 4
-		(Get-Content $outputPath -Raw) | Should -Match '<strong>7</strong><span>Available instance decision items'
+		(Get-Content $outputPath -Raw) | Should -Match '<strong>7</strong><span>Available review progress items'
 		(Get-Content $outputPath -Raw) | Should -Match '<strong>4</strong><span>Recorded outcomes'
 		$dashboard = [regex]::Match((Get-Content $outputPath -Raw), '(?s)<section id="status-dashboard".*?</section>').Value
 		$dashboard | Should -Match 'data-review-status="InProgress" data-count="1"'
@@ -354,8 +354,8 @@ Describe 'Read-only historical access review status' {
 		$report.Definitions[0].Prefix | Should -BeExactly 'ar'
 		$report.Definitions[0].Instances[0].Summary.NotReviewed | Should -Be 0
 		$html = Get-Content $outputPath -Raw
-		$html | Should -Match 'data-show-chart="ar"[^>]*>ar</button></td><td>1</td><td>2</td><td>2 / 2</td><td>4</td><td>4</td><td>0</td><td>2</td>'
-		$html | Should -Match '<strong>0</strong><span>Not reviewed \(instance outcomes\)'
+		$html | Should -Match 'data-show-chart="ar"[^>]*>ar</button></td><td>1</td><td>2</td><td>2 / 2</td><td>5</td><td>3</td><td>2</td><td>2</td>'
+		$html | Should -Match '<strong>2</strong><span>Not reviewed \(review progress\)'
 	}
 
 	It 'shows active-stage progress separately from instance outcomes in the inventory' {
@@ -366,16 +366,55 @@ Describe 'Read-only historical access review status' {
 		)
 		$null = & $reporter -HtmlReportPath $outputPath
 		$html = Get-Content $outputPath -Raw
-		$html | Should -Match '<th>Instance recorded / items</th><th>Active stage recorded / items</th>'
-		$html | Should -Match "<td>0 / 1</td><td>$stageId`: 1 / 2</td><td>1</td>"
-		$html | Should -Match '<td>No active stage returned</td>'
+		$html | Should -Match '<th>Review progress recorded / items</th><th>Progress source</th>'
+		$html | Should -Match "<td>1 / 2</td><td>Active stage $stageId</td><td>1</td>"
+		$html | Should -Match '<td>Instance outcomes</td>'
 	}
 
 	It 'shows unavailable active-stage progress when its decisions cannot be read' {
 		$responses["$instanceRoot/$newId/stages"].value[0].status = 'InProgress'
 		$failures["$instanceRoot/$newId/stages/$stageId/decisions$decisionSelect"] = 'Stage decisions unavailable'
 		$null = & $reporter -HtmlReportPath $outputPath -WarningAction SilentlyContinue
-		(Get-Content $outputPath -Raw) | Should -Match "<td>$stageId`: unavailable</td>"
+		(Get-Content $outputPath -Raw) | Should -Match "<td>Unavailable / not materialized</td><td>Active stage $stageId</td>"
+		(Get-Content $outputPath -Raw) | Should -Match '<td>1 / 2</td><td>3</td><td>3</td><td>0 \(partial\)</td><td>Unavailable</td>'
+	}
+
+	It 'uses fully recorded RVDC stage results in inventory and totals without adding stale instance outcomes or completed stages' {
+		$definition.displayName = 'RVDC Fictional review'
+		$responses[$instanceRoot].value = @($responses[$instanceRoot].value[1])
+		$responses["$instanceRoot/$newId/decisions$decisionSelect"].value = @(1..55 | ForEach-Object { New-StatusDecision "i$_" 'NotReviewed' })
+		$responses["$instanceRoot/$newId/stages"].value[0].status = 'InProgress'
+		$responses["$instanceRoot/$newId/stages/$stageId/decisions$decisionSelect"].value = @(1..55 | ForEach-Object { New-StatusDecision "s$_" 'Approve' })
+		$earlier = 'eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee'
+		$responses["$instanceRoot/$newId/stages"].value += @{ id = $earlier; status = 'Completed' }
+		$responses["$instanceRoot/$newId/stages/$earlier/decisions$decisionSelect"] = @{ value = @((New-StatusDecision 'earlier' 'Approve')) }
+		$report = & $reporter -Prefixes RVDC -HtmlReportPath $outputPath
+		$report.Definitions[0].Instances[0].Summary.Recorded | Should -Be 0
+		$html = Get-Content $outputPath -Raw
+		$html | Should -Match "<td>55 / 55</td><td>Active stage $stageId</td>"
+		$html | Should -Match '<strong>55</strong><span>Available review progress items'
+		$html | Should -Match '<strong>55</strong><span>Recorded outcomes'
+		$html | Should -Match 'data-show-chart="RVDC"[^>]*>RVDC</button></td><td>1</td><td>1</td><td>1 / 1</td><td>55</td><td>55</td><td>0</td><td>0</td>'
+		$pages = @([regex]::Match($html, '(?s)<script type="application/json" id="status-details">(.*?)</script>').Groups[1].Value | ConvertFrom-Json)
+		$pages[0] | Should -Match '<h4>Instance-level outcomes</h4>.*?<strong>0 / 55</strong>'
+	}
+
+	It 'keeps completed-instance outcomes even if an old stage still reports InProgress' {
+		$responses[$instanceRoot].value[1].status = 'Completed'
+		$responses["$instanceRoot/$newId/stages"].value[0].status = 'InProgress'
+		$null = & $reporter -HtmlReportPath $outputPath
+		(Get-Content $outputPath -Raw) | Should -Match '<td>1 / 4</td><td>Instance outcomes</td>'
+	}
+
+	It 'does not combine multiple active stages into misleading instance progress' {
+		$responses["$instanceRoot/$newId/stages"].value[0].status = 'InProgress'
+		$secondStage = 'eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee'
+		$responses["$instanceRoot/$newId/stages"].value += @{ id = $secondStage; status = 'InProgress' }
+		$responses["$instanceRoot/$newId/stages/$secondStage/decisions$decisionSelect"] = @{ value = @((New-StatusDecision 's2' 'Approve')) }
+		$null = & $reporter -HtmlReportPath $outputPath
+		$html = Get-Content $outputPath -Raw
+		$html | Should -Match '<td>Unavailable / not materialized</td><td>Active-stage progress unavailable</td>'
+		$html | Should -Match '<strong>3</strong><span>Available review progress items'
 	}
 
 	It 'shows unavailable rather than a zero when both decision sources fail' {
@@ -412,7 +451,7 @@ Describe 'Read-only historical access review status' {
 		$html = Get-Content $outputPath -Raw
 		$html | Should -Match 'Partial data / collection issues'
 		$html | Should -Match 'Decision-count coverage: 1 of 2'
-		$html | Should -Match '<strong>3</strong><span>Available instance decision items'
+		$html | Should -Match '<strong>3</strong><span>Available review progress items'
 		$html | Should -Match '<td>1 / 2</td><td>3</td><td>3</td><td>0 \(partial\)</td><td>No active stages returned</td>'
 	}
 

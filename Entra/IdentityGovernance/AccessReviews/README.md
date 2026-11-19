@@ -218,13 +218,16 @@ The dashboard pie chart counts each matched review definition once by current
 status, not once per historical instance or stage. It opens on **All prefixes**.
 Choose a prefix from **Chart prefix** or click a prefix in **Summary by prefix**
 to update the slices and legend offline. The inventory filters are independent.
-The first matching prefix wins for overlapping prefixes. The prefix summary
-shows `Not reviewed` separately for instance outcomes and in-progress stage
-tasks. Stage counts are not added to instance totals, and incomplete reads are
-marked partial or unavailable.
-The inventory shows instance outcomes and each active stage's recorded
-decisions separately; instance outcomes might not yet reflect active-stage
-decisions. Expand a review for the individual stage breakdown.
+The first matching prefix wins for overlapping prefixes. Headline metrics,
+prefix summaries and inventory progress use the one in-progress runtime stage
+for a running instance when returned, otherwise instance outcomes. This avoids
+showing stale instance-level zeros while reviewers have already responded.
+Each instance contributes only one decision set; stages are never added together.
+If the active stage cannot be read, progress is unavailable rather than falling
+back to stale instance outcomes. The inventory labels the progress source.
+Completing a stage does not mean the overall review is completed. Raw instance
+outcomes and every stage remain in the expanded details; active-stage pending
+tasks are also shown as a separate prefix breakdown.
 **Current owners/managers are not proof of historical reviewer assignments;
 departments are current values.** Department and manager lookups require
 `User.Read.All`. Missing data appears as
