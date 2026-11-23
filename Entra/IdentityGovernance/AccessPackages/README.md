@@ -83,6 +83,64 @@ time and verify delivery in Entra before retrying uncertain requests.
 Install `ImportExcel` once in the PowerShell environment you use to run the
 script. Excel itself is not required.
 
+### Draft packages from application discovery
+
+The discovery workflow keeps access-review and package creation separate.
+Run these commands from the `IdentityGovernance` directory after connecting:
+
+```powershell
+Connect-MgGraph -Scopes 'AccessReview.ReadWrite.All','Application.Read.All','Group.Read.All','User.Read.All','EntitlementManagement.ReadWrite.All','RoleManagement.Read.Directory'
+
+.\AccessReviews\Create-AccessReview.ps1 -ServicePrincipalId '<enterprise application object ID>' `
+    -ReviewerType ResourceOwner -WhatIf `
+    -HtmlReportPath '.\preview.html' -DiscoveryOutputPath '.\discovery.json'
+
+.\AccessPackages\Export-DiscoveryAccessPackages.ps1 -DiscoveryPath '.\discovery.json' `
+    -WorkbookPath '.\packages.xlsx'
+
+# Edit the workbook, then preview and review every result before removing WhatIf.
+.\AccessPackages\Create-AccessPackage.ps1 -InputPath '.\packages.xlsx' `
+    -CatalogName 'Business applications' -FallbackApproverIds '<fallback user object ID>' -WhatIf
+```
+
+The first command produces the normal access-review creation preview and a
+structured discovery file; it does not create access reviews. Both files and the
+workbook require new filenames. Store them in a private directory: they contain
+application and group information. Discovery records direct-user counts but not
+user membership lists.
+
+Each directly assigned root proposes one package with the root and every nested
+descendant as Member resources. Assigning the package adds users to **all** of
+these groups and may grant access to other applications. Nested membership does
+not prove effective access to the originating application. Keep the generated
+warning in each description. Check the `Topology` and `Manual review` worksheets,
+correct suggested names that violate naming rules, and complete approvers and
+business details. Unknown values are left blank. Blocked rows are not imported;
+resolve them externally and regenerate the workbook. The discovery ID columns
+and `Discovery metadata` sheet must be retained.
+
+The export and creation recheck enumerate packages across catalogs and compare
+their complete resource roles and scopes. A confirmed active exact match is
+skipped; partial matches, shared proposed groups, and uncertain activity require
+manual review. Policies without enough information to determine activity are
+not assumed inactive. Incomplete or forbidden Graph reads fail closed.
+To verify tenant-wide visibility, this workflow currently requires a delegated
+connection with a **directly assigned active directory-wide** Identity Governance
+Administrator or Global Administrator role; catalog-scoped, group-assigned and
+app-only roles are not sufficient for this check. Reading directory role
+assignments also requires `RoleManagement.Read.Directory` (or a supported higher
+permission) and a role allowed to read role assignments. Scopes alone do not
+establish role permissions; hidden membership also needs `Member.Read.Hidden`.
+If visibility cannot be verified, candidates stay in `Manual review`.
+
+On each package run the script refreshes discovery once, compares each row with
+the current root and descendants, and rechecks package coverage before creating
+that row. It does not backfill a skipped existing package in this workflow.
+Default backfill still applies to newly created packages, and only direct members
+of **every** included group qualify. The checks cannot prevent simultaneous
+creation by another administrator; avoid concurrent runs. Large tenants may
+take significant time because coverage is refreshed for each candidate.
+
 ```powershell
 Install-Module ImportExcel -Scope CurrentUser
 .\Create-AccessPackage.ps1 -InputPath '.\access-packages.xlsx' `

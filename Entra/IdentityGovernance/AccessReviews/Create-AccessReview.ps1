@@ -27,6 +27,9 @@ With WhatIf, only this explicitly requested file is written. Never overwrites fi
 .PARAMETER DisableReminders
 Disable automatic reminder emails for newly created reviews. Initial notification
 emails remain enabled. Existing reviews are never modified.
+.PARAMETER DiscoveryOutputPath
+Optional new JSON file containing complete application group discovery. Only
+available for an application WhatIf run; it contains no user membership lists.
 .EXAMPLE
 .\Create-AccessReview.ps1 -GroupId '<group Object ID>' -ReviewerType ResourceOwner -WhatIf
 .EXAMPLE
@@ -48,6 +51,9 @@ param(
 	[string]$CsvPath,
 	[ValidateNotNullOrEmpty()]
 	[string]$HtmlReportPath,
+	[Parameter(ParameterSetName = 'Application')]
+	[ValidateNotNullOrEmpty()]
+	[string]$DiscoveryOutputPath,
 	[Parameter(Mandatory, ParameterSetName = 'Application')]
 	[guid]$ServicePrincipalId,
 	[Alias('ReviewType')]
@@ -85,6 +91,19 @@ $AdditionalNotificationRecipients = @(
 $DecisionsThatMoveToNextStage = @('Approve', 'NotReviewed')
 
 $ErrorActionPreference = 'Stop'
+if ($DiscoveryOutputPath -and -not $WhatIfPreference) {
+	throw 'DiscoveryOutputPath is only supported with -WhatIf; no reviews or logs may be created by a discovery export.'
+}
+if ($DiscoveryOutputPath) {
+	$DiscoveryOutputPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($DiscoveryOutputPath)
+	if ([IO.Path]::GetExtension($DiscoveryOutputPath) -ne '.json') { throw 'DiscoveryOutputPath must end in .json.' }
+	if ([IO.File]::Exists($DiscoveryOutputPath) -or [IO.Directory]::Exists($DiscoveryOutputPath)) {
+		throw "Discovery output already exists: '$DiscoveryOutputPath'. Choose a new filename."
+	}
+	if (-not [IO.Directory]::Exists([IO.Path]::GetDirectoryName($DiscoveryOutputPath))) {
+		throw "Discovery output directory does not exist: '$([IO.Path]::GetDirectoryName($DiscoveryOutputPath))'."
+	}
+}
 function ConvertFrom-CsvUserIds {
 	param([string]$Value, [string]$Column)
 
@@ -1406,6 +1425,30 @@ finally {
 				}
 				else { throw $message }
 			}
+		}
+		if ($DiscoveryOutputPath -and $reportRun.Completed -and -not $reportRun.Failure) {
+			$discoveryDocument = [ordered]@{
+				SchemaVersion = 1
+				ServicePrincipalId = "$ServicePrincipalId"
+				Applications = @($reportRun.Applications)
+				Groups = @($discovery.Order | ForEach-Object {
+					$snapshot = $discovery.Snapshots[$_]
+					[ordered]@{
+						Id = "$_"
+						DisplayName = "$($snapshot.Group.DisplayName)"
+						ChildIds = @($snapshot.ChildIds)
+						DirectUserCount = $snapshot.DirectUserCount
+					}
+				})
+			}
+			$json = $discoveryDocument | ConvertTo-Json -Depth 20
+			$stream = [IO.File]::Open($DiscoveryOutputPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+			try {
+				$writer = [IO.StreamWriter]::new($stream, [Text.UTF8Encoding]::new($false))
+				try { $writer.Write($json) } finally { $writer.Dispose() }
+			}
+			finally { $stream.Dispose() }
+			Write-Host "Discovery output: $DiscoveryOutputPath"
 		}
 	}
 	finally {

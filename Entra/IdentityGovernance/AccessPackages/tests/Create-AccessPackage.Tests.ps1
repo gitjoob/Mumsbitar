@@ -5,6 +5,7 @@ BeforeAll {
 	$script:noBackfillScriptPath = Join-Path $TestDrive 'Create-AccessPackage.NoBackfill.ps1'
 	(Get-Content -LiteralPath $script:scriptPath -Raw).Replace('$CreateAssignments = $true', '$CreateAssignments = $false') |
 		Set-Content -LiteralPath $script:noBackfillScriptPath
+	Copy-Item (Join-Path $PSScriptRoot '../AccessPackage.Group.ps1') $TestDrive
 	$script:groupId = '11111111-1111-1111-1111-111111111111'
 	$script:ownerId = '22222222-2222-2222-2222-222222222222'
 	$script:fallbackId = '33333333-3333-3333-3333-333333333333'
@@ -36,6 +37,41 @@ BeforeAll {
 		$path = Join-Path $TestDrive "package [template] $([guid]::NewGuid()).xlsx"
 		[pscustomobject]$columns | Export-Excel -Path $path -WorksheetName 'Packages'
 		$path
+	}
+
+	function New-DiscoveryWorkbookFixture {
+		$base = Join-Path $TestDrive "discovery-$([guid]::NewGuid())"
+		$packages = Join-Path $base 'AccessPackages'
+		$reviews = Join-Path $base 'AccessReviews'
+		$null = New-Item -ItemType Directory -Path $packages, $reviews
+		foreach ($file in 'Create-AccessPackage.ps1', 'AccessPackage.Group.ps1', 'AccessPackage.Coverage.ps1', 'AccessPackage.Discovery.ps1') {
+			Copy-Item (Join-Path $PSScriptRoot "../$file") $packages
+		}
+		$app = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
+		$data = @{
+			SchemaVersion = 1; ServicePrincipalId = $app
+			Applications = @(@{ ServicePrincipalId = $app; GroupIds = @($script:groupId) })
+			Groups = @(@{ Id = $script:groupId; ChildIds = @() })
+		}
+		$data | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $reviews 'snapshot.json')
+		@'
+[CmdletBinding(SupportsShouldProcess)]
+param([guid]$ServicePrincipalId, [string]$ReviewerType, [string]$DiscoveryOutputPath)
+if (-not $WhatIfPreference) { throw 'Discovery requires WhatIf.' }
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'snapshot.json') -Destination $DiscoveryOutputPath -WhatIf:$false
+'@ | Set-Content -LiteralPath (Join-Path $reviews 'Create-AccessReview.ps1')
+		$script:csvPath = New-WorkbookFixture @{
+			GroupId = $script:groupId; 'Discovery ServicePrincipalId' = $app; 'Discovery RootGroupId' = $script:groupId
+			Description = 'Assigning this package adds the user to every listed group and may grant access through other groups or applications. Nested membership does not establish effective application access.'
+		}
+		$excel = [OfficeOpenXml.ExcelPackage]::new([IO.FileInfo]::new($script:csvPath))
+		$metadata = $excel.Workbook.Worksheets.Add('Discovery metadata')
+		$metadata.Cells[1, 1].Value = 'Discovery workbook version'
+		$metadata.Cells[1, 2].Value = '1'
+		$metadata.Cells[2, 1].Value = 'Service principal ID'
+		$metadata.Cells[2, 2].Value = $app
+		Close-ExcelPackage -ExcelPackage $excel
+		Join-Path $packages 'Create-AccessPackage.ps1'
 	}
 }
 
@@ -86,6 +122,7 @@ Finance reporting - Read reports,View financial reports.,$script:groupId,$script
 			FailureFormat = 'ErrorDetails'
 			FailureStatus = 400
 			FailRollback = $false
+			CoverageMode = 'none'
 			Writes = [System.Collections.Generic.List[object]]::new()
 			Deleted = [System.Collections.Generic.List[string]]::new()
 		}
@@ -135,6 +172,27 @@ Finance reporting - Read reports,View financial reports.,$script:groupId,$script
 				throw $record
 			}
 			if ($Method -eq 'GET') {
+				if ($uriText -like '/v1.0/me?*') { return @{ id = '44444444-4444-4444-4444-444444444444' } }
+				if ($uriText -like '*/roleManagement/directory/roleAssignments?*') {
+					return @{ value = @(@{ directoryScopeId = '/'; roleDefinitionId = '45d8d3c5-c802-45c6-b32a-1d70b5e1e86e' }) }
+				}
+				if ($uriText -eq '/v1.0/identityGovernance/entitlementManagement/accessPackages') {
+					if ($fixture.CoverageMode -eq 'forbidden') { throw 'Coverage denied' }
+					$items = @()
+					if ($fixture.CoverageMode -eq 'exact') { $items = @(@{ id = '99999999-9999-9999-9999-999999999999'; displayName = 'Existing' }) }
+					return @{ value = $items }
+				}
+				if ($uriText -like '*/accessPackages/99999999-9999-9999-9999-999999999999?*') {
+					return @{ resourceRoleScopes = @(@{
+						role = @{ originSystem = 'AadGroup'; originId = "Member_$fixtureGroupId" }
+						scope = @{ originSystem = 'AadGroup'; originId = $fixtureGroupId; isRootScope = $true }
+					}) }
+				}
+				if ($decodedUri -like "*/assignmentPolicies?*accessPackage/id eq '99999999-9999-9999-9999-999999999999'*") {
+					return @{ value = @(@{ allowedTargetScope = 'allMemberUsers'; expiration = @{ type = 'afterDuration'; duration = 'P365D' }; requestorSettings = @{ enableTargetsToSelfAddAccess = $true } }) }
+				}
+				if ($decodedUri -like "*/assignments?*accessPackage/id eq '99999999-9999-9999-9999-999999999999'*" -or
+					$decodedUri -like "*/assignmentRequests?*accessPackage/id eq '99999999-9999-9999-9999-999999999999'*") { return @{ value = @() } }
 				if ($uriText -match '/users/([^?]+)') {
 					$id = $Matches[1]
 					if ($id -eq $fixture.DeniedUserId) { throw 'User not found or forbidden.' }
@@ -321,6 +379,63 @@ Finance reporting - Read reports,View financial reports.,$script:groupId,$script
 	}
 
 	Context 'Excel workbook' -Skip:(-not (Get-Module -ListAvailable -Name ImportExcel)) {
+		It 'rechecks discovery and previews a safe discovery workbook without Graph writes' {
+			$path = New-DiscoveryWorkbookFixture
+			$result = & $path -InputPath $script:csvPath -CatalogName $script:graphFixture.CatalogName `
+				-FallbackApproverIds $script:fallbackId -WhatIf -WarningAction SilentlyContinue
+			$result.Status | Should -Be 'Would be created'
+			$script:graphFixture.Writes | Should -HaveCount 0
+		}
+
+		It 'creates a safe discovery workbook candidate after the final coverage check' {
+			$path = New-DiscoveryWorkbookFixture
+			$result = & $path -InputPath $script:csvPath -CatalogName $script:graphFixture.CatalogName `
+				-FallbackApproverIds $script:fallbackId -Confirm:$false -WarningAction SilentlyContinue
+			$result.Status | Should -Be 'Created'
+			@($script:graphFixture.Writes | Where-Object Uri -like '*/accessPackages') | Should -HaveCount 1
+		}
+
+		It 'does not create or backfill an exact active package or an unreadable inventory' -TestCases @(
+			@{ Coverage = 'exact'; Expected = 'Skipped' }
+			@{ Coverage = 'forbidden'; Expected = 'Manual review' }
+		) {
+			param($Coverage, $Expected)
+			$path = New-DiscoveryWorkbookFixture
+			$script:graphFixture.CoverageMode = $Coverage
+			$result = & $path -InputPath $script:csvPath -CatalogName $script:graphFixture.CatalogName `
+				-FallbackApproverIds $script:fallbackId -Confirm:$false -WarningAction SilentlyContinue
+			$result.Status | Should -Be $Expected
+			$script:graphFixture.Writes | Should -HaveCount 0
+		}
+
+		It 'blocks edited groups when refreshed discovery has changed' {
+			$path = New-DiscoveryWorkbookFixture
+			$reviews = Join-Path (Split-Path (Split-Path $path -Parent) -Parent) 'AccessReviews'
+			$data = Get-Content -LiteralPath (Join-Path $reviews 'snapshot.json') -Raw | ConvertFrom-Json
+			$data.Groups[0].ChildIds = @('55555555-5555-5555-5555-555555555555')
+			$data.Groups += [pscustomobject]@{ Id = '55555555-5555-5555-5555-555555555555'; ChildIds = @() }
+			$data | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $reviews 'snapshot.json')
+			$result = & $path -InputPath $script:csvPath -CatalogName $script:graphFixture.CatalogName `
+				-FallbackApproverIds $script:fallbackId -Confirm:$false -WarningAction SilentlyContinue
+			$result.Status | Should -Be 'Manual review'
+			$result.Reason | Should -Match 'do not match'
+			$script:graphFixture.Writes | Should -HaveCount 0
+		}
+
+		It 'does not create a discovery package when its risk warning is removed' {
+			$path = New-DiscoveryWorkbookFixture
+			$excel = [OfficeOpenXml.ExcelPackage]::new([IO.FileInfo]::new($script:csvPath))
+			$sheet = $excel.Workbook.Worksheets['Packages']
+			$column = 1..$sheet.Dimension.End.Column | Where-Object { $sheet.Cells[1, $_].Value -eq 'Description' }
+			$sheet.Cells[2, $column].Value = 'Replaced description'
+			Close-ExcelPackage -ExcelPackage $excel
+			$result = & $path -InputPath $script:csvPath -CatalogName $script:graphFixture.CatalogName `
+				-FallbackApproverIds $script:fallbackId -Confirm:$false -WarningAction SilentlyContinue
+			$result.Status | Should -Be 'Failed'
+			$result.Reason | Should -Match 'retain the generated warning'
+			$script:graphFixture.Writes | Should -HaveCount 0
+		}
+
 		BeforeAll { Import-Module ImportExcel -WarningAction SilentlyContinue }
 
 		It 'backfills a user in both groups once and does not grant extra group access' {

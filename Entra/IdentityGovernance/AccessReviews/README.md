@@ -32,6 +32,12 @@ Replace the example IDs. For applications, use the **enterprise application's
 Object ID**, not its client ID or app registration ID.
 Remove `-WhatIf` only after checking the results.
 
+For the separate discovery-to-access-package workflow, an application WhatIf
+run can also write a new `-DiscoveryOutputPath` JSON file alongside its
+`-HtmlReportPath`. The JSON contains discovered group relationships and direct
+user counts, not user membership lists. See the [access-package workflow](../AccessPackages/README.md#draft-packages-from-application-discovery)
+for permissions, workbook preparation and duplicate safeguards.
+
 ## Reviewers and stages
 
 Stages use each group's **direct-user count**, or the application's directly

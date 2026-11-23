@@ -136,6 +136,35 @@ Describe 'Unified access review creation and local logging' {
 		}.GetNewClosure())
 	}
 
+	It 'exports complete application discovery without creating reviews or exposing user lists' {
+		Set-NestedGroupFixture
+		$script:fixture.Children['44444444-4444-4444-4444-444444444444'] = @($script:groupId)
+		$script:fixture.ExistingReviews = @(New-ExistingResourceReview)
+		$path = Join-Path $script:testScriptRoot 'discovery.json'
+		$applicationId = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
+		$null = @(& $script:testScript -ServicePrincipalId $applicationId -ReviewerType ResourceOwner `
+			-DiscoveryOutputPath $path -WhatIf -WarningAction SilentlyContinue)
+		$data = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+		$data.ServicePrincipalId | Should -Be $applicationId
+		$data.Applications[0].GroupIds | Should -Contain $script:groupId
+		$data.Groups | Should -HaveCount 2
+		@($data.Groups | Where-Object Id -eq $script:groupId)[0].ChildIds | Should -Contain '44444444-4444-4444-4444-444444444444'
+		@($data.Groups | Where-Object Id -eq '44444444-4444-4444-4444-444444444444')[0].ChildIds | Should -Contain $script:groupId
+		(Get-Content -LiteralPath $path -Raw) | Should -Not -Match '00000000-0000-0000-0001-'
+		$script:fixture.Bodies | Should -HaveCount 0
+	}
+
+	It 'rejects discovery export in a live run or to an existing file' {
+		$path = Join-Path $script:testScriptRoot 'discovery.json'
+		$applicationId = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
+		{ & $script:testScript -ServicePrincipalId $applicationId -ReviewerType ResourceOwner -DiscoveryOutputPath $path } |
+			Should -Throw '*only supported with -WhatIf*'
+		Set-Content -LiteralPath $path -Value 'preserve'
+		{ & $script:testScript -ServicePrincipalId $applicationId -ReviewerType ResourceOwner -DiscoveryOutputPath $path -WhatIf } |
+			Should -Throw '*already exists*'
+		Get-Content -LiteralPath $path | Should -Be 'preserve'
+	}
+
 	It 'exports an explicitly requested HTML report without adding pipeline items (preview: <Preview>, inherited: <Inherited>)' -TestCases @(
 		@{ Preview = $false; Inherited = $false }, @{ Preview = $true; Inherited = $false }, @{ Preview = $true; Inherited = $true }
 	) {

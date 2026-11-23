@@ -78,6 +78,7 @@ if (-not (Test-Path -LiteralPath $InputPath -PathType Leaf)) {
 }
 $extension = [IO.Path]::GetExtension($InputPath)
 $isWorkbook = $extension -eq '.xlsx'
+$isDiscoveryWorkbook = $false
 if ($isWorkbook) {
 	if (-not (Get-Module -ListAvailable -Name ImportExcel)) {
 		throw 'Reading XLSX requires the ImportExcel module. Install it with: Install-Module ImportExcel -Scope CurrentUser'
@@ -95,6 +96,27 @@ if ($isWorkbook) {
 		@($_.PSObject.Properties | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.Value) }).Count
 	})
 	if (-not $rows.Count) { throw 'The first worksheet contains no access packages.' }
+	$sheetNames = @(ImportExcel\Get-ExcelSheetInfo -Path ([WildcardPattern]::Escape($workbookPath)) | ForEach-Object { $_.Name })
+	$hasDiscoveryColumns = $rows[0].PSObject.Properties['Discovery ServicePrincipalId'] -or $rows[0].PSObject.Properties['Discovery RootGroupId']
+	$isDiscoveryWorkbook = $sheetNames -contains 'Discovery metadata'
+	if ($isDiscoveryWorkbook -or $hasDiscoveryColumns) {
+		if (-not $isDiscoveryWorkbook -or -not $rows[0].PSObject.Properties['Discovery ServicePrincipalId'] -or
+			-not $rows[0].PSObject.Properties['Discovery RootGroupId'] -or -not $rows[0].PSObject.Properties['GroupId']) {
+			throw 'Discovery workbook metadata and both discovery ID columns are required. Regenerate the workbook.'
+		}
+		$metadataStream = [IO.File]::Open($workbookPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+		$package = [OfficeOpenXml.ExcelPackage]::new($metadataStream)
+		try {
+			$metadata = $package.Workbook.Worksheets['Discovery metadata']
+			if ($metadata.Cells[1, 1].Value -ne 'Discovery workbook version' -or "$($metadata.Cells[1, 2].Value)" -ne '1' -or
+				$metadata.Cells[2, 1].Value -ne 'Service principal ID') { throw 'Discovery workbook metadata is invalid.' }
+			$discoveryApplicationId = [guid]::Empty
+			if (-not [guid]::TryParse([string]$metadata.Cells[2, 2].Value, [ref]$discoveryApplicationId) -or $discoveryApplicationId -eq [guid]::Empty) {
+				throw 'Discovery workbook metadata contains an invalid service principal ID.'
+			}
+		}
+		finally { $package.Dispose(); $metadataStream.Dispose() }
+	}
 	$groupColumn = if ($rows[0].PSObject.Properties['GroupId']) { 'GroupId' } else { 'Access Group' }
 	foreach ($column in @('Access Package Name', $groupColumn, 'Approver 1 List')) {
 		if (-not $rows[0].PSObject.Properties[$column]) {
@@ -120,6 +142,11 @@ else { throw "Unsupported input file extension '$extension'. Use .csv or .xlsx."
 
 Import-Module Microsoft.Graph.Authentication
 Import-Module Microsoft.Graph.Groups
+. (Join-Path $PSScriptRoot 'AccessPackage.Group.ps1')
+if ($isDiscoveryWorkbook) {
+	. (Join-Path $PSScriptRoot 'AccessPackage.Coverage.ps1')
+	. (Join-Path $PSScriptRoot 'AccessPackage.Discovery.ps1')
+}
 $context = Get-MgContext
 if (-not $context) {
 	throw 'Connect to Microsoft Graph first.'
@@ -370,25 +397,6 @@ function Get-WorkbookGroupIds {
 	"$id"
 }
 
-function Get-PackageGroup {
-	param([guid]$GroupId)
-
-	$group = Get-MgGroup -GroupId "$GroupId" -Property id, displayName, groupTypes, onPremisesSyncEnabled, mailEnabled, securityEnabled, isAssignableToRole -ErrorAction Stop
-	if ($group.id -ne "$GroupId") {
-		throw "Unable to validate group '$GroupId'."
-	}
-	if ($group.onPremisesSyncEnabled -eq $true -or $group.groupTypes -contains 'DynamicMembership') {
-		throw "Group '$($group.displayName)' has synchronized or dynamic membership; entitlement management cannot manage its members."
-	}
-	if ($group.groupTypes -notcontains 'Unified' -and ($group.mailEnabled -eq $true -or $group.securityEnabled -ne $true)) {
-		throw "Group '$($group.displayName)' must be a cloud-managed security group or Microsoft 365 group."
-	}
-	if ($group.isAssignableToRole -eq $true) {
-		throw "Group '$($group.displayName)' is role-assignable; this script does not provision privileged group access."
-	}
-	$group
-}
-
 function New-PackageApprovalStage {
 	param([object[]]$Approvers, [object[]]$Fallbacks = @())
 
@@ -555,6 +563,29 @@ function Invoke-PackageAssignmentBackfill {
 	}
 }
 
+$discoveryOverlaps = @{}
+if ($isDiscoveryWorkbook) {
+	$groupOwners = @{}
+	foreach ($row in $rows) {
+		$rowApplication = [guid]::Empty
+		$root = [guid]::Empty
+		if (-not [guid]::TryParse((Get-InputText $row 'Discovery ServicePrincipalId'), [ref]$rowApplication) -or
+			$rowApplication -ne $discoveryApplicationId -or
+			-not [guid]::TryParse((Get-InputText $row 'Discovery RootGroupId'), [ref]$root) -or $root -eq [guid]::Empty) {
+			throw 'Each discovery workbook row must retain its original application and root group IDs.'
+		}
+		foreach ($id in @(Get-WorkbookGroupIds -Text (Get-InputText $row 'GroupId') -Column 'GroupId' | Select-Object -Unique)) {
+			if ($groupOwners.ContainsKey($id)) { $discoveryOverlaps[$id] = $true }
+			else { $groupOwners[$id] = $true }
+		}
+	}
+	$reviewScript = Join-Path (Split-Path $PSScriptRoot -Parent) 'AccessReviews/Create-AccessReview.ps1'
+	try {
+		$currentDiscovery = Get-CurrentPackageDiscovery -ServicePrincipalId $discoveryApplicationId `
+			-ReviewScriptPath $reviewScript -TemporaryParent ([IO.Path]::GetDirectoryName($workbookPath))
+	}
+	catch { throw "Unable to refresh application group discovery; no packages were created. $($_.Exception.Message)" }
+}
 $fallbackApprovers = @(ConvertTo-UserApprovers -Ids $FallbackApproverIds)
 $catalogs = @(Get-GraphCollection -Uri "$baseUri/catalogs" -Filter "displayName eq '$($CatalogName.Replace("'", "''"))'")
 if ($catalogs.Count -gt 1) {
@@ -622,6 +653,9 @@ foreach ($row in $rows) {
 		if (-not $name -or -not $description) {
 			if ($isWorkbook) { throw 'Access Package Name and description text (Description or details) are required.' }
 			throw 'A name (Name, or both Application and Role) and description text (Description or details) are required.'
+		}
+		if ($isDiscoveryWorkbook -and -not $description.Contains((Get-DiscoveryPackageWarning))) {
+			throw 'Discovery package descriptions must retain the generated warning about all-group access and possible other application access.'
 		}
 		if ($name -match '(?i)(?<![a-z0-9])(?:access[\s_-]*package|ap|sg)(?![a-z0-9])') {
 			throw "Name '$name' must not contain 'Access Package', 'AP', or 'SG'."
@@ -730,7 +764,19 @@ foreach ($row in $rows) {
 			}) -join [Environment]::NewLine
 
 			$groupLabels = @($groupPlans | ForEach-Object { "$($_.Group.DisplayName) [$($_.Group.Id)]" }) -join '; '
-			if ($PSCmdlet.ShouldProcess(
+			if ($isDiscoveryWorkbook) {
+				$overlappingIds = @($result.GroupIds | Where-Object { $discoveryOverlaps.ContainsKey($_) })
+				if ($overlappingIds.Count) {
+					$result.Status = 'Manual review'
+					$result.Reason = "Groups are shared with another workbook row: $($overlappingIds -join ', ')."
+				}
+				else {
+					$coverage = Test-DiscoveryPackageCandidate -Discovery $currentDiscovery `
+						-RootGroupId ([guid](Get-InputText $row 'Discovery RootGroupId')) -GroupIds $result.GroupIds
+					if ($coverage.Status -ne 'Ready') { $result.Status = $coverage.Status; $result.Reason = $coverage.Reason }
+				}
+			}
+			if (-not $result.Status -and $PSCmdlet.ShouldProcess(
 				"$name (groups: $groupLabels; catalog '$CatalogName')",
 				"Create missing catalog/resource, access package and $($result.ApprovalStages)-stage policy"
 			)) {
@@ -807,7 +853,7 @@ foreach ($row in $rows) {
 				$result.PolicyId = $policy.id
 				$result.Status = 'Created'
 			}
-			else {
+			elseif (-not $result.Status) {
 				$result.Status = if ($WhatIfPreference) { 'Would be created' } else { 'Not created' }
 			}
 			if ($result.Status -in 'Created', 'Would be created') {
@@ -836,7 +882,7 @@ foreach ($row in $rows) {
 	}
 
 	if ($CreateAssignments -and $result.Name -and -not $backfillNames.ContainsKey($result.Name) -and (
-		$result.Status -in 'Created', 'Would be created' -or ($result.Status -eq 'Skipped' -and $result.AccessPackageId)
+		$result.Status -in 'Created', 'Would be created' -or (-not $isDiscoveryWorkbook -and $result.Status -eq 'Skipped' -and $result.AccessPackageId)
 	)) {
 		$backfillNames[$result.Name] = $true
 		try {
@@ -855,7 +901,7 @@ foreach ($row in $rows) {
 	$resultObject
 }
 
-$notCreated = @($results | Where-Object { $_.Status -in 'Skipped', 'Failed' })
+$notCreated = @($results | Where-Object { $_.Status -in 'Skipped', 'Failed', 'Manual review' })
 if ($notCreated.Count) {
 	Write-Host ($notCreated | Select-Object Name, Status, Reason | Format-Table -AutoSize -Wrap | Out-String -Width 200)
 }
@@ -864,4 +910,6 @@ $createdCount = @($results | Where-Object { $_.Status -eq $createdStatus }).Coun
 $skippedCount = @($results | Where-Object { $_.Status -eq 'Skipped' }).Count
 $failedCount = @($results | Where-Object { $_.Status -eq 'Failed' }).Count
 $declinedCount = @($results | Where-Object { $_.Status -eq 'Not created' }).Count
-Write-Host "$($results.Count) package(s): $createdCount $($createdStatus.ToLower()), $skippedCount skipped, $failedCount failed, $declinedCount not created."
+$manualCount = @($results | Where-Object { $_.Status -eq 'Manual review' }).Count
+$manualSummary = if ($isDiscoveryWorkbook) { ", $manualCount require manual review" } else { '' }
+Write-Host "$($results.Count) package(s): $createdCount $($createdStatus.ToLower()), $skippedCount skipped, $failedCount failed, $declinedCount not created$manualSummary."

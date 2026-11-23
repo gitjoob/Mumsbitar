@@ -40,7 +40,8 @@ This guidance applies to this tool and its tests, not the rest of the repository
 - Preserve ForceTwoStage, selected final owner, explicit one-time date-window
   division, recurring-series semantics and configured decision progression.
 - Keep tenant writes behind ShouldProcess. WhatIf writes neither reviews nor
-  logs; explicitly supplying HtmlReportPath permits only the requested report.
+  logs; explicitly supplying HtmlReportPath or DiscoveryOutputPath permits only
+  the requested local report or discovery export.
 - Creation/offline reports describe computed/submitted settings and recorded
   outcomes, not live progress/remediation. Never infer unavailable historical
   configuration or treat an unmarked old member count as a direct-user count.
