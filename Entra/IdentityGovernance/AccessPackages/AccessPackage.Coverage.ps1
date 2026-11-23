@@ -12,8 +12,18 @@ function Get-PackageCoverageCollection {
 
 function Assert-PackageCoverageVisibility {
 	$context = Get-MgContext
-	if (-not $context -or $context.AuthType -ne 'Delegated') {
-		throw 'Tenant-wide package visibility cannot be verified for this Graph connection. Use a delegated directory-wide administrator connection.'
+	if (-not $context) {
+		throw 'Tenant-wide package visibility cannot be verified without a Microsoft Graph connection.'
+	}
+	if ($context.AuthType -eq 'AppOnly') {
+		if ($context.Scopes -notcontains 'EntitlementManagement.Read.All' -and
+			$context.Scopes -notcontains 'EntitlementManagement.ReadWrite.All') {
+			throw 'Tenant-wide package visibility requires the EntitlementManagement.Read.All or EntitlementManagement.ReadWrite.All Microsoft Graph application permission in the current connection. Grant admin consent and reconnect.'
+		}
+		return
+	}
+	if ($context.AuthType -ne 'Delegated') {
+		throw "Tenant-wide package visibility cannot be verified for Graph authentication type '$($context.AuthType)'. Use an AppOnly or delegated connection."
 	}
 	$me = Invoke-MgGraphRequest -Method GET -Uri '/v1.0/me?$select=id' -OutputType Hashtable -ErrorAction Stop
 	$id = [guid]::Empty

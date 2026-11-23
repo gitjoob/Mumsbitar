@@ -132,12 +132,17 @@ manual review. Policies without enough information to determine activity are
 not assumed inactive. Incomplete or forbidden Graph reads fail closed.
 To verify tenant-wide visibility, this workflow currently requires a delegated
 connection with a **directly assigned active directory-wide** Identity Governance
-Administrator or Global Administrator role; catalog-scoped, group-assigned and
-app-only roles are not sufficient for this check. Reading directory role
-assignments also requires `RoleManagement.Read.Directory` (or a supported higher
-permission) and a role allowed to read role assignments. Scopes alone do not
-establish role permissions; hidden membership also needs `Member.Read.Hidden`.
-If visibility cannot be verified, candidates stay in `Manual review`.
+Administrator or Global Administrator role, or an app-only connection whose
+Microsoft Graph application permissions include `EntitlementManagement.Read.All`
+or `EntitlementManagement.ReadWrite.All`. Application permissions require admin
+consent. After granting a permission, reconnect so the current connection
+includes it. Catalog-scoped roles alone cannot establish tenant-wide visibility.
+The delegated role check also requires `RoleManagement.Read.Directory` (or a
+supported higher permission) and a role allowed to read role assignments. Hidden
+membership also needs `Member.Read.Hidden`. If visibility or any required Graph
+read cannot be verified, candidates stay in `Manual review`. App-only package
+creation still requires the separate write, group, user and access-review
+permissions needed by the creation and discovery steps.
 
 On each package run the script refreshes discovery once, compares each row with
 the current root and descendants, and rechecks package coverage before creating

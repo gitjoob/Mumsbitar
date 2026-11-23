@@ -87,13 +87,21 @@ Describe 'Discovery workbook export' {
 		@(Import-Excel -Path $script:output -WorksheetName 'Manual review') | Should -HaveCount 2
 	}
 
-	It 'puts all candidates in manual review when tenant-wide visibility cannot be established' {
-		Mock Get-MgContext { @{ AuthType = 'AppOnly' } }
+	It 'supports an app-only connection with tenant-wide entitlement-management permission' {
+		Mock Get-MgContext { @{ AuthType = 'AppOnly'; Scopes = @('EntitlementManagement.Read.All') } }
+		$script:fixture | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $script:input
+		& $script:exportPath -DiscoveryPath $script:input -WorkbookPath $script:output
+		@(Import-Excel -Path $script:output -WorksheetName Packages) | Should -HaveCount 1
+		@(Import-Excel -Path $script:output -WorksheetName 'Manual review') | Should -HaveCount 0
+	}
+
+	It 'puts all candidates in manual review when app-only tenant-wide visibility cannot be established' {
+		Mock Get-MgContext { @{ AuthType = 'AppOnly'; Scopes = @('Group.Read.All') } }
 		$script:fixture | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $script:input
 		& $script:exportPath -DiscoveryPath $script:input -WorkbookPath $script:output
 		@(Import-Excel -Path $script:output -WorksheetName Packages) | Should -HaveCount 0
 		$blocked = @(Import-Excel -Path $script:output -WorksheetName 'Manual review')
 		$blocked | Should -HaveCount 1
-		$blocked[0].Reason | Should -Match 'visibility cannot be verified'
+		$blocked[0].Reason | Should -Match 'EntitlementManagement.Read.All'
 	}
 }

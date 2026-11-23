@@ -76,6 +76,35 @@ Describe 'Discovery package coverage' {
 		{ Get-PackageCoverageInventory } | Should -Throw '*incomplete resource role or scope*'
 	}
 
+	It 'uses app-only tenant-wide application permission <Permission> to check package coverage' -TestCases @(
+		@{ Permission = 'EntitlementManagement.Read.All' }
+		@{ Permission = 'EntitlementManagement.ReadWrite.All' }
+	) {
+		param($Permission)
+		Mock Get-MgContext { @{ AuthType = 'AppOnly'; Scopes = @($Permission) } }
+		$script:fixture.Scopes = @(
+			@{ role = @{ originSystem = 'AadGroup'; originId = "Member_$script:groupA" }; scope = @{ originSystem = 'AadGroup'; originId = $script:groupA; isRootScope = $true } }
+		)
+		$script:fixture.Policies = @(@{ allowedTargetScope = 'allMemberUsers'; expiration = @{ type = 'afterDuration'; duration = 'P365D' }; requestorSettings = @{ enableTargetsToSelfAddAccess = $true } })
+		$inventory = @(Get-PackageCoverageInventory)
+		$inventory | Should -HaveCount 1
+		$inventory[0].Id | Should -Be $script:packageId
+		(Get-PackageCoverageResult -GroupIds @($script:groupA) -Inventory $inventory).Status | Should -Be 'Skipped'
+		Should -Invoke Invoke-MgGraphRequest -Times 0 -Exactly -ParameterFilter { $Uri -like '/v1.0/me?*' -or $Uri -like '*/roleAssignments?*' }
+	}
+
+	It 'rejects app-only connections without a tenant-wide application permission' {
+		Mock Get-MgContext { @{ AuthType = 'AppOnly'; Scopes = @('Group.Read.All') } }
+		{ Get-PackageCoverageInventory } | Should -Throw '*EntitlementManagement.Read.All*application permission*'
+		Should -Invoke Invoke-MgGraphRequest -Times 0 -Exactly
+	}
+
+	It 'does not assume app-only visibility if Graph rejects package enumeration' {
+		Mock Get-MgContext { @{ AuthType = 'AppOnly'; Scopes = @('EntitlementManagement.Read.All') } }
+		Mock Invoke-MgGraphRequest { throw 'Forbidden' }
+		{ Get-PackageCoverageInventory } | Should -Throw '*Forbidden*'
+	}
+
 	It 'detects overlapping roles even when the scope refers to a different group' {
 		$script:fixture.Scopes = @(
 			@{ role = @{ originSystem = 'AadGroup'; originId = "Member_$script:groupA" }; scope = @{ originSystem = 'AadGroup'; originId = $script:groupB; isRootScope = $true } }
