@@ -34,8 +34,11 @@ Remove `-WhatIf` only after checking the results.
 
 For the separate discovery-to-access-package workflow, an application WhatIf
 run can also write a new `-DiscoveryOutputPath` JSON file alongside its
-`-HtmlReportPath`. The JSON contains discovered group relationships and direct
-user counts, not user membership lists. See the [access-package workflow](../AccessPackages/README.md#draft-packages-from-application-discovery)
+`-HtmlReportPath`. A CSV WhatIf run can do the same when it contains at least
+one `ServicePrincipalId` row; the resulting discovery includes those
+applications in one export. Both formats contain discovered group relationships
+and direct user counts, not user membership lists. See the
+[access-package workflow](../AccessPackages/README.md#draft-packages-from-application-discovery)
 for permissions, workbook preparation and duplicate safeguards.
 
 ## Reviewers and stages

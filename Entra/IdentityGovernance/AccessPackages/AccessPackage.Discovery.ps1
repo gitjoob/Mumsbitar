@@ -4,10 +4,14 @@ function Get-DiscoveryPackageWarning {
 
 function Get-PackageDiscoveryCandidates {
 	param([Parameter(Mandatory)][object]$Data)
-	if ($Data.SchemaVersion -ne 1 -or @($Data.Applications).Count -ne 1) { throw 'Expected a version 1 single-application discovery export.' }
-	$appId = [guid]::Empty
-	if (-not [guid]::TryParse([string]$Data.ServicePrincipalId, [ref]$appId) -or $appId -eq [guid]::Empty -or
-		"$appId" -ne "$($Data.Applications[0].ServicePrincipalId)") { throw 'Discovery export has an invalid or inconsistent service principal ID.' }
+	$applications = @($Data.Applications)
+	if ($Data.SchemaVersion -eq 1) {
+		if ($applications.Count -ne 1) { throw 'Expected a version 1 single-application discovery export.' }
+	}
+	elseif ($Data.SchemaVersion -eq 2) {
+		if ($applications.Count -lt 1) { throw 'Discovery export contains no applications.' }
+	}
+	else { throw "Unsupported discovery export version '$($Data.SchemaVersion)'." }
 	$groups = @{}
 	foreach ($group in $Data.Groups) {
 		$id = [guid]::Empty
@@ -17,41 +21,60 @@ function Get-PackageDiscoveryCandidates {
 		$groups["$id"] = $group
 	}
 	$candidates = [System.Collections.Generic.List[object]]::new()
-	$roots = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
-	foreach ($rootValue in $Data.Applications[0].GroupIds) {
-		$root = [guid]::Empty
-		if (-not [guid]::TryParse([string]$rootValue, [ref]$root) -or $root -eq [guid]::Empty -or
-			-not $roots.Add("$root") -or -not $groups.ContainsKey("$root")) { throw "Discovery export contains an invalid root group '$rootValue'." }
-		$seen = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
-		$queue = [System.Collections.Generic.Queue[string]]::new()
-		$queue.Enqueue("$root")
-		while ($queue.Count) {
-			$id = $queue.Dequeue()
-			if (-not $seen.Add($id)) { continue }
-			if (-not $groups.ContainsKey($id)) { throw "Discovery export is missing descendant group '$id'." }
-			foreach ($childValue in $groups[$id].ChildIds) {
-				$child = [guid]::Empty
-				if (-not [guid]::TryParse([string]$childValue, [ref]$child) -or $child -eq [guid]::Empty) {
-					throw "Discovery export contains an invalid child group '$childValue'."
-				}
-				$queue.Enqueue("$child")
-			}
+	$applicationIds = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+	foreach ($application in $applications) {
+		$appId = [guid]::Empty
+		if (-not [guid]::TryParse([string]$application.ServicePrincipalId, [ref]$appId) -or $appId -eq [guid]::Empty -or
+			-not $applicationIds.Add("$appId")) { throw 'Discovery export contains a duplicate or invalid service principal ID.' }
+		if ($Data.SchemaVersion -eq 1) {
+			$topLevelAppId = [guid]::Empty
+			if (-not [guid]::TryParse([string]$Data.ServicePrincipalId, [ref]$topLevelAppId) -or
+				"$topLevelAppId" -ne "$appId") { throw 'Discovery export has an invalid or inconsistent service principal ID.' }
 		}
-		$candidates.Add([pscustomobject]@{
-			Root = "$root"; GroupIds = @($seen | Sort-Object); Status = 'Ready'; Reason = ''
-		})
+		$roots = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+		foreach ($rootValue in $application.GroupIds) {
+			$root = [guid]::Empty
+			if (-not [guid]::TryParse([string]$rootValue, [ref]$root) -or $root -eq [guid]::Empty -or
+				-not $roots.Add("$root") -or -not $groups.ContainsKey("$root")) { throw "Discovery export contains an invalid root group '$rootValue'." }
+			$seen = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+			$queue = [System.Collections.Generic.Queue[string]]::new()
+			$queue.Enqueue("$root")
+			while ($queue.Count) {
+				$id = $queue.Dequeue()
+				if (-not $seen.Add($id)) { continue }
+				if (-not $groups.ContainsKey($id)) { throw "Discovery export is missing descendant group '$id'." }
+				foreach ($childValue in $groups[$id].ChildIds) {
+					$child = [guid]::Empty
+					if (-not [guid]::TryParse([string]$childValue, [ref]$child) -or $child -eq [guid]::Empty) {
+						throw "Discovery export contains an invalid child group '$childValue'."
+					}
+					$queue.Enqueue("$child")
+				}
+			}
+			$candidates.Add([pscustomobject]@{
+				ServicePrincipalId = "$appId"
+				ServicePrincipalName = [string]$application.ServicePrincipalName
+				Root = "$root"; GroupIds = @($seen | Sort-Object); Status = 'Ready'; Reason = ''
+			})
+		}
 	}
 	foreach ($candidate in $candidates) {
 		$overlappingRoots = @($candidates | Where-Object {
 			$other = $_
-			$other.Root -ne $candidate.Root -and @($other.GroupIds | Where-Object { $_ -in $candidate.GroupIds }).Count
-		} | ForEach-Object { $_.Root })
+			($other.ServicePrincipalId -ne $candidate.ServicePrincipalId -or $other.Root -ne $candidate.Root) -and
+				@($other.GroupIds | Where-Object { $_ -in $candidate.GroupIds }).Count
+		} | ForEach-Object { "$($_.ServicePrincipalId)/$($_.Root)" })
 		if ($overlappingRoots.Count) {
 			$candidate.Status = 'Manual review'
 			$candidate.Reason = "Shares groups with proposed root(s): $($overlappingRoots -join ', ')."
 		}
 	}
-	[pscustomobject]@{ ServicePrincipalId = "$appId"; Groups = $groups; Candidates = $candidates.ToArray() }
+	[pscustomobject]@{
+		ServicePrincipalId = if ($applicationIds.Count -eq 1) { @($applicationIds)[0] } else { $null }
+		ServicePrincipalIds = @($applicationIds | Sort-Object)
+		Groups = $groups
+		Candidates = $candidates.ToArray()
+	}
 }
 
 function Get-CurrentPackageDiscovery {
@@ -86,10 +109,13 @@ function Test-DiscoveryPackageCandidate {
 	param(
 		[Parameter(Mandatory)][object]$Discovery,
 		[Parameter(Mandatory)][guid]$RootGroupId,
-		[Parameter(Mandatory)][string[]]$GroupIds
+		[Parameter(Mandatory)][string[]]$GroupIds,
+		[guid]$ServicePrincipalId
 	)
 	try {
-		$candidate = @($discovery.Candidates | Where-Object Root -eq "$RootGroupId")
+		$candidate = @($discovery.Candidates | Where-Object {
+			$_.Root -eq "$RootGroupId" -and (-not $ServicePrincipalId -or $_.ServicePrincipalId -eq "$ServicePrincipalId")
+		})
 		if ($candidate.Count -ne 1) { throw 'The root is no longer directly assigned to the application.' }
 		if ($candidate[0].Status -ne 'Ready') { throw $candidate[0].Reason }
 		$actual = @($GroupIds | Sort-Object -Unique)

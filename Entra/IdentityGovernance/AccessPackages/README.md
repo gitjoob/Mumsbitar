@@ -91,9 +91,13 @@ Run these commands from the `IdentityGovernance` directory after connecting:
 ```powershell
 Connect-MgGraph -Scopes 'AccessReview.ReadWrite.All','Application.Read.All','Group.Read.All','User.Read.All','EntitlementManagement.ReadWrite.All','RoleManagement.Read.Directory'
 
+# One application:
 .\AccessReviews\Create-AccessReview.ps1 -ServicePrincipalId '<enterprise application object ID>' `
-    -ReviewerType ResourceOwner -WhatIf `
-    -HtmlReportPath '.\preview.html' -DiscoveryOutputPath '.\discovery.json'
+    -ReviewerType ResourceOwner -WhatIf -DiscoveryOutputPath '.\discovery.json'
+
+# Or multiple applications in a CSV with a ServicePrincipalId column:
+.\AccessReviews\Create-AccessReview.ps1 -CsvPath '.\applications.csv' `
+    -ReviewerType ResourceOwner -WhatIf -DiscoveryOutputPath '.\discovery.json'
 
 .\AccessPackages\Export-DiscoveryAccessPackages.ps1 -DiscoveryPath '.\discovery.json' `
     -WorkbookPath '.\packages.xlsx'
@@ -104,10 +108,12 @@ Connect-MgGraph -Scopes 'AccessReview.ReadWrite.All','Application.Read.All','Gro
 ```
 
 The first command produces the normal access-review creation preview and a
-structured discovery file; it does not create access reviews. Both files and the
-workbook require new filenames. Store them in a private directory: they contain
-application and group information. Discovery records direct-user counts but not
-user membership lists.
+structured discovery file; it does not create access reviews. The CSV form
+includes all service principals from its `ServicePrincipalId` rows in one
+combined workbook; each package row retains its originating application ID.
+Both files and the workbook require new filenames. Store them in a private
+directory: they contain application and group information. Discovery records
+direct-user counts but not user membership lists.
 
 Each directly assigned root proposes one package with the root and every nested
 descendant as Member resources. Assigning the package adds users to **all** of

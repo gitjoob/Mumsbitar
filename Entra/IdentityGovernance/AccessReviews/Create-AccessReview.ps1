@@ -28,8 +28,9 @@ With WhatIf, only this explicitly requested file is written. Never overwrites fi
 Disable automatic reminder emails for newly created reviews. Initial notification
 emails remain enabled. Existing reviews are never modified.
 .PARAMETER DiscoveryOutputPath
-Optional new JSON file containing complete application group discovery. Only
-available for an application WhatIf run; it contains no user membership lists.
+Optional new JSON file containing complete application group discovery. Use with
+-WhatIf and either application mode or CSV containing service-principal rows.
+CSV exports use a combined multi-application format; no user membership lists.
 .EXAMPLE
 .\Create-AccessReview.ps1 -GroupId '<group Object ID>' -ReviewerType ResourceOwner -WhatIf
 .EXAMPLE
@@ -52,6 +53,7 @@ param(
 	[ValidateNotNullOrEmpty()]
 	[string]$HtmlReportPath,
 	[Parameter(ParameterSetName = 'Application')]
+	[Parameter(ParameterSetName = 'Csv')]
 	[ValidateNotNullOrEmpty()]
 	[string]$DiscoveryOutputPath,
 	[Parameter(Mandatory, ParameterSetName = 'Application')]
@@ -491,6 +493,9 @@ if ($PSCmdlet.ParameterSetName -eq 'Csv') {
 	})
 	if ($inputTargets.Count -eq 0) {
 		throw 'The CSV file contains no targets.'
+	}
+	if ($DiscoveryOutputPath -and -not @($inputTargets | Where-Object ServicePrincipalId).Count) {
+		throw 'DiscoveryOutputPath requires at least one ServicePrincipalId row in the CSV file.'
 	}
 	if (@($inputTargets | Where-Object ServicePrincipalId).Count) {
 		Import-Module Microsoft.Graph.Applications
@@ -1427,19 +1432,29 @@ finally {
 			}
 		}
 		if ($DiscoveryOutputPath -and $reportRun.Completed -and -not $reportRun.Failure) {
-			$discoveryDocument = [ordered]@{
-				SchemaVersion = 1
-				ServicePrincipalId = "$ServicePrincipalId"
-				Applications = @($reportRun.Applications)
-				Groups = @($discovery.Order | ForEach-Object {
-					$snapshot = $discovery.Snapshots[$_]
-					[ordered]@{
-						Id = "$_"
-						DisplayName = "$($snapshot.Group.DisplayName)"
-						ChildIds = @($snapshot.ChildIds)
-						DirectUserCount = $snapshot.DirectUserCount
-					}
-				})
+			$discoveryGroups = @($discovery.Order | ForEach-Object {
+				$snapshot = $discovery.Snapshots[$_]
+				[ordered]@{
+					Id = "$_"
+					DisplayName = "$($snapshot.Group.DisplayName)"
+					ChildIds = @($snapshot.ChildIds)
+					DirectUserCount = $snapshot.DirectUserCount
+				}
+			})
+			if ($PSCmdlet.ParameterSetName -eq 'Application') {
+				$discoveryDocument = [ordered]@{
+					SchemaVersion = 1
+					ServicePrincipalId = "$ServicePrincipalId"
+					Applications = @($reportRun.Applications)
+					Groups = $discoveryGroups
+				}
+			}
+			else {
+				$discoveryDocument = [ordered]@{
+					SchemaVersion = 2
+					Applications = @($reportRun.Applications)
+					Groups = $discoveryGroups
+				}
 			}
 			$json = $discoveryDocument | ConvertTo-Json -Depth 20
 			$stream = [IO.File]::Open($DiscoveryOutputPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)

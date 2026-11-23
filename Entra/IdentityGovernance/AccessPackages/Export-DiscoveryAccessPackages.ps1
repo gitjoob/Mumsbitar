@@ -27,7 +27,8 @@ if ([IO.File]::Exists($outputPath) -or [IO.Directory]::Exists($outputPath)) { th
 if (-not [IO.Directory]::Exists([IO.Path]::GetDirectoryName($outputPath))) { throw 'Workbook output directory does not exist.' }
 $data = Get-Content -LiteralPath $inputPath -Raw | ConvertFrom-Json
 $discovery = Get-PackageDiscoveryCandidates -Data $data
-$appId = $discovery.ServicePrincipalId
+$applicationIds = @($discovery.ServicePrincipalIds)
+$workbookVersion = if ($applicationIds.Count -gt 1) { 2 } else { 1 }
 $groups = $discovery.Groups
 $candidates = $discovery.Candidates
 try { $inventory = @(Get-PackageCoverageInventory); $inventoryError = $null }
@@ -64,9 +65,11 @@ try {
 	$topology = $excel.Workbook.Worksheets.Add('Topology')
 	$metadata = $excel.Workbook.Worksheets.Add('Discovery metadata')
 	$metadata.Cells[1, 1].Value = 'Discovery workbook version'
-	$metadata.Cells[1, 2].Value = '1'
-	$metadata.Cells[2, 1].Value = 'Service principal ID'
-	$metadata.Cells[2, 2].Value = "$appId"
+	$metadata.Cells[1, 2].Value = "$workbookVersion"
+	for ($i = 0; $i -lt $applicationIds.Count; $i++) {
+		$metadata.Cells[($i + 2), 1].Value = 'Service principal ID'
+		$metadata.Cells[($i + 2), 2].Value = "$($applicationIds[$i])"
+	}
 	$columns = @('Role', 'Brand', 'Region', 'Potential Teams', 'GroupId', 'Description', 'Access Package Name',
 		'Approver 1 List', 'Approver 2', 'Approver 3', 'Discovery ServicePrincipalId', 'Discovery RootGroupId', 'Action required')
 	for ($i = 0; $i -lt $columns.Count; $i++) { $sheet.Cells[1, ($i + 1)].Value = $columns[$i] }
@@ -79,7 +82,7 @@ try {
 	$topologyRow = 2
 	foreach ($candidate in $candidates) {
 		$rootName = [string]$groups[$candidate.Root].DisplayName
-		$appName = [string]$data.Applications[0].ServicePrincipalName
+		$appName = [string]$candidate.ServicePrincipalName
 		$name = "$appName - $rootName".Trim(' ', '-')
 		$description = "Application: $appName. $(Get-DiscoveryPackageWarning)"
 		if ($candidate.Status -eq 'Ready') {
@@ -87,7 +90,7 @@ try {
 			if (-not $name -or $name -match '(?i)(?<![a-z0-9])(?:access[\s_-]*package|ap|sg)(?![a-z0-9])') {
 				$action = "Replace the suggested package name; it violates naming rules. $action"
 			}
-			$values = @('', '', '', '', ($candidate.GroupIds -join ';'), $description, $name, '', '', '', "$appId", $candidate.Root, $action)
+			$values = @('', '', '', '', ($candidate.GroupIds -join ';'), $description, $name, '', '', '', $candidate.ServicePrincipalId, $candidate.Root, $action)
 			for ($i = 0; $i -lt $values.Count; $i++) { $sheet.Cells[$sheetRow, ($i + 1)].Value = [string]$values[$i] }
 			$sheetRow++
 		}

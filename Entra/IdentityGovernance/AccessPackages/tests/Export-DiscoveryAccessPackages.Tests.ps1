@@ -57,6 +57,28 @@ Describe 'Discovery workbook export' {
 		{ & $script:exportPath -DiscoveryPath $script:input -WorkbookPath $script:output } | Should -Throw '*already exists*'
 	}
 
+	It 'combines multiple applications in one workbook while retaining each application ID' {
+		$secondApp = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb'
+		$script:fixture.SchemaVersion = 2
+		$script:fixture.Remove('ServicePrincipalId')
+		$script:fixture.Applications += @{
+			ServicePrincipalId = $secondApp; ServicePrincipalName = 'Second app'; GroupIds = @($script:other)
+		}
+		$script:fixture.Groups[2].ChildIds = @()
+		$script:fixture | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $script:input
+		& $script:exportPath -DiscoveryPath $script:input -WorkbookPath $script:output
+		$rows = @(Import-Excel -Path $script:output -WorksheetName Packages)
+		$rows | Should -HaveCount 2
+		$rows.'Discovery ServicePrincipalId' | Should -Contain $script:app
+		$rows.'Discovery ServicePrincipalId' | Should -Contain $secondApp
+		$rows.'Access Package Name' | Should -Contain 'Second app - Other'
+		$metadata = Open-ExcelPackage -Path $script:output
+		try {
+			$metadata.Workbook.Worksheets['Discovery metadata'].Cells[1, 2].Value | Should -Be '2'
+		}
+		finally { Close-ExcelPackage -ExcelPackage $metadata -NoSave }
+	}
+
 	It 'keeps shared descendants out of the import sheet' {
 		$script:fixture.Applications[0].GroupIds = @($script:root, $script:other)
 		$script:fixture | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $script:input

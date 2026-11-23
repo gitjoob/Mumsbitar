@@ -40,6 +40,8 @@ BeforeAll {
 	}
 
 	function New-DiscoveryWorkbookFixture {
+		param([switch]$Combined)
+
 		$base = Join-Path $TestDrive "discovery-$([guid]::NewGuid())"
 		$packages = Join-Path $base 'AccessPackages'
 		$reviews = Join-Path $base 'AccessReviews'
@@ -48,28 +50,58 @@ BeforeAll {
 			Copy-Item (Join-Path $PSScriptRoot "../$file") $packages
 		}
 		$app = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
+		$secondApp = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb'
+		$secondGroup = '44444444-4444-4444-4444-444444444444'
 		$data = @{
 			SchemaVersion = 1; ServicePrincipalId = $app
-			Applications = @(@{ ServicePrincipalId = $app; GroupIds = @($script:groupId) })
+			Applications = @(@{ ServicePrincipalId = $app; ServicePrincipalName = 'First app'; GroupIds = @($script:groupId) })
 			Groups = @(@{ Id = $script:groupId; ChildIds = @() })
 		}
 		$data | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $reviews 'snapshot.json')
+		if ($Combined) {
+			$secondData = @{
+				SchemaVersion = 1; ServicePrincipalId = $secondApp
+				Applications = @(@{ ServicePrincipalId = $secondApp; ServicePrincipalName = 'Second app'; GroupIds = @($secondGroup) })
+				Groups = @(@{ Id = $secondGroup; ChildIds = @() })
+			}
+			$secondData | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $reviews 'snapshot-2.json')
+		}
 		@'
 [CmdletBinding(SupportsShouldProcess)]
 param([guid]$ServicePrincipalId, [string]$ReviewerType, [string]$DiscoveryOutputPath)
 if (-not $WhatIfPreference) { throw 'Discovery requires WhatIf.' }
-Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'snapshot.json') -Destination $DiscoveryOutputPath -WhatIf:$false
+$snapshot = if ("$ServicePrincipalId" -eq 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb') { 'snapshot-2.json' } else { 'snapshot.json' }
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot $snapshot) -Destination $DiscoveryOutputPath -WhatIf:$false
 '@ | Set-Content -LiteralPath (Join-Path $reviews 'Create-AccessReview.ps1')
-		$script:csvPath = New-WorkbookFixture @{
-			GroupId = $script:groupId; 'Discovery ServicePrincipalId' = $app; 'Discovery RootGroupId' = $script:groupId
-			Description = 'Assigning this package adds the user to every listed group and may grant access through other groups or applications. Nested membership does not establish effective application access.'
+		$warning = 'Assigning this package adds the user to every listed group and may grant access through other groups or applications. Nested membership does not establish effective application access.'
+		$rows = @([pscustomobject][ordered]@{
+			Role = 'Reader'; Brand = 'Brand A'; Region = 'EMEA'; 'Potential Teams' = 'Finance'
+			GroupId = $script:groupId; Description = $warning; 'Access Package Name' = 'First app - Finance'
+			'Approver 1 List' = '<Employee Manager>'; 'Approver 2' = ''; 'Approver 3' = ''
+			'Discovery ServicePrincipalId' = $app; 'Discovery RootGroupId' = $script:groupId
+		})
+		if ($Combined) {
+			$rows += [pscustomobject][ordered]@{
+				Role = 'Reader'; Brand = 'Brand B'; Region = 'EMEA'; 'Potential Teams' = 'Operations'
+				GroupId = $secondGroup; Description = $warning; 'Access Package Name' = 'Second app - Operations'
+				'Approver 1 List' = '<Employee Manager>'; 'Approver 2' = ''; 'Approver 3' = ''
+				'Discovery ServicePrincipalId' = $secondApp; 'Discovery RootGroupId' = $secondGroup
+			}
+			$script:graphFixture.AdditionalGroups[$secondGroup] = @{
+				id = $secondGroup; displayName = 'SG_Operations'; groupTypes = @()
+				onPremisesSyncEnabled = $false; mailEnabled = $false; securityEnabled = $true; isAssignableToRole = $false
+			}
 		}
+		$script:csvPath = Join-Path $TestDrive "discovery-packages-$([guid]::NewGuid()).xlsx"
+		$rows | Export-Excel -Path $script:csvPath -WorksheetName 'Packages'
 		$excel = [OfficeOpenXml.ExcelPackage]::new([IO.FileInfo]::new($script:csvPath))
 		$metadata = $excel.Workbook.Worksheets.Add('Discovery metadata')
 		$metadata.Cells[1, 1].Value = 'Discovery workbook version'
-		$metadata.Cells[1, 2].Value = '1'
-		$metadata.Cells[2, 1].Value = 'Service principal ID'
-		$metadata.Cells[2, 2].Value = $app
+		$metadata.Cells[1, 2].Value = if ($Combined) { '2' } else { '1' }
+		foreach ($index in 0..($rows.Count - 1)) {
+			$metadata.Cells[($index + 2), 1].Value = 'Service principal ID'
+			$metadata.Cells[($index + 2), 2].Value = if ($index -eq 0) { $app } else { $secondApp }
+		}
 		Close-ExcelPackage -ExcelPackage $excel
 		Join-Path $packages 'Create-AccessPackage.ps1'
 	}
@@ -384,6 +416,15 @@ Finance reporting - Read reports,View financial reports.,$script:groupId,$script
 			$result = & $path -InputPath $script:csvPath -CatalogName $script:graphFixture.CatalogName `
 				-FallbackApproverIds $script:fallbackId -WhatIf -WarningAction SilentlyContinue
 			$result.Status | Should -Be 'Would be created'
+			$script:graphFixture.Writes | Should -HaveCount 0
+		}
+
+		It 'rechecks each application in a combined discovery workbook' {
+			$path = New-DiscoveryWorkbookFixture -Combined
+			$result = & $path -InputPath $script:csvPath -CatalogName $script:graphFixture.CatalogName `
+				-FallbackApproverIds $script:fallbackId -WhatIf -WarningAction SilentlyContinue
+			$result | Should -HaveCount 2
+			$result.Status | Should -Be @('Would be created', 'Would be created')
 			$script:graphFixture.Writes | Should -HaveCount 0
 		}
 

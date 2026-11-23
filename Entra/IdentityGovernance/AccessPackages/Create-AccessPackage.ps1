@@ -108,11 +108,25 @@ if ($isWorkbook) {
 		$package = [OfficeOpenXml.ExcelPackage]::new($metadataStream)
 		try {
 			$metadata = $package.Workbook.Worksheets['Discovery metadata']
-			if ($metadata.Cells[1, 1].Value -ne 'Discovery workbook version' -or "$($metadata.Cells[1, 2].Value)" -ne '1' -or
-				$metadata.Cells[2, 1].Value -ne 'Service principal ID') { throw 'Discovery workbook metadata is invalid.' }
-			$discoveryApplicationId = [guid]::Empty
-			if (-not [guid]::TryParse([string]$metadata.Cells[2, 2].Value, [ref]$discoveryApplicationId) -or $discoveryApplicationId -eq [guid]::Empty) {
-				throw 'Discovery workbook metadata contains an invalid service principal ID.'
+			$metadataVersion = "$($metadata.Cells[1, 2].Value)"
+			if ($metadata.Cells[1, 1].Value -ne 'Discovery workbook version' -or $metadataVersion -notin @('1', '2') -or
+				-not $metadata.Dimension -or $metadata.Dimension.End.Row -lt 2) {
+				throw 'Discovery workbook metadata is invalid.'
+			}
+			$discoveryApplicationIds = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+			for ($rowIndex = 2; $rowIndex -le $metadata.Dimension.End.Row; $rowIndex++) {
+				if ($metadata.Cells[$rowIndex, 1].Value -ne 'Service principal ID') {
+					throw 'Discovery workbook metadata is missing a service principal ID.'
+				}
+				$applicationId = [guid]::Empty
+				if (-not [guid]::TryParse([string]$metadata.Cells[$rowIndex, 2].Value, [ref]$applicationId) -or
+					$applicationId -eq [guid]::Empty -or -not $discoveryApplicationIds.Add("$applicationId")) {
+					throw 'Discovery workbook metadata contains a duplicate or invalid service principal ID.'
+				}
+			}
+			if (($metadataVersion -eq '1' -and $discoveryApplicationIds.Count -ne 1) -or
+				($metadataVersion -eq '2' -and $discoveryApplicationIds.Count -lt 2)) {
+				throw 'Discovery workbook metadata does not match its version.'
 			}
 		}
 		finally { $package.Dispose(); $metadataStream.Dispose() }
@@ -570,7 +584,7 @@ if ($isDiscoveryWorkbook) {
 		$rowApplication = [guid]::Empty
 		$root = [guid]::Empty
 		if (-not [guid]::TryParse((Get-InputText $row 'Discovery ServicePrincipalId'), [ref]$rowApplication) -or
-			$rowApplication -ne $discoveryApplicationId -or
+			-not $discoveryApplicationIds.Contains("$rowApplication") -or
 			-not [guid]::TryParse((Get-InputText $row 'Discovery RootGroupId'), [ref]$root) -or $root -eq [guid]::Empty) {
 			throw 'Each discovery workbook row must retain its original application and root group IDs.'
 		}
@@ -580,11 +594,14 @@ if ($isDiscoveryWorkbook) {
 		}
 	}
 	$reviewScript = Join-Path (Split-Path $PSScriptRoot -Parent) 'AccessReviews/Create-AccessReview.ps1'
-	try {
-		$currentDiscovery = Get-CurrentPackageDiscovery -ServicePrincipalId $discoveryApplicationId `
-			-ReviewScriptPath $reviewScript -TemporaryParent ([IO.Path]::GetDirectoryName($workbookPath))
+	$currentDiscoveries = @{}
+	foreach ($applicationId in $discoveryApplicationIds) {
+		try {
+			$currentDiscoveries["$applicationId"] = Get-CurrentPackageDiscovery -ServicePrincipalId ([guid]$applicationId) `
+				-ReviewScriptPath $reviewScript -TemporaryParent ([IO.Path]::GetDirectoryName($workbookPath))
+		}
+		catch { throw "Unable to refresh application '$applicationId' group discovery; no packages were created. $($_.Exception.Message)" }
 	}
-	catch { throw "Unable to refresh application group discovery; no packages were created. $($_.Exception.Message)" }
 }
 $fallbackApprovers = @(ConvertTo-UserApprovers -Ids $FallbackApproverIds)
 $catalogs = @(Get-GraphCollection -Uri "$baseUri/catalogs" -Filter "displayName eq '$($CatalogName.Replace("'", "''"))'")
@@ -771,8 +788,11 @@ foreach ($row in $rows) {
 					$result.Reason = "Groups are shared with another workbook row: $($overlappingIds -join ', ')."
 				}
 				else {
+					$rowApplication = [guid](Get-InputText $row 'Discovery ServicePrincipalId')
+					$currentDiscovery = $currentDiscoveries["$rowApplication"]
 					$coverage = Test-DiscoveryPackageCandidate -Discovery $currentDiscovery `
-						-RootGroupId ([guid](Get-InputText $row 'Discovery RootGroupId')) -GroupIds $result.GroupIds
+						-RootGroupId ([guid](Get-InputText $row 'Discovery RootGroupId')) -GroupIds $result.GroupIds `
+						-ServicePrincipalId $rowApplication
 					if ($coverage.Status -ne 'Ready') { $result.Status = $coverage.Status; $result.Reason = $coverage.Reason }
 				}
 			}

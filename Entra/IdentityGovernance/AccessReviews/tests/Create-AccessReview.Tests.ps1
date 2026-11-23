@@ -154,6 +154,31 @@ Describe 'Unified access review creation and local logging' {
 		$script:fixture.Bodies | Should -HaveCount 0
 	}
 
+	It 'exports combined discovery for CSV service principals without creating reviews' {
+		Set-NestedGroupFixture
+		$csv = Join-Path $script:testScriptRoot 'applications.csv'
+		$path = Join-Path $script:testScriptRoot 'discovery.json'
+		$firstApplicationId = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
+		$secondApplicationId = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb'
+		"ServicePrincipalId`n$firstApplicationId`n$secondApplicationId" | Set-Content -LiteralPath $csv
+		$null = @(& $script:testScript -CsvPath $csv -ReviewerType ResourceOwner `
+			-DiscoveryOutputPath $path -WhatIf -WarningAction SilentlyContinue)
+		$data = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+		$data.SchemaVersion | Should -Be 2
+		$data.Applications.ServicePrincipalId | Should -Be @($firstApplicationId, $secondApplicationId)
+		$data.Groups | Should -HaveCount 2
+		$script:fixture.Bodies | Should -HaveCount 0
+	}
+
+	It 'requires a service-principal CSV row when exporting discovery' {
+		$csv = Join-Path $script:testScriptRoot 'groups.csv'
+		$path = Join-Path $script:testScriptRoot 'discovery.json'
+		"GroupId`n$script:groupId" | Set-Content -LiteralPath $csv
+		{ & $script:testScript -CsvPath $csv -DiscoveryOutputPath $path -WhatIf } |
+			Should -Throw '*requires at least one ServicePrincipalId row*'
+		[IO.File]::Exists($path) | Should -BeFalse
+	}
+
 	It 'rejects discovery export in a live run or to an existing file' {
 		$path = Join-Path $script:testScriptRoot 'discovery.json'
 		$applicationId = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'

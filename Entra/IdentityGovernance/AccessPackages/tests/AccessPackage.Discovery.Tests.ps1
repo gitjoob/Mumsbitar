@@ -43,6 +43,36 @@ Describe 'Discovery package creation safeguards' {
 		$result.Reason | Should -Match 'Forbidden'
 	}
 
+	It 'supports combined application discovery and identifies each candidate by application' {
+		$secondApp = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb'
+		$script:data.SchemaVersion = 2
+		$script:data.PSObject.Properties.Remove('ServicePrincipalId')
+		$script:data.Applications += [pscustomobject]@{
+			ServicePrincipalId = $secondApp; ServicePrincipalName = 'Second app'; GroupIds = @($script:other)
+		}
+		$script:data.Applications[0] | Add-Member -NotePropertyName ServicePrincipalName -NotePropertyValue 'First app'
+		$script:data.Groups[2].ChildIds = @()
+		$discovery = Get-PackageDiscoveryCandidates $script:data
+		$discovery.ServicePrincipalId | Should -BeNullOrEmpty
+		$discovery.ServicePrincipalIds | Should -Be @($script:app, $secondApp)
+		$discovery.Candidates | Should -HaveCount 2
+		$discovery.Candidates[0].ServicePrincipalName | Should -Be 'First app'
+		(Test-DiscoveryPackageCandidate -Discovery $discovery -ServicePrincipalId $secondApp `
+			-RootGroupId $script:other -GroupIds @($script:other)).Status | Should -Be 'Ready'
+	}
+
+	It 'marks roots shared across applications for manual review' {
+		$secondApp = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb'
+		$script:data.SchemaVersion = 2
+		$script:data.PSObject.Properties.Remove('ServicePrincipalId')
+		$script:data.Applications += [pscustomobject]@{
+			ServicePrincipalId = $secondApp; GroupIds = @($script:root)
+		}
+		$discovery = Get-PackageDiscoveryCandidates $script:data
+		$discovery.Candidates | Should -HaveCount 2
+		$discovery.Candidates.Status | Should -Be @('Manual review', 'Manual review')
+	}
+
 	It 'refreshes discovery with WhatIf and removes only its own temporary files' {
 		$fixture = Join-Path $TestDrive "preview-$([guid]::NewGuid()).ps1"
 		$json = $script:data | ConvertTo-Json -Depth 10 -Compress
