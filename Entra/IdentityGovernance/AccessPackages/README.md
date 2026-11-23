@@ -99,15 +99,28 @@ The script reads the first worksheet with headers in row 1:
 | `GroupId` | One or more Entra group object IDs separated by commas, semicolons, or line breaks. If the column exists, it must be populated for each package and `Access Group` is ignored. |
 | `Access Group` | Used only by older workbooks without `GroupId`: one exact, unique group display name or one or more group object IDs. |
 | `Description`, `Role`, `Brand`, `Region`, `Potential Teams` | Description text and optional details. |
-| `Approver 1 List` | `<Employee Manager>` (case and extra whitespace are ignored). Uses the existing direct-manager stage and fallback approvers. |
-| `Approver 2`, `Approver 3` | Optional additional stages, in order. Separate user object IDs, UPNs, or `mail` addresses with semicolons, commas or line breaks. Stage 3 requires an explicit stage 2. `NA` in `Approver 3` omits the third stage. |
+| `Approver 1 List` | Required first approval stage. |
+| `Approver 2`, `Approver 3` | Optional additional stages, in order. Stage 3 requires stage 2. Blank or `NA` omits a later stage. |
+
+Each stage supports `<Employee Manager>`, `<Line Manager>` or `<Manager>`;
+`<Resource Owner>` or `<Group Owner>`; and user object IDs, UPNs, or `mail`
+addresses. Values can be combined with semicolons, commas or line breaks.
+Tokens are case-insensitive, and angle brackets are optional for the named
+rules. The manager may be selected in only one stage, with the supplied fallback
+users. Each stage requires a decision from only one of its listed approvers.
+
+Resource-owner selection reads the **current human owners of every listed
+group** and captures them as named approvers in the policy. Ownership changes
+after creation do not update this list. Each group must have at least one human
+owner and all owner lookups must succeed; otherwise the row fails before writes.
+Self-review is not an approval-stage option: Entra does not allow requesters to
+approve their own requests. Access reviews are separate and remain disabled.
 
 The script uses `Get-MgGroup` to fetch and validate each group by ID. The
 preview shows the Entra display names and IDs. All listed groups are added as
 Member roles to the same package. For multiple groups, the reported `UserCount` is the
 largest individual transitive user count, not the sum.
-If any group exceeds 500 transitive users, a blank stage 2 requires
-`-DefaultAppOwnerIds`. An address must match exactly one Entra user across UPN
+Stage selection does not depend on group size. An address must match exactly one Entra user across UPN
 and `mail`. For ambiguous addresses, use the user object ID. Display names
 and secondary mail aliases aren't supported.
 
@@ -149,9 +162,10 @@ human review; the script does not guess names from groups.
 
 `-FallbackApproverIds` is mandatory and accepts one or more user IDs. These
 users receive manager-stage requests when the recipient has no manager.
-Explicit `AppOwnerIds` replaces, rather
-than supplements, the default owners. Owners are validated when supplied;
-at least one is required for a group with more than 500 users.
+Explicit `AppOwnerIds` replaces, rather than supplements, the default owners.
+For CSV, supplied owners create an optional second approval stage at any group
+size. Without either, the CSV policy has only the manager stage.
+`-DefaultAppOwnerIds` is not used to fill blank XLSX stages.
 
 ## Policy defaults
 
@@ -161,8 +175,8 @@ at least one is required for a group with more than 500 users.
 | Requesters | Self, authorized administrators, and the recipient's direct manager. |
 | Request justification | Required. |
 | Approval | Required for new assignments and extensions/updates. |
-| Up to and including 500 transitive users (CSV) | Direct manager, with explicit fallback users. |
-| More than 500 transitive users (CSV) | Direct manager, then the explicit application-owner users. |
+| CSV approval stages | Direct manager with fallback users, followed by application-owner users if supplied, regardless of group size. |
+| XLSX approval stages | Exactly the populated approval-stage columns, regardless of group size. |
 | Approval deadline | 14 days per stage; no escalation. |
 | Approver justification | Not required; requester justification is required. |
 | Assignment email notifications | Enabled. |
@@ -178,8 +192,7 @@ empty escalation collections and a zero escalation duration.
 
 The transitive **user** count includes users in nested groups, not nested group
 objects, devices or service principals. The Graph advanced count query uses
-eventual consistency. Stage selection is a creation-time snapshot; the script
-does not continuously adjust policies as membership changes. Manager approval
+eventual consistency. Group size does not determine approval stages. Manager approval
 uses the recipient's manager (`targetManager`), not the manager of the person
 submitting an on-behalf-of request.
 
@@ -196,8 +209,8 @@ not migrated to the member-only scope.
 
 The public Graph v1.0 and beta **policy schemas do not expose** the portal
 setting **Bypass approval stage if manager is the requester and approver**.
-After creation, edit each new policy in the Entra portal and enable this
-setting. Every created/previewed result includes `ManualAction`, and the script
+After creation, edit each new policy with a manager approval stage in the Entra
+portal and enable this setting. Its created/previewed result includes `ManualAction`, and the script
 prints a warning. A `Created` result means the Graph-configurable settings were
 created, **not** that this manual step is complete. It never simulates bypass
 by disabling manager approval for everyone.

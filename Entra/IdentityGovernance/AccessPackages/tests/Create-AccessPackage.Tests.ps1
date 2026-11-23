@@ -59,6 +59,8 @@ Finance reporting - Read reports,View financial reports.,$script:groupId,$script
 			UserCount = '500'
 			GroupCounts = @{}
 			AdditionalGroups = @{}
+			GroupOwners = @{}
+			OwnerNextPage = @{}
 			DirectMembers = @{}
 			PackageGroups = @($script:groupId)
 			PolicyDuration = 'P365D'
@@ -145,6 +147,13 @@ Finance reporting - Read reports,View financial reports.,$script:groupId,$script
 				if ($uriText -match '/groups/([^/]+)/transitiveMembers/microsoft.graph.user/\$count$') {
 					if ($fixture.GroupCounts.ContainsKey($Matches[1])) { return $fixture.GroupCounts[$Matches[1]] }
 					return $fixture.UserCount
+				}
+				if ($uriText -match '/groups/([^/]+)/owners\?') {
+					$ownerGroupId = $Matches[1]
+					if ($uriText -match 'page=2') { return @{ value = @($fixture.OwnerNextPage[$ownerGroupId]) } }
+					$page = @{ value = @($fixture.GroupOwners[$ownerGroupId]) }
+					if ($fixture.OwnerNextPage.ContainsKey($ownerGroupId)) { $page['@odata.nextLink'] = "/v1.0/groups/$ownerGroupId/owners?page=2" }
+					return $page
 				}
 				if ($decodedUri.Contains("/groups?`$filter=displayName eq 'Finance''s Readers'&")) {
 					return @{ value = $fixture.NamedGroups }
@@ -476,7 +485,107 @@ Finance reporting - Read reports,View financial reports.,$script:groupId,$script
 			$script:graphFixture.Writes | Should -HaveCount 0
 		}
 
-		It 'retains the second-stage requirement above 500 users (default owner: <HasDefault>)' -TestCases @(
+		It 'supports named users first and manager in a later workbook stage' {
+			$script:csvPath = New-WorkbookFixture @{
+				'Approver 1 List' = 'owner@example.test; fallback@example.test'
+				'Approver 2' = '<Line Manager>'; 'Approver 3' = 'NA'
+			}
+			$result = Invoke-Creation
+			$result.Status | Should -Be 'Created'
+			$stages = (Get-PostedBody '/assignmentPolicies').requestApprovalSettings.stages
+			$stages | Should -HaveCount 2
+			$stages[0].primaryApprovers.userId | Should -Contain $script:ownerId
+			$stages[0].primaryApprovers.userId | Should -Contain $script:fallbackId
+			$stages[0].fallbackPrimaryApprovers | Should -HaveCount 0
+			$stages[1].primaryApprovers[0].'@odata.type' | Should -Be '#microsoft.graph.targetManager'
+			$stages[1].fallbackPrimaryApprovers[0].userId | Should -Be $script:fallbackId
+		}
+
+		It 'supports a resource owner and named approvers in later stages with paginated owners' {
+			$script:graphFixture.GroupOwners[$script:groupId] = @(@{ id = $script:ownerId; '@odata.type' = '#microsoft.graph.user' })
+			$script:graphFixture.OwnerNextPage[$script:groupId] = @(@{ id = $script:fallbackId; '@odata.type' = '#microsoft.graph.user' })
+			$script:csvPath = New-WorkbookFixture @{
+				'Approver 1 List' = '<Employee Manager>'; 'Approver 2' = '<Resource Owner>'
+				'Approver 3' = 'owner@example.test'
+			}
+			$result = Invoke-Creation
+			$result.Status | Should -Be 'Created'
+			$stages = (Get-PostedBody '/assignmentPolicies').requestApprovalSettings.stages
+			$stages[1].primaryApprovers | Should -HaveCount 2
+			$stages[1].primaryApprovers.userId | Should -Contain $script:fallbackId
+			$stages[2].primaryApprovers[0].userId | Should -Be $script:ownerId
+		}
+
+		It 'does not require a manager-bypass manual step for named-user-only stages' {
+			$script:csvPath = New-WorkbookFixture @{ 'Approver 1 List' = 'owner@example.test' }
+			$result = Invoke-Creation -Preview
+			$result.Status | Should -Be 'Would be created'
+			$result.ManualAction | Should -BeNullOrEmpty
+			$script:graphFixture.Writes | Should -HaveCount 0
+		}
+
+		It 'fails before writes when group owner lookup is forbidden' {
+			$script:graphFixture.RequestFailurePattern = '/groups/.*/owners'
+			$script:csvPath = New-WorkbookFixture @{ 'Approver 1 List' = '<Resource Owner>' }
+			$result = Invoke-Creation
+			$result.Status | Should -Be 'Failed'
+			$result.Reason | Should -Match 'GET /v1.0/groups/.*/owners'
+			$script:graphFixture.Writes | Should -HaveCount 0
+		}
+
+		It 'captures and deduplicates all human group owners as named approvers in any workbook stage' {
+			$second = '77777777-7777-7777-7777-777777777777'
+			$script:graphFixture.AdditionalGroups[$second] = $script:graphFixture.Group.Clone()
+			$script:graphFixture.AdditionalGroups[$second].id = $second
+			$script:graphFixture.GroupOwners[$script:groupId] = @(
+				@{ id = $script:ownerId; '@odata.type' = '#microsoft.graph.user' },
+				@{ id = '88888888-8888-8888-8888-888888888888'; '@odata.type' = '#microsoft.graph.servicePrincipal' }
+			)
+			$script:graphFixture.GroupOwners[$second] = @(
+				@{ id = $script:ownerId; '@odata.type' = '#microsoft.graph.user' },
+				@{ id = $script:fallbackId; '@odata.type' = '#microsoft.graph.user' }
+			)
+			$script:csvPath = New-WorkbookFixture @{
+				GroupId = "$script:groupId,$second"; 'Approver 1 List' = '<Resource Owner>'
+				'Approver 2' = 'owner@example.test'; 'Approver 3' = '<Line Manager>'
+			}
+			$result = Invoke-Creation
+			$result.Status | Should -Be 'Created'
+			$stages = (Get-PostedBody '/assignmentPolicies').requestApprovalSettings.stages
+			$stages[0].primaryApprovers | Should -HaveCount 2
+			$stages[0].primaryApprovers.userId | Should -Contain $script:ownerId
+			$stages[0].primaryApprovers.userId | Should -Contain $script:fallbackId
+			$stages[2].primaryApprovers[0].'@odata.type' | Should -Be '#microsoft.graph.targetManager'
+			$result.ApprovalStageDetails | Should -Match 'current group owners captured as named users'
+		}
+
+		It 'fails closed before writes when a resource-owner group has <Case>' -TestCases @(
+			@{ Case = 'no human owners'; Owner = @{ id = '88888888-8888-8888-8888-888888888888'; '@odata.type' = '#microsoft.graph.servicePrincipal' }; Reason = 'no human owners' }
+			@{ Case = 'an unclassified owner'; Owner = @{ id = '88888888-8888-8888-8888-888888888888' }; Reason = 'owner type unavailable' }
+			@{ Case = 'an invalid human owner'; Owner = @{ id = 'bad'; '@odata.type' = '#microsoft.graph.user' }; Reason = 'without a valid user ID' }
+		) {
+			param($Case, $Owner, $Reason)
+			$script:graphFixture.GroupOwners[$script:groupId] = @($Owner)
+			$script:csvPath = New-WorkbookFixture @{ 'Approver 1 List' = '<Group Owner>' }
+			$result = Invoke-Creation
+			$result.Status | Should -Be 'Failed'
+			$result.Reason | Should -Match $Reason
+			$script:graphFixture.Writes | Should -HaveCount 0
+		}
+
+		It 'rejects self-review and repeated manager stages without provisioning' -TestCases @(
+			@{ First = '<Self Review>'; Second = ''; Reason = 'self-review is not supported' }
+			@{ First = '<Employee Manager>'; Second = '<Line Manager>'; Reason = 'only be selected in one approval stage' }
+		) {
+			param($First, $Second, $Reason)
+			$script:csvPath = New-WorkbookFixture @{ 'Approver 1 List' = $First; 'Approver 2' = $Second }
+			$result = Invoke-Creation
+			$result.Status | Should -Be 'Failed'
+			$result.Reason | Should -Match $Reason
+			$script:graphFixture.Writes | Should -HaveCount 0
+		}
+
+		It 'uses only workbook stages above 500 users (default owner: <HasDefault>)' -TestCases @(
 			@{ HasDefault = $false }, @{ HasDefault = $true }
 		) {
 			param($HasDefault)
@@ -485,18 +594,18 @@ Finance reporting - Read reports,View financial reports.,$script:groupId,$script
 			if ($HasDefault) {
 				$result = Invoke-Creation -Preview -DefaultOwners $script:ownerId
 				$result.Status | Should -Be 'Would be created'
-				$result.ApprovalStages | Should -Be 2
+				$result.ApprovalStages | Should -Be 1
 			}
 			else {
 				$result = Invoke-Creation -Preview
-				$result.Status | Should -Be 'Failed'
-				$result.Reason | Should -Match 'require Approver 2 or DefaultAppOwnerIds'
+				$result.Status | Should -Be 'Would be created'
+				$result.ApprovalStages | Should -Be 1
 			}
 			$script:graphFixture.Writes | Should -HaveCount 0
 		}
 
 		It 'rejects unsafe workbook input before provisioning (<Case>)' -TestCases @(
-			@{ Case = 'unsupported manager token'; Overrides = @{ 'Approver 1 List' = '<Employee Manager> plus owner' }; Reason = 'must be <Employee Manager>' }
+			@{ Case = 'unsupported manager token'; Overrides = @{ 'Approver 1 List' = '<Employee Manager> plus owner' }; Reason = 'use Entra user object IDs' }
 			@{ Case = 'missing stage two'; Overrides = @{ 'Approver 3' = 'owner@example.test' }; Reason = 'Approver 3 requires Approver 2' }
 			@{ Case = 'ambiguous group'; Overrides = @{ 'Access Group' = "Finance's Readers" }; Reason = 'matched 2 groups' }
 		) {
@@ -514,6 +623,7 @@ Finance reporting - Read reports,View financial reports.,$script:groupId,$script
 	}
 
 	It 'creates a one-stage policy at exactly 500 users with all requested Graph settings' {
+		(Get-Content -LiteralPath $script:csvPath) -replace "$script:ownerId$", '' | Set-Content -LiteralPath $script:csvPath
 		$results = @(Invoke-Creation)
 		$results.Count | Should -Be 1
 		$results[0].Status | Should -Be 'Created'
@@ -581,6 +691,17 @@ Finance reporting - Read reports,View financial reports.,$script:groupId,$script
 		$stages[1].fallbackEscalationApprovers | Should -HaveCount 0
 	}
 
+	It 'uses CSV application-owner approvers at any group size' -TestCases @(
+		@{ Count = '10' }, @{ Count = '500' }, @{ Count = '501' }
+	) {
+		param($Count)
+		$script:graphFixture.UserCount = $Count
+		$result = Invoke-Creation
+		$result.Status | Should -Be 'Created'
+		$result.ApprovalStages | Should -Be 2
+		(Get-PostedBody '/assignmentPolicies').requestApprovalSettings.stages[1].primaryApprovers[0].userId | Should -Be $script:ownerId
+	}
+
 	It 'uses one manager stage for an empty group without requiring owners' {
 		$script:graphFixture.UserCount = '0'
 		(Get-Content -LiteralPath $script:csvPath) -replace "$script:ownerId$", '' | Set-Content -LiteralPath $script:csvPath
@@ -605,13 +726,12 @@ Finance reporting - Read reports,View financial reports.,$script:groupId,$script
 		$owners[0].userId | Should -Be $script:ownerId
 	}
 
-	It 'fails a large group without application owners before any writes' {
+	It 'uses only the manager stage for a large group without application owners' {
 		$script:graphFixture.UserCount = '501'
 		(Get-Content -LiteralPath $script:csvPath) -replace "$script:ownerId$", '' | Set-Content -LiteralPath $script:csvPath
 		$result = Invoke-Creation
-		$result.Status | Should -Be 'Failed'
-		$result.Reason | Should -Match 'require AppOwnerIds'
-		$script:graphFixture.Writes.Count | Should -Be 0
+		$result.Status | Should -Be 'Created'
+		$result.ApprovalStages | Should -Be 1
 	}
 
 	It 'creates a missing catalog and imports the group with bounded readiness retries' {
@@ -647,7 +767,7 @@ Finance reporting - Read reports,View financial reports.,$script:groupId,$script
 		$script:graphFixture.ResourceExists = $false
 		$result = Invoke-Creation -Preview
 		$result.Status | Should -Be 'Would be created'
-		$result.ApprovalStages | Should -Be 1
+		$result.ApprovalStages | Should -Be 2
 		$result.ManualAction | Should -Match 'Bypass approval'
 		Should -Invoke Invoke-MgGraphRequest -Exactly -Times 0 -ParameterFilter { $Method -ne 'GET' }
 	}

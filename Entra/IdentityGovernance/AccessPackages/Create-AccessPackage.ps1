@@ -20,23 +20,23 @@ For XLSX, install ImportExcel and use the first worksheet. Access Package Name
 sets the name; GroupId accepts one or more Entra group object IDs separated
 by commas, semicolons, or line breaks. When GroupId is present, Access Group
 is ignored. Older workbooks can still use Access Group.
-Approver 1 List must be <Employee Manager>. Approver 2 and Approver 3 accept
-user object IDs, UPNs, or mail addresses separated by semicolons, commas, or line breaks.
-Use NA in Approver 3 to omit the third stage.
+Each workbook approval stage accepts <Employee Manager>, <Line Manager>,
+<Resource Owner>, or user object IDs, UPNs, or mail addresses separated by
+semicolons, commas, or line breaks. Resource owners are captured from all
+listed groups as named users. Use NA to omit a later stage.
 Names and descriptions must use business-friendly application and access terms.
 Names must not contain "Access Package", "AP", or "SG", or identify the owner.
 
 All directory member users, excluding guests, can request access. Managers can
 request on behalf of their employees; authorized administrators retain their
 standard assignment permissions. Justification and approval are required.
-CSV uses manager approval, adding application owners above 500 transitive
-users. XLSX uses its specified stages, with stage 2 still required above
-500 users (DefaultAppOwnerIds can fill a blank stage 2). Each stage allows 14 days.
+CSV uses manager approval and adds a stage when application owners are supplied.
+XLSX uses its specified stages regardless of group size. Each stage allows 14 days.
 Assignments expire after 365 days. Custom schedules and approved extensions
 are enabled. Assignment emails are enabled; access reviews are disabled.
 
-MANUAL STEP: Enable "Bypass approval stage if manager is the requester and
-approver" in the Entra portal for each new policy. The public Graph policy
+MANUAL STEP: For policies with a manager approval stage, enable "Bypass approval
+stage if manager is the requester and approver" in the Entra portal. The public Graph policy
 schema does not expose this switch. The script does not claim to configure it.
 
 Existing packages with the same name in the catalog are skipped, not updated.
@@ -288,6 +288,58 @@ function Get-WorkbookApproverIds {
 	}
 }
 
+function Get-WorkbookApprovalStage {
+	param([string]$Text, [string]$Column, [string[]]$GroupIds)
+
+	$tokens = @($Text -split '[;,\r\n]+' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+	if (-not $tokens.Count) { throw "$Column must specify an approver." }
+	$approvers = [System.Collections.Generic.List[object]]::new()
+	$userIds = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+	$hasManager = $false
+	$hasOwners = $false
+	foreach ($token in $tokens) {
+		$kind = $token.Trim()
+		if ($kind -match '^<\s*(.*?)\s*>$') { $kind = $Matches[1] }
+		if ($kind -match '^(?:Employee|Line|Recipient.s)\s+Manager$|^Manager$') {
+			$hasManager = $true
+			continue
+		}
+		if ($kind -match '^(?:Resource|Group)\s+Owner(?:s)?$') {
+			$hasOwners = $true
+			continue
+		}
+		if ($kind -match '^(?:Self(?:\s*[- ]?\s*Review)?|Request(?:or|er))$') {
+			throw "$Column`: self-review is not supported as request approval. Access reviews are separate and disabled."
+		}
+		foreach ($id in @(Get-WorkbookApproverIds -Text $token -Column $Column)) { $null = $userIds.Add("$id") }
+	}
+	if ($hasOwners) {
+		foreach ($groupId in $GroupIds) {
+			$owners = @(Get-GraphCollection -Uri "/v1.0/groups/$groupId/owners" -Select 'id')
+			if (@($owners | Where-Object { -not $_.'@odata.type' }).Count) {
+				throw "$Column`: owner type unavailable for group '$groupId'; cannot safely resolve resource owners."
+			}
+			$users = @($owners | Where-Object { $_.'@odata.type' -eq '#microsoft.graph.user' })
+			if (-not $users.Count) { throw "$Column`: group '$groupId' has no human owners. Specify named approvers instead." }
+			foreach ($user in $users) {
+				$id = [guid]::Empty
+				if (-not [guid]::TryParse("$($user.id)", [ref]$id) -or $id -eq [guid]::Empty) {
+					throw "$Column`: Graph returned a group owner without a valid user ID for '$groupId'."
+				}
+				$null = $userIds.Add("$id")
+			}
+		}
+	}
+	if ($hasManager) { $approvers.Add(@{ '@odata.type' = '#microsoft.graph.targetManager'; managerLevel = 1 }) }
+	if ($userIds.Count) {
+		foreach ($approver in @(ConvertTo-UserApprovers -Ids @($userIds | ForEach-Object { [guid]$_ }))) { $approvers.Add($approver) }
+	}
+	$fallbacks = @()
+	if ($hasManager) { $fallbacks = @($fallbackApprovers) }
+	$stage = New-PackageApprovalStage -Approvers $approvers.ToArray() -Fallbacks $fallbacks
+	[pscustomobject]@{ Stage = $stage; HasManager = $hasManager; HasResourceOwners = $hasOwners }
+}
+
 function Get-WorkbookGroupIds {
 	param([string]$Text, [string]$Column)
 
@@ -358,6 +410,7 @@ function Get-PackageApproverLabel {
 	if ($Approver.'@odata.type' -eq '#microsoft.graph.targetManager') {
 		return "Recipient's direct manager"
 	}
+	if (-not $Approver.userId) { throw "Invalid approver: $($Approver | ConvertTo-Json -Compress -Depth 10)" }
 	$user = $validatedUsers[$Approver.userId]
 	$identity = if ($user.userPrincipalName) { $user.userPrincipalName }
 		elseif ($user.mail) { $user.mail }
@@ -512,7 +565,7 @@ if ($catalog -and $catalog.state -ne 'published') {
 	throw "Catalog '$CatalogName' is not published. Publish it before creating requestable access packages."
 }
 
-Write-Warning "Manual step required for every new policy: $manualAction"
+Write-Warning "Manual step required for new policies with a manager approval stage: $manualAction"
 $results = [System.Collections.Generic.List[object]]::new()
 $processedNames = @{}
 $backfillNames = @{}
@@ -604,14 +657,15 @@ foreach ($row in $rows) {
 		}
 
 		if (-not $result.Status) {
+			$stageOne = ''
 			$stageTwo = ''
 			$stageThree = ''
 			if ($isWorkbook) {
-				if ((Get-InputText $row 'Approver 1 List') -notmatch '^(?:<\s*Employee\s+Manager\s*>|Employee\s+Manager)$') {
-					throw 'Approver 1 List must be <Employee Manager>. Other stage 1 approvers are not supported.'
-				}
+				$stageOne = Get-InputText $row 'Approver 1 List'
+				if (-not $stageOne -or $stageOne -eq 'NA') { throw 'Approver 1 List must specify an approver.' }
 				$stageTwo = Get-InputText $row 'Approver 2'
 				$stageThree = Get-InputText $row 'Approver 3'
+				if ($stageTwo -eq 'NA') { $stageTwo = '' }
 				if ($stageThree -eq 'NA') { $stageThree = '' }
 				if ($stageThree -and -not $stageTwo) { throw 'Approver 3 requires Approver 2 to be populated.' }
 			}
@@ -635,37 +689,39 @@ foreach ($row in $rows) {
 			})
 			$result.GroupNames = @(foreach ($plan in $groupPlans) { $plan.Group.DisplayName })
 			$result.UserCount = $userCount
-			$ownerIds = @($DefaultAppOwnerIds)
+			$stageOwnerSnapshot = @()
 			if ($isWorkbook) {
-				if ($stageTwo) { $ownerIds = @(Get-WorkbookApproverIds -Text $stageTwo -Column 'Approver 2') }
-				elseif ($userCount -le 500) { $ownerIds = @() }
-			}
-			elseif (-not [string]::IsNullOrWhiteSpace($row.AppOwnerIds)) {
-				$ownerIds = @(foreach ($value in $row.AppOwnerIds.Split(';')) {
-					$ownerId = [guid]::Empty
-					if (-not [guid]::TryParse($value.Trim(), [ref]$ownerId) -or $ownerId -eq [guid]::Empty) {
-						throw "AppOwnerIds contains an invalid user GUID: '$value'."
-					}
-					$ownerId
+				$stageInputs = @(@{ Column = 'Approver 1 List'; Text = $stageOne }, @{ Column = 'Approver 2'; Text = $stageTwo }, @{ Column = 'Approver 3'; Text = $stageThree })
+				$resolved = @(foreach ($inputStage in $stageInputs) {
+					if ($inputStage.Text) { Get-WorkbookApprovalStage -Text $inputStage.Text -Column $inputStage.Column -GroupIds $result.GroupIds }
 				})
+				if (@($resolved | Where-Object HasManager).Count -gt 1) {
+					throw 'Manager approval can only be selected in one approval stage.'
+				}
+				$stages = @($resolved | ForEach-Object { $_.Stage })
+				$stageOwnerSnapshot = @($resolved | ForEach-Object { $_.HasResourceOwners })
 			}
-			$ownerApprovers = if ($ownerIds.Count) { @(ConvertTo-UserApprovers -Ids $ownerIds) } else { @() }
-			if ($userCount -gt 500 -and -not $ownerApprovers.Count) {
-				if ($isWorkbook) { throw 'Groups with more than 500 users require Approver 2 or DefaultAppOwnerIds.' }
-				throw 'Groups with more than 500 users require AppOwnerIds or DefaultAppOwnerIds.'
-			}
-
-			$stages = @(New-PackageApprovalStage -Approvers @(@{ '@odata.type' = '#microsoft.graph.targetManager'; managerLevel = 1 }) -Fallbacks $fallbackApprovers)
-			if ($userCount -gt 500 -or $stageTwo) { $stages += New-PackageApprovalStage -Approvers $ownerApprovers }
-			if ($stageThree) {
-				$thirdIds = @(Get-WorkbookApproverIds -Text $stageThree -Column 'Approver 3')
-				$stages += New-PackageApprovalStage -Approvers @(ConvertTo-UserApprovers -Ids $thirdIds)
+			else {
+				$ownerIds = @($DefaultAppOwnerIds)
+				if (-not [string]::IsNullOrWhiteSpace($row.AppOwnerIds)) {
+					$ownerIds = @(foreach ($value in $row.AppOwnerIds.Split(';')) {
+						$ownerId = [guid]::Empty
+						if (-not [guid]::TryParse($value.Trim(), [ref]$ownerId) -or $ownerId -eq [guid]::Empty) {
+							throw "AppOwnerIds contains an invalid user GUID: '$value'."
+						}
+						$ownerId
+					})
+				}
+				$stages = @(New-PackageApprovalStage -Approvers @(@{ '@odata.type' = '#microsoft.graph.targetManager'; managerLevel = 1 }) -Fallbacks $fallbackApprovers)
+				if ($ownerIds.Count) { $stages += New-PackageApprovalStage -Approvers @(ConvertTo-UserApprovers -Ids $ownerIds) }
 			}
 			$result.ApprovalStages = $stages.Count
+			$hasManagerStage = @($stages | Where-Object { @($_.primaryApprovers | Where-Object { $_.'@odata.type' -eq '#microsoft.graph.targetManager' }).Count }).Count -gt 0
 			$result.ApprovalStageDetails = @(for ($i = 0; $i -lt $stages.Count; $i++) {
 				$stage = $stages[$i]
 				$approvers = @($stage.primaryApprovers | ForEach-Object { Get-PackageApproverLabel $_ }) -join '; '
 				$line = "Stage $($i + 1): $approvers"
+				if ($isWorkbook -and $stageOwnerSnapshot[$i]) { $line += ' (includes current group owners captured as named users)' }
 				if ($stage.fallbackPrimaryApprovers.Count) {
 					$fallbacks = @($stage.fallbackPrimaryApprovers | ForEach-Object { Get-PackageApproverLabel $_ }) -join '; '
 					$line += " (if no manager: $fallbacks)"
@@ -676,7 +732,7 @@ foreach ($row in $rows) {
 			$groupLabels = @($groupPlans | ForEach-Object { "$($_.Group.DisplayName) [$($_.Group.Id)]" }) -join '; '
 			if ($PSCmdlet.ShouldProcess(
 				"$name (groups: $groupLabels; catalog '$CatalogName')",
-				"Create missing catalog/resource, access package and $($result.ApprovalStages)-stage policy; manager bypass requires a manual portal step"
+				"Create missing catalog/resource, access package and $($result.ApprovalStages)-stage policy"
 			)) {
 				if (-not $catalog) {
 					$catalog = Send-GraphBody -Uri "$baseUri/catalogs" -Body @{
@@ -755,7 +811,7 @@ foreach ($row in $rows) {
 				$result.Status = if ($WhatIfPreference) { 'Would be created' } else { 'Not created' }
 			}
 			if ($result.Status -in 'Created', 'Would be created') {
-				$result.ManualAction = $manualAction
+				if ($hasManagerStage) { $result.ManualAction = $manualAction }
 				$processedNames[$name] = $true
 				Write-Host "$($result.Status): $name"
 				Write-Host 'Approval for new and extension requests for directory members (excluding guests):'
