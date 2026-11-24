@@ -102,6 +102,10 @@ Connect-MgGraph -Scopes 'AccessReview.ReadWrite.All','Application.Read.All','Gro
 .\AccessPackages\Export-DiscoveryAccessPackages.ps1 -DiscoveryPath '.\discovery.json' `
     -WorkbookPath '.\packages.xlsx'
 
+# Alternatively, use one package per discovered group without application-assignment reads:
+.\AccessPackages\Export-DiscoveryAccessPackages.ps1 -DiscoveryPath '.\discovery.json' `
+    -WorkbookPath '.\packages-per-group.xlsx' -OnePackagePerGroup
+
 # Edit the workbook, then preview and review every result before removing WhatIf.
 .\AccessPackages\Create-AccessPackage.ps1 -InputPath '.\packages.xlsx' `
     -CatalogName 'Business applications' -FallbackApproverIds '<fallback user object ID>' -WhatIf
@@ -115,7 +119,7 @@ Both files and the workbook require new filenames. Store them in a private
 directory: they contain application and group information. Discovery records
 direct-user counts but not user membership lists.
 
-Each directly assigned root proposes one package with the root and every nested
+By default, each directly assigned root proposes one package with the root and every nested
 descendant as Member resources. Assigning the package adds users to **all** of
 these groups. Shared groups are included in each root's separate package, not
 merged into one package. The description lists the included groups and their
@@ -126,6 +130,18 @@ Reading group application assignments requires delegated or application
 `Directory.Read.All` (or `Directory.ReadWrite.All` or
 `AppRoleAssignment.ReadWrite.All`), admin consent, and any required delegated
 directory role.
+
+With `-OnePackagePerGroup`, each unique discovered root or nested group has its
+own package containing only that group, including groups with no direct users.
+A group shared by roots or applications produces one package; the first
+discovered application's ID is retained as its discovery source. Its suggested
+package name uses that application's name, but nested-group discovery does not
+prove that group is directly assigned to the application or that its members
+have effective application access. The description identifies the group but
+does not list its applications. This mode does not request group application
+assignments and does not require `Directory.Read.All` for that lookup. Other
+discovery, package-creation and backfill permissions still apply. Before
+creation, the source application's discovery and group name are rechecked.
 
 The `Topology` sheet shows each discovered application-assigned root and its
 nested descendants, including candidates that are not ready. A group can appear
@@ -140,16 +156,17 @@ suggestion: the `Role` value is included in the published description. Unknown
 values are left blank. Blocked rows are not imported; resolve them and
 regenerate the workbook. Retain the discovery ID columns and `Discovery metadata`
 sheet. Before creation, the script rechecks the generated description; changed
-group names or application assignments require a regenerated workbook.
+group names or, in the default mode, application assignments require a
+regenerated workbook.
 
 The export and creation recheck enumerate packages across catalogs and compare
 their complete resource roles and scopes. A confirmed active exact match is
 skipped; shared groups and partial overlaps with other packages do not alone
-block new version 3 workbooks. A matching group set with extra roles, uncertain
+block new version 3 or single-group version 4 workbooks. A matching group set with extra roles, uncertain
 activity, incomplete reads, or forbidden Graph reads still require manual
 review. Policies without enough information to determine activity are not
 assumed inactive. Older version 1 and 2 workbooks retain their original
-shared-group safeguards and descriptions; regenerate them to use this workflow.
+shared-group safeguards and descriptions; regenerate them to use these modes.
 To verify tenant-wide visibility, this workflow currently requires a delegated
 connection with a **directly assigned active directory-wide** Identity Governance
 Administrator or Global Administrator role, or an app-only connection whose

@@ -109,7 +109,7 @@ if ($isWorkbook) {
 		try {
 			$metadata = $package.Workbook.Worksheets['Discovery metadata']
 			$metadataVersion = "$($metadata.Cells[1, 2].Value)"
-			if ($metadata.Cells[1, 1].Value -ne 'Discovery workbook version' -or $metadataVersion -notin @('1', '2', '3') -or
+			if ($metadata.Cells[1, 1].Value -ne 'Discovery workbook version' -or $metadataVersion -notin @('1', '2', '3', '4') -or
 				-not $metadata.Dimension -or $metadata.Dimension.End.Row -lt 2) {
 				throw 'Discovery workbook metadata is invalid.'
 			}
@@ -126,7 +126,7 @@ if ($isWorkbook) {
 			}
 			if (($metadataVersion -eq '1' -and $discoveryApplicationIds.Count -ne 1) -or
 				($metadataVersion -eq '2' -and $discoveryApplicationIds.Count -lt 2) -or
-				($metadataVersion -eq '3' -and $discoveryApplicationIds.Count -lt 1)) {
+				($metadataVersion -in '3', '4' -and $discoveryApplicationIds.Count -lt 1)) {
 				throw 'Discovery workbook metadata does not match its version.'
 			}
 		}
@@ -600,7 +600,7 @@ if ($isDiscoveryWorkbook) {
 		try {
 			$currentDiscoveries["$applicationId"] = Get-CurrentPackageDiscovery -ServicePrincipalId ([guid]$applicationId) `
 				-ReviewScriptPath $reviewScript -TemporaryParent ([IO.Path]::GetDirectoryName($workbookPath)) `
-				-AllowSharedGroups:($metadataVersion -eq '3')
+				-AllowSharedGroups:($metadataVersion -in '3', '4')
 		}
 		catch { throw "Unable to refresh application '$applicationId' group discovery; no packages were created. $($_.Exception.Message)" }
 	}
@@ -674,7 +674,7 @@ foreach ($row in $rows) {
 			if ($isWorkbook) { throw 'Access Package Name and description text (Description or details) are required.' }
 			throw 'A name (Name, or both Application and Role) and description text (Description or details) are required.'
 		}
-		if ($isDiscoveryWorkbook -and $metadataVersion -ne '3' -and -not $description.Contains((Get-DiscoveryPackageWarning))) {
+		if ($isDiscoveryWorkbook -and $metadataVersion -in '1', '2' -and -not $description.Contains((Get-DiscoveryPackageWarning))) {
 			throw 'Discovery package descriptions must retain the generated warning about all-group access and possible other application access.'
 		}
 		if ($name -match '(?i)(?<![a-z0-9])(?:access[\s_-]*package|ap|sg)(?![a-z0-9])') {
@@ -795,7 +795,8 @@ foreach ($row in $rows) {
 					$currentDiscovery = $currentDiscoveries["$rowApplication"]
 					$coverage = Test-DiscoveryPackageCandidate -Discovery $currentDiscovery `
 						-RootGroupId ([guid](Get-InputText $row 'Discovery RootGroupId')) -GroupIds $result.GroupIds `
-						-ServicePrincipalId $rowApplication -AllowSharedGroups:($metadataVersion -eq '3')
+						-ServicePrincipalId $rowApplication -AllowSharedGroups:($metadataVersion -in '3', '4') `
+						-SingleGroup:($metadataVersion -eq '4')
 					if ($coverage.Status -ne 'Ready') { $result.Status = $coverage.Status; $result.Reason = $coverage.Reason }
 					elseif ($metadataVersion -eq '3') {
 						try {
@@ -809,6 +810,19 @@ foreach ($row in $rows) {
 						catch {
 							$result.Status = 'Manual review'
 							$result.Reason = "Unable to verify group application assignments: $($_.Exception.Message)"
+						}
+					}
+					elseif ($metadataVersion -eq '4') {
+						try {
+							$currentDescription = Get-DiscoverySingleGroupDescription -GroupId $result.GroupIds[0] -Groups $currentDiscovery.Groups
+							if (-not $description.Contains($currentDescription)) {
+								$result.Status = 'Manual review'
+								$result.Reason = 'The group name in the description has changed. Regenerate the workbook.'
+							}
+						}
+						catch {
+							$result.Status = 'Manual review'
+							$result.Reason = "Unable to verify the group description: $($_.Exception.Message)"
 						}
 					}
 				}

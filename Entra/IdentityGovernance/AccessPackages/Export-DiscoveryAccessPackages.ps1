@@ -5,11 +5,15 @@ Creates a draft access-package workbook from an access-review discovery export.
 This is a read-only preview. Complete package names and approval stages before
 using the package creation script. Uncertain resources require manual review
 and are not placed on the first worksheet.
+.PARAMETER OnePackagePerGroup
+Propose one package per unique discovered group instead of one per root and
+its descendants. Does not read or list the groups' application assignments.
 #>
 [CmdletBinding()]
 param(
 	[Parameter(Mandatory)][string]$DiscoveryPath,
-	[Parameter(Mandatory)][string]$WorkbookPath
+	[Parameter(Mandatory)][string]$WorkbookPath,
+	[switch]$OnePackagePerGroup
 )
 
 $ErrorActionPreference = 'Stop'
@@ -28,9 +32,24 @@ if (-not [IO.Directory]::Exists([IO.Path]::GetDirectoryName($outputPath))) { thr
 $data = Get-Content -LiteralPath $inputPath -Raw | ConvertFrom-Json
 $discovery = Get-PackageDiscoveryCandidates -Data $data -AllowSharedGroups
 $applicationIds = @($discovery.ServicePrincipalIds)
-$workbookVersion = 3
+$workbookVersion = if ($OnePackagePerGroup) { 4 } else { 3 }
 $groups = $discovery.Groups
-$candidates = $discovery.Candidates
+$candidates = if ($OnePackagePerGroup) {
+	$seenGroups = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+	@(
+		foreach ($source in $discovery.Candidates) {
+			foreach ($id in $source.GroupIds) {
+				if ($seenGroups.Add($id)) {
+					[pscustomobject]@{
+						ServicePrincipalId = $source.ServicePrincipalId; ServicePrincipalName = $source.ServicePrincipalName
+						Root = $id; GroupIds = @($id); Status = 'Ready'; Reason = ''; Description = ''
+					}
+				}
+			}
+		}
+	)
+}
+else { $discovery.Candidates }
 try { $inventory = @(Get-PackageCoverageInventory); $inventoryError = $null }
 catch { $inventory = @(); $inventoryError = $_.Exception.Message }
 $eligibility = @{}
@@ -54,10 +73,18 @@ foreach ($candidate in $candidates) {
 		if ($eligibility[$id]) { $reasons.Add($eligibility[$id]) }
 	}
 	try {
-		$candidate.Description = Get-DiscoveryPackageDescription -GroupIds $candidate.GroupIds `
-			-Groups $groups -ApplicationCache $applicationCache
+		if ($OnePackagePerGroup) {
+			$candidate.Description = Get-DiscoverySingleGroupDescription -GroupId $candidate.Root -Groups $groups
+		}
+		else {
+			$candidate.Description = Get-DiscoveryPackageDescription -GroupIds $candidate.GroupIds `
+				-Groups $groups -ApplicationCache $applicationCache
+		}
 	}
-	catch { $reasons.Add("Cannot establish group application assignments: $($_.Exception.Message)") }
+	catch {
+		$reason = if ($OnePackagePerGroup) { 'Cannot establish group description' } else { 'Cannot establish group application assignments' }
+		$reasons.Add("${reason}: $($_.Exception.Message)")
+	}
 	if ($reasons.Count -and $candidate.Status -ne 'Skipped') { $candidate.Status = 'Manual review' }
 	$candidate.Reason = $reasons -join ' '
 }
@@ -115,6 +142,10 @@ try {
 			for ($i = 0; $i -lt $values.Count; $i++) { $blocked.Cells[$blockedRow, ($i + 1)].Value = [string]$values[$i] }
 			$blockedRow++
 		}
+	}
+	foreach ($candidate in $discovery.Candidates) {
+		$rootName = [string]$groups[$candidate.Root].DisplayName
+		$appName = [string]$candidate.ServicePrincipalName
 		foreach ($id in $candidate.GroupIds) {
 			$parents = @($candidate.GroupIds | Where-Object { $groups[$_].ChildIds -contains $id })
 			$values = @($candidate.Root, $rootName, $id, $groups[$id].DisplayName, ($parents -join ';'),

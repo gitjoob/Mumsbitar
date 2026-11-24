@@ -135,6 +135,20 @@ Copy-Item -LiteralPath (Join-Path $PSScriptRoot $snapshot) -Destination $Discove
 		Close-ExcelPackage -ExcelPackage $excel
 		Join-Path $packages 'Create-AccessPackage.ps1'
 	}
+
+	function New-SingleGroupDiscoveryWorkbook {
+		$path = New-DiscoveryWorkbookFixture -Current
+		$reviews = Join-Path (Split-Path (Split-Path $path -Parent) -Parent) 'AccessReviews'
+		$script:csvPath = Join-Path $TestDrive "single-group-$([guid]::NewGuid()).xlsx"
+		& (Join-Path $PSScriptRoot '../Export-DiscoveryAccessPackages.ps1') `
+			-DiscoveryPath (Join-Path $reviews 'snapshot.json') -WorkbookPath $script:csvPath -OnePackagePerGroup
+		$excel = Open-ExcelPackage -Path $script:csvPath
+		$sheet = $excel.Workbook.Worksheets['Packages']
+		$sheet.Cells[2, 7].Value = 'Finance reporting - Read reports'
+		$sheet.Cells[2, 8].Value = '<Employee Manager>'
+		Close-ExcelPackage -ExcelPackage $excel
+		$path
+	}
 }
 
 Describe 'Create-AccessPackage' {
@@ -486,6 +500,81 @@ Finance reporting - Read reports,View financial reports.,$script:groupId,$script
 			$result = & $path -InputPath $script:csvPath -CatalogName $script:graphFixture.CatalogName `
 				-FallbackApproverIds $script:fallbackId -WhatIf -WarningAction SilentlyContinue
 			$result.Status | Should -Be 'Would be created'
+			$script:graphFixture.Writes | Should -HaveCount 0
+		}
+
+		It 'creates a single-group export and backfills direct members without application assignment reads' {
+			Mock Get-MgContext { @{ AuthType = 'AppOnly'; Scopes = @('EntitlementManagement.ReadWrite.All', 'Group.ReadWrite.All', 'User.Read.All') } }
+			$path = New-SingleGroupDiscoveryWorkbook
+			$script:graphFixture.RequestFailurePattern = '/appRoleAssignments$'
+			$script:graphFixture.DirectMembers[$script:groupId] = @(
+				[pscustomobject]@{ Id = $script:ownerId; UserType = 'Member' },
+				[pscustomobject]@{ Id = $script:fallbackId; UserType = 'Guest' }
+			)
+			$result = & $path -InputPath $script:csvPath -CatalogName $script:graphFixture.CatalogName `
+				-FallbackApproverIds $script:fallbackId -Confirm:$false -WarningAction SilentlyContinue
+			$result.Status | Should -Be 'Created'
+			$result.AssignmentBackfill | Should -Be 'Processed'
+			$result.AssignmentsSubmitted | Should -Be 1
+			(Get-PostedBody '/assignmentRequests').assignment.targetId | Should -Be $script:ownerId
+			Should -Invoke Invoke-MgGraphRequest -Times 0 -Exactly -ParameterFilter { $Uri -like '*/appRoleAssignments' }
+		}
+
+		It 'validates a nested single-group package against refreshed application discovery' {
+			Mock Get-MgContext { @{ AuthType = 'AppOnly'; Scopes = @('EntitlementManagement.ReadWrite.All', 'Group.ReadWrite.All', 'User.Read.All') } }
+			$path = New-DiscoveryWorkbookFixture -Shared
+			$reviews = Join-Path (Split-Path (Split-Path $path -Parent) -Parent) 'AccessReviews'
+			$script:csvPath = Join-Path $TestDrive "single-nested-$([guid]::NewGuid()).xlsx"
+			& (Join-Path $PSScriptRoot '../Export-DiscoveryAccessPackages.ps1') `
+				-DiscoveryPath (Join-Path $reviews 'snapshot.json') -WorkbookPath $script:csvPath -OnePackagePerGroup
+			$excel = Open-ExcelPackage -Path $script:csvPath
+			$sheet = $excel.Workbook.Worksheets['Packages']
+			for ($i = 2; $i -le 3; $i++) {
+				$sheet.Cells[$i, 7].Value = "Group package $i"
+				$sheet.Cells[$i, 8].Value = '<Employee Manager>'
+			}
+			Close-ExcelPackage -ExcelPackage $excel
+			$preview = @(& $path -InputPath $script:csvPath -CatalogName $script:graphFixture.CatalogName `
+				-FallbackApproverIds $script:fallbackId -WhatIf -WarningAction SilentlyContinue)
+			$preview.Status | Should -Be @('Would be created', 'Would be created')
+			$data = Get-Content -LiteralPath (Join-Path $reviews 'snapshot.json') -Raw | ConvertFrom-Json
+			$data.Groups[0].ChildIds = @()
+			$data | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $reviews 'snapshot.json')
+			$preview = @(& $path -InputPath $script:csvPath -CatalogName $script:graphFixture.CatalogName `
+				-FallbackApproverIds $script:fallbackId -WhatIf -WarningAction SilentlyContinue)
+			$nested = @($preview | Where-Object GroupId -eq '55555555-5555-5555-5555-555555555555')[0]
+			$nested.Status | Should -Be 'Manual review'
+			$nested.Reason | Should -Match 'no longer in the application discovery'
+			$script:graphFixture.Writes | Should -HaveCount 0
+		}
+
+		It 'blocks a single-group workbook when the group name changes' {
+			$path = New-SingleGroupDiscoveryWorkbook
+			$reviews = Join-Path (Split-Path (Split-Path $path -Parent) -Parent) 'AccessReviews'
+			$data = Get-Content -LiteralPath (Join-Path $reviews 'snapshot.json') -Raw | ConvertFrom-Json
+			$data.Groups[0].DisplayName = 'Renamed group'
+			$data | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $reviews 'snapshot.json')
+			$result = & $path -InputPath $script:csvPath -CatalogName $script:graphFixture.CatalogName `
+				-FallbackApproverIds $script:fallbackId -Confirm:$false -WarningAction SilentlyContinue
+			$result.Status | Should -Be 'Manual review'
+			$result.Reason | Should -Match 'group name.*changed'
+			$script:graphFixture.Writes | Should -HaveCount 0
+		}
+
+		It 'blocks a single-group workbook if an extra group is added' {
+			$path = New-SingleGroupDiscoveryWorkbook
+			$extra = '55555555-5555-5555-5555-555555555555'
+			$script:graphFixture.AdditionalGroups[$extra] = @{
+				id = $extra; displayName = 'Other Group'; groupTypes = @()
+				onPremisesSyncEnabled = $false; mailEnabled = $false; securityEnabled = $true; isAssignableToRole = $false
+			}
+			$excel = Open-ExcelPackage -Path $script:csvPath
+			$excel.Workbook.Worksheets['Packages'].Cells[2, 5].Value = "$script:groupId;$extra"
+			Close-ExcelPackage -ExcelPackage $excel
+			$result = & $path -InputPath $script:csvPath -CatalogName $script:graphFixture.CatalogName `
+				-FallbackApproverIds $script:fallbackId -Confirm:$false -WarningAction SilentlyContinue
+			$result.Status | Should -Be 'Manual review'
+			$result.Reason | Should -Match 'exactly its original discovered group'
 			$script:graphFixture.Writes | Should -HaveCount 0
 		}
 

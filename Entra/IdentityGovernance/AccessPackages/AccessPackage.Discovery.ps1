@@ -138,6 +138,14 @@ function Get-DiscoveryPackageDescription {
 	"Included groups: $($names -join '; '). Direct Entra application assignments for these groups: $appText."
 }
 
+function Get-DiscoverySingleGroupDescription {
+	param([Parameter(Mandatory)][string]$GroupId, [Parameter(Mandatory)][hashtable]$Groups)
+	if (-not $Groups.ContainsKey($GroupId) -or [string]::IsNullOrWhiteSpace([string]$Groups[$GroupId].DisplayName)) {
+		throw "Cannot establish the name of group '$GroupId'."
+	}
+	"Included group: $($Groups[$GroupId].DisplayName)."
+}
+
 function Get-CurrentPackageDiscovery {
 	param(
 		[Parameter(Mandatory)][guid]$ServicePrincipalId,
@@ -173,18 +181,31 @@ function Test-DiscoveryPackageCandidate {
 		[Parameter(Mandatory)][guid]$RootGroupId,
 		[Parameter(Mandatory)][string[]]$GroupIds,
 		[guid]$ServicePrincipalId,
-		[switch]$AllowSharedGroups
+		[switch]$AllowSharedGroups,
+		[switch]$SingleGroup
 	)
 	try {
-		$candidate = @($discovery.Candidates | Where-Object {
-			$_.Root -eq "$RootGroupId" -and (-not $ServicePrincipalId -or $_.ServicePrincipalId -eq "$ServicePrincipalId")
-		})
-		if ($candidate.Count -ne 1) { throw 'The root is no longer directly assigned to the application.' }
-		if ($candidate[0].Status -ne 'Ready') { throw $candidate[0].Reason }
 		$actual = @($GroupIds | Sort-Object -Unique)
-		$expected = @($candidate[0].GroupIds | Sort-Object -Unique)
-		if ($actual.Count -ne $expected.Count -or @(Compare-Object $actual $expected).Count) {
-			throw 'The workbook groups do not match the current root and descendant groups. Regenerate the workbook.'
+		if ($SingleGroup) {
+			if ($actual.Count -ne 1 -or $actual[0] -ne "$RootGroupId") {
+				throw 'The workbook must contain exactly its original discovered group. Regenerate the workbook.'
+			}
+			$reachable = @($Discovery.Candidates | Where-Object {
+				(-not $ServicePrincipalId -or $_.ServicePrincipalId -eq "$ServicePrincipalId") -and
+					$_.GroupIds -contains "$RootGroupId"
+			})
+			if (-not $reachable.Count) { throw 'The group is no longer in the application discovery. Regenerate the workbook.' }
+		}
+		else {
+			$candidate = @($Discovery.Candidates | Where-Object {
+				$_.Root -eq "$RootGroupId" -and (-not $ServicePrincipalId -or $_.ServicePrincipalId -eq "$ServicePrincipalId")
+			})
+			if ($candidate.Count -ne 1) { throw 'The root is no longer directly assigned to the application.' }
+			if ($candidate[0].Status -ne 'Ready') { throw $candidate[0].Reason }
+			$expected = @($candidate[0].GroupIds | Sort-Object -Unique)
+			if ($actual.Count -ne $expected.Count -or @(Compare-Object $actual $expected).Count) {
+				throw 'The workbook groups do not match the current root and descendant groups. Regenerate the workbook.'
+			}
 		}
 		$inventory = @(Get-PackageCoverageInventory)
 		Get-PackageCoverageResult -GroupIds $actual -Inventory $inventory -AllowSharedGroups:$AllowSharedGroups

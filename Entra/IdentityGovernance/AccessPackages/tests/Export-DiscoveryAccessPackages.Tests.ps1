@@ -140,6 +140,35 @@ Describe 'Discovery workbook export' {
 		@(Import-Excel -Path $script:output -WorksheetName 'Manual review') | Should -HaveCount 0
 	}
 
+	It 'exports one package per unique discovered group without application assignment permission' {
+		Mock Get-MgContext { @{ AuthType = 'AppOnly'; Scopes = @('EntitlementManagement.Read.All', 'Group.Read.All') } }
+		$script:fixture.SchemaVersion = 2
+		$script:fixture.Remove('ServicePrincipalId')
+		$script:fixture.Applications += @{
+			ServicePrincipalId = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb'; ServicePrincipalName = 'Second app'; GroupIds = @($script:other)
+		}
+		$script:fixture.Groups[0].DirectUserCount = 0
+		$script:fixture | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $script:input
+		& $script:exportPath -DiscoveryPath $script:input -WorkbookPath $script:output -OnePackagePerGroup
+		$rows = @(Import-Excel -Path $script:output -WorksheetName Packages)
+		$rows | Should -HaveCount 3
+		@($rows.GroupId | Sort-Object -Unique) | Should -HaveCount 3
+		$rows.GroupId | Should -Contain $script:root
+		$rows.GroupId | Should -Contain $script:child
+		$rows.GroupId | Should -Contain $script:other
+		foreach ($row in $rows) {
+			$row.GroupId | Should -Be $row.'Discovery RootGroupId'
+			$row.Description | Should -Match '^Included group: '
+			$row.Description | Should -Not -Match 'application assignments'
+		}
+		@(Import-Excel -Path $script:output -WorksheetName 'Manual review') | Should -HaveCount 0
+		@(Import-Excel -Path $script:output -WorksheetName Topology) | Should -HaveCount 5
+		$excel = Open-ExcelPackage -Path $script:output
+		try { $excel.Workbook.Worksheets['Discovery metadata'].Cells[1, 2].Value | Should -Be '4' }
+		finally { Close-ExcelPackage -ExcelPackage $excel -NoSave }
+		Should -Invoke Invoke-MgGraphRequest -Times 0 -Exactly -ParameterFilter { $Uri -like '*/appRoleAssignments' }
+	}
+
 	It 'supports an app-only connection with tenant-wide entitlement-management permission' {
 		Mock Get-MgContext { @{ AuthType = 'AppOnly'; Scopes = @('EntitlementManagement.Read.All', 'Directory.Read.All') } }
 		$script:fixture | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $script:input
