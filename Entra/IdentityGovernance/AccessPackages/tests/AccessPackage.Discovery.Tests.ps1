@@ -73,6 +73,36 @@ Describe 'Discovery package creation safeguards' {
 		$discovery.Candidates.Status | Should -Be @('Manual review', 'Manual review')
 	}
 
+	It 'can retain separate candidates when roots share a group' {
+		$script:data.Applications[0].GroupIds = @($script:root, $script:other)
+		$discovery = Get-PackageDiscoveryCandidates $script:data -AllowSharedGroups
+		$discovery.Candidates | Should -HaveCount 2
+		$discovery.Candidates.Status | Should -Be @('Ready', 'Ready')
+		foreach ($candidate in $discovery.Candidates) { $candidate.GroupIds | Should -Contain $script:child }
+	}
+
+	It 'describes only the applications directly assigned to the included groups' {
+		Mock Get-MgContext { @{ AuthType = 'AppOnly'; Scopes = @('Directory.Read.All') } }
+		Mock Get-PackageCoverageCollection {
+			@(@{ resourceId = $script:app; resourceDisplayName = 'Reporting' })
+		}
+		$groups = @{
+			$script:root = @{ DisplayName = 'Readers' }
+			$script:child = @{ DisplayName = 'Shared' }
+		}
+		$cache = @{}
+		$description = Get-DiscoveryPackageDescription -GroupIds @($script:root, $script:child) -Groups $groups -ApplicationCache $cache
+		$description | Should -Be 'Included groups: Readers; Shared. Direct Entra application assignments for these groups: Reporting.'
+		$null = Get-DiscoveryPackageDescription -GroupIds @($script:child) -Groups $groups -ApplicationCache $cache
+		Should -Invoke Get-PackageCoverageCollection -Exactly -Times 2
+	}
+
+	It 'rejects incomplete group application assignment data' {
+		Mock Get-MgContext { @{ AuthType = 'AppOnly'; Scopes = @('Directory.Read.All') } }
+		Mock Get-PackageCoverageCollection { @(@{ resourceId = $script:app }) }
+		{ Get-DiscoveryGroupApplications -GroupId $script:root } | Should -Throw '*incomplete application assignment*'
+	}
+
 	It 'refreshes discovery with WhatIf and removes only its own temporary files' {
 		$fixture = Join-Path $TestDrive "preview-$([guid]::NewGuid()).ps1"
 		$json = $script:data | ConvertTo-Json -Depth 10 -Compress

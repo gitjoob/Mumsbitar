@@ -40,7 +40,7 @@ BeforeAll {
 	}
 
 	function New-DiscoveryWorkbookFixture {
-		param([switch]$Combined)
+		param([switch]$Combined, [switch]$Current, [switch]$Shared)
 
 		$base = Join-Path $TestDrive "discovery-$([guid]::NewGuid())"
 		$packages = Join-Path $base 'AccessPackages'
@@ -52,17 +52,27 @@ BeforeAll {
 		$app = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
 		$secondApp = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb'
 		$secondGroup = '44444444-4444-4444-4444-444444444444'
+		$sharedGroup = '55555555-5555-5555-5555-555555555555'
+		if ($Shared) { $Combined = $true; $Current = $true }
 		$data = @{
 			SchemaVersion = 1; ServicePrincipalId = $app
 			Applications = @(@{ ServicePrincipalId = $app; ServicePrincipalName = 'First app'; GroupIds = @($script:groupId) })
-			Groups = @(@{ Id = $script:groupId; ChildIds = @() })
+			Groups = @(@{ Id = $script:groupId; DisplayName = 'SG_Finance_Reports'; ChildIds = @() })
+		}
+		if ($Shared) {
+			$data.Groups[0].ChildIds = @($sharedGroup)
+			$data.Groups += @{ Id = $sharedGroup; DisplayName = 'Shared Group'; ChildIds = @() }
 		}
 		$data | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $reviews 'snapshot.json')
 		if ($Combined) {
 			$secondData = @{
 				SchemaVersion = 1; ServicePrincipalId = $secondApp
 				Applications = @(@{ ServicePrincipalId = $secondApp; ServicePrincipalName = 'Second app'; GroupIds = @($secondGroup) })
-				Groups = @(@{ Id = $secondGroup; ChildIds = @() })
+				Groups = @(@{ Id = $secondGroup; DisplayName = 'SG_Operations'; ChildIds = @() })
+			}
+			if ($Shared) {
+				$secondData.Groups[0].ChildIds = @($sharedGroup)
+				$secondData.Groups += @{ Id = $sharedGroup; DisplayName = 'Shared Group'; ChildIds = @() }
 			}
 			$secondData | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $reviews 'snapshot-2.json')
 		}
@@ -74,21 +84,41 @@ $snapshot = if ("$ServicePrincipalId" -eq 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb'
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot $snapshot) -Destination $DiscoveryOutputPath -WhatIf:$false
 '@ | Set-Content -LiteralPath (Join-Path $reviews 'Create-AccessReview.ps1')
 		$warning = 'Assigning this package adds the user to every listed group and may grant access through other groups or applications. Nested membership does not establish effective application access.'
+		if ($Current) {
+			$warning = if ($Shared) {
+				'Included groups: SG_Finance_Reports; Shared Group. Direct Entra application assignments for these groups: First app; Shared app.'
+			}
+			else { 'Included groups: SG_Finance_Reports. Direct Entra application assignments for these groups: First app.' }
+			$script:graphFixture.AppAssignments[$script:groupId] = @(@{ resourceId = $app; resourceDisplayName = 'First app' })
+		}
 		$rows = @([pscustomobject][ordered]@{
 			Role = 'Reader'; Brand = 'Brand A'; Region = 'EMEA'; 'Potential Teams' = 'Finance'
-			GroupId = $script:groupId; Description = $warning; 'Access Package Name' = 'First app - Finance'
+			GroupId = $(if ($Shared) { "$script:groupId;$sharedGroup" } else { $script:groupId })
+			Description = $warning; 'Access Package Name' = 'First app - Finance'
 			'Approver 1 List' = '<Employee Manager>'; 'Approver 2' = ''; 'Approver 3' = ''
 			'Discovery ServicePrincipalId' = $app; 'Discovery RootGroupId' = $script:groupId
 		})
 		if ($Combined) {
 			$rows += [pscustomobject][ordered]@{
 				Role = 'Reader'; Brand = 'Brand B'; Region = 'EMEA'; 'Potential Teams' = 'Operations'
-				GroupId = $secondGroup; Description = $warning; 'Access Package Name' = 'Second app - Operations'
+				GroupId = $(if ($Shared) { "$secondGroup;$sharedGroup" } else { $secondGroup })
+				Description = $(if ($Shared) { 'Included groups: SG_Operations; Shared Group. Direct Entra application assignments for these groups: Second app; Shared app.' } else { $warning })
+				'Access Package Name' = 'Second app - Operations'
 				'Approver 1 List' = '<Employee Manager>'; 'Approver 2' = ''; 'Approver 3' = ''
 				'Discovery ServicePrincipalId' = $secondApp; 'Discovery RootGroupId' = $secondGroup
 			}
 			$script:graphFixture.AdditionalGroups[$secondGroup] = @{
 				id = $secondGroup; displayName = 'SG_Operations'; groupTypes = @()
+				onPremisesSyncEnabled = $false; mailEnabled = $false; securityEnabled = $true; isAssignableToRole = $false
+			}
+			if ($Current) {
+				$script:graphFixture.AppAssignments[$secondGroup] = @(@{ resourceId = $secondApp; resourceDisplayName = 'Second app' })
+			}
+		}
+		if ($Shared) {
+			$script:graphFixture.AppAssignments[$sharedGroup] = @(@{ resourceId = 'cccccccc-cccc-cccc-cccc-cccccccccccc'; resourceDisplayName = 'Shared app' })
+			$script:graphFixture.AdditionalGroups[$sharedGroup] = @{
+				id = $sharedGroup; displayName = 'Shared Group'; groupTypes = @()
 				onPremisesSyncEnabled = $false; mailEnabled = $false; securityEnabled = $true; isAssignableToRole = $false
 			}
 		}
@@ -97,7 +127,7 @@ Copy-Item -LiteralPath (Join-Path $PSScriptRoot $snapshot) -Destination $Discove
 		$excel = [OfficeOpenXml.ExcelPackage]::new([IO.FileInfo]::new($script:csvPath))
 		$metadata = $excel.Workbook.Worksheets.Add('Discovery metadata')
 		$metadata.Cells[1, 1].Value = 'Discovery workbook version'
-		$metadata.Cells[1, 2].Value = if ($Combined) { '2' } else { '1' }
+		$metadata.Cells[1, 2].Value = if ($Current) { '3' } elseif ($Combined) { '2' } else { '1' }
 		foreach ($index in 0..($rows.Count - 1)) {
 			$metadata.Cells[($index + 2), 1].Value = 'Service principal ID'
 			$metadata.Cells[($index + 2), 2].Value = if ($index -eq 0) { $app } else { $secondApp }
@@ -130,6 +160,7 @@ Finance reporting - Read reports,View financial reports.,$script:groupId,$script
 			GroupOwners = @{}
 			OwnerNextPage = @{}
 			DirectMembers = @{}
+			AppAssignments = @{}
 			PackageGroups = @($script:groupId)
 			PolicyDuration = 'P365D'
 			Assignments = @()
@@ -162,7 +193,7 @@ Finance reporting - Read reports,View financial reports.,$script:groupId,$script
 		Mock Get-MgContext {
 			@{
 				AuthType = 'Delegated'
-				Scopes = @('EntitlementManagement.ReadWrite.All', 'Group.Read.All', 'User.ReadBasic.All')
+				Scopes = @('EntitlementManagement.ReadWrite.All', 'Group.Read.All', 'User.ReadBasic.All', 'Directory.Read.All')
 			}
 		}
 		Mock Start-Sleep {}
@@ -204,6 +235,9 @@ Finance reporting - Read reports,View financial reports.,$script:groupId,$script
 				throw $record
 			}
 			if ($Method -eq 'GET') {
+				if ($uriText -match '/groups/([^/]+)/appRoleAssignments$') {
+					return @{ value = @($fixture.AppAssignments[$Matches[1]] | Where-Object { $_ }) }
+				}
 				if ($uriText -like '/v1.0/me?*') { return @{ id = '44444444-4444-4444-4444-444444444444' } }
 				if ($uriText -like '*/roleManagement/directory/roleAssignments?*') {
 					return @{ value = @(@{ directoryScopeId = '/'; roleDefinitionId = '45d8d3c5-c802-45c6-b32a-1d70b5e1e86e' }) }
@@ -425,6 +459,66 @@ Finance reporting - Read reports,View financial reports.,$script:groupId,$script
 				-FallbackApproverIds $script:fallbackId -WhatIf -WarningAction SilentlyContinue
 			$result | Should -HaveCount 2
 			$result.Status | Should -Be @('Would be created', 'Would be created')
+			$script:graphFixture.Writes | Should -HaveCount 0
+		}
+
+		It 'previews separate packages containing the same shared group' {
+			$path = New-DiscoveryWorkbookFixture -Shared
+			$result = & $path -InputPath $script:csvPath -CatalogName $script:graphFixture.CatalogName `
+				-FallbackApproverIds $script:fallbackId -WhatIf -WarningAction SilentlyContinue
+			$result | Should -HaveCount 2
+			$result.Status | Should -Be @('Would be created', 'Would be created')
+			foreach ($item in $result) { $item.GroupIds | Should -Contain '55555555-5555-5555-5555-555555555555' }
+			$script:graphFixture.Writes | Should -HaveCount 0
+		}
+
+		It 'previews a workbook produced by the discovery exporter' {
+			$path = New-DiscoveryWorkbookFixture -Current
+			$reviews = Join-Path (Split-Path (Split-Path $path -Parent) -Parent) 'AccessReviews'
+			$script:csvPath = Join-Path $TestDrive "exported-$([guid]::NewGuid()).xlsx"
+			& (Join-Path $PSScriptRoot '../Export-DiscoveryAccessPackages.ps1') `
+				-DiscoveryPath (Join-Path $reviews 'snapshot.json') -WorkbookPath $script:csvPath
+			$excel = Open-ExcelPackage -Path $script:csvPath
+			$sheet = $excel.Workbook.Worksheets['Packages']
+			$sheet.Cells[2, 7].Value = 'Finance reports'
+			$sheet.Cells[2, 8].Value = '<Employee Manager>'
+			Close-ExcelPackage -ExcelPackage $excel
+			$result = & $path -InputPath $script:csvPath -CatalogName $script:graphFixture.CatalogName `
+				-FallbackApproverIds $script:fallbackId -WhatIf -WarningAction SilentlyContinue
+			$result.Status | Should -Be 'Would be created'
+			$script:graphFixture.Writes | Should -HaveCount 0
+		}
+
+		It 'creates separate packages for roots sharing a group' {
+			$path = New-DiscoveryWorkbookFixture -Shared
+			$result = & $path -InputPath $script:csvPath -CatalogName $script:graphFixture.CatalogName `
+				-FallbackApproverIds $script:fallbackId -Confirm:$false -WarningAction SilentlyContinue
+			$result.Status | Should -Be @('Created', 'Created')
+			$created = @($script:graphFixture.Writes | Where-Object Uri -like '*/accessPackages')
+			$created | Should -HaveCount 2
+			$created[0].Body.description | Should -Match 'First app; Shared app'
+			$created[1].Body.description | Should -Match 'Second app; Shared app'
+		}
+
+		It 'blocks a discovery package when its application assignments change after export' {
+			$path = New-DiscoveryWorkbookFixture -Current
+			$script:graphFixture.AppAssignments[$script:groupId] += @{
+				resourceId = 'cccccccc-cccc-cccc-cccc-cccccccccccc'; resourceDisplayName = 'New app'
+			}
+			$result = & $path -InputPath $script:csvPath -CatalogName $script:graphFixture.CatalogName `
+				-FallbackApproverIds $script:fallbackId -Confirm:$false -WarningAction SilentlyContinue
+			$result.Status | Should -Be 'Manual review'
+			$result.Reason | Should -Match 'assignments in the description have changed'
+			$script:graphFixture.Writes | Should -HaveCount 0
+		}
+
+		It 'blocks a discovery package when its application assignments cannot be read' {
+			$path = New-DiscoveryWorkbookFixture -Current
+			$script:graphFixture.RequestFailurePattern = '/appRoleAssignments$'
+			$result = & $path -InputPath $script:csvPath -CatalogName $script:graphFixture.CatalogName `
+				-FallbackApproverIds $script:fallbackId -Confirm:$false -WarningAction SilentlyContinue
+			$result.Status | Should -Be 'Manual review'
+			$result.Reason | Should -Match 'Unable to verify group application assignments'
 			$script:graphFixture.Writes | Should -HaveCount 0
 		}
 

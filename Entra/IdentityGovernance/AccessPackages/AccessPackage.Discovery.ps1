@@ -3,7 +3,7 @@ function Get-DiscoveryPackageWarning {
 }
 
 function Get-PackageDiscoveryCandidates {
-	param([Parameter(Mandatory)][object]$Data)
+	param([Parameter(Mandatory)][object]$Data, [switch]$AllowSharedGroups)
 	$applications = @($Data.Applications)
 	if ($Data.SchemaVersion -eq 1) {
 		if ($applications.Count -ne 1) { throw 'Expected a version 1 single-application discovery export.' }
@@ -54,19 +54,21 @@ function Get-PackageDiscoveryCandidates {
 			$candidates.Add([pscustomobject]@{
 				ServicePrincipalId = "$appId"
 				ServicePrincipalName = [string]$application.ServicePrincipalName
-				Root = "$root"; GroupIds = @($seen | Sort-Object); Status = 'Ready'; Reason = ''
+				Root = "$root"; GroupIds = @($seen | Sort-Object); Status = 'Ready'; Reason = ''; Description = ''
 			})
 		}
 	}
-	foreach ($candidate in $candidates) {
-		$overlappingRoots = @($candidates | Where-Object {
-			$other = $_
-			($other.ServicePrincipalId -ne $candidate.ServicePrincipalId -or $other.Root -ne $candidate.Root) -and
-				@($other.GroupIds | Where-Object { $_ -in $candidate.GroupIds }).Count
-		} | ForEach-Object { "$($_.ServicePrincipalId)/$($_.Root)" })
-		if ($overlappingRoots.Count) {
-			$candidate.Status = 'Manual review'
-			$candidate.Reason = "Shares groups with proposed root(s): $($overlappingRoots -join ', ')."
+	if (-not $AllowSharedGroups) {
+		foreach ($candidate in $candidates) {
+			$overlappingRoots = @($candidates | Where-Object {
+				$other = $_
+				($other.ServicePrincipalId -ne $candidate.ServicePrincipalId -or $other.Root -ne $candidate.Root) -and
+					@($other.GroupIds | Where-Object { $_ -in $candidate.GroupIds }).Count
+			} | ForEach-Object { "$($_.ServicePrincipalId)/$($_.Root)" })
+			if ($overlappingRoots.Count) {
+				$candidate.Status = 'Manual review'
+				$candidate.Reason = "Shares groups with proposed root(s): $($overlappingRoots -join ', ')."
+			}
 		}
 	}
 	[pscustomobject]@{
@@ -77,11 +79,71 @@ function Get-PackageDiscoveryCandidates {
 	}
 }
 
+function Get-DiscoveryGroupApplications {
+	param([Parameter(Mandatory)][guid]$GroupId)
+	$context = Get-MgContext
+	if (-not $context -or -not @($context.Scopes | Where-Object {
+		$_ -in @('Directory.Read.All', 'Directory.ReadWrite.All', 'AppRoleAssignment.ReadWrite.All')
+	}).Count) {
+		throw 'Reading group application assignments requires Directory.Read.All (or a supported higher Graph permission) in the current connection.'
+	}
+	$applications = @{}
+	foreach ($assignment in @(Get-PackageCoverageCollection "/v1.0/groups/$GroupId/appRoleAssignments")) {
+		$id = [guid]::Empty
+		$name = [string]$assignment.resourceDisplayName
+		if (-not [guid]::TryParse([string]$assignment.resourceId, [ref]$id) -or $id -eq [guid]::Empty -or
+			[string]::IsNullOrWhiteSpace($name)) {
+			throw "Graph returned an incomplete application assignment for group '$GroupId'."
+		}
+		if ($applications.ContainsKey("$id") -and $applications["$id"] -ne $name) {
+			throw "Graph returned inconsistent application names for '$id'."
+		}
+		$applications["$id"] = $name
+	}
+	foreach ($id in @($applications.Keys | Sort-Object)) {
+		[pscustomobject]@{ Id = "$id"; Name = $applications[$id] }
+	}
+}
+
+function Get-DiscoveryPackageDescription {
+	param(
+		[Parameter(Mandatory)][string[]]$GroupIds,
+		[Parameter(Mandatory)][hashtable]$Groups,
+		[Parameter(Mandatory)][hashtable]$ApplicationCache
+	)
+	$names = [System.Collections.Generic.List[string]]::new()
+	$applications = @{}
+	foreach ($id in @($GroupIds | Sort-Object -Unique)) {
+		if (-not $Groups.ContainsKey($id) -or [string]::IsNullOrWhiteSpace([string]$Groups[$id].DisplayName)) {
+			throw "Cannot establish the name of group '$id'."
+		}
+		$names.Add([string]$Groups[$id].DisplayName)
+		if (-not $ApplicationCache.ContainsKey($id)) {
+			$ApplicationCache[$id] = @(Get-DiscoveryGroupApplications -GroupId ([guid]$id))
+		}
+		foreach ($application in $ApplicationCache[$id]) {
+			if ($applications.ContainsKey($application.Id) -and $applications[$application.Id] -ne $application.Name) {
+				throw "Graph returned inconsistent application names for '$($application.Id)'."
+			}
+			$applications[$application.Id] = $application.Name
+		}
+	}
+	$appNames = @($applications.Keys | ForEach-Object {
+		$id = $_
+		$name = $applications[$id]
+		if (@($applications.Values | Where-Object { $_ -eq $name }).Count -gt 1) { "$name ($id)" }
+		else { $name }
+	} | Sort-Object)
+	$appText = if ($appNames.Count) { $appNames -join '; ' } else { 'None' }
+	"Included groups: $($names -join '; '). Direct Entra application assignments for these groups: $appText."
+}
+
 function Get-CurrentPackageDiscovery {
 	param(
 		[Parameter(Mandatory)][guid]$ServicePrincipalId,
 		[Parameter(Mandatory)][string]$ReviewScriptPath,
-		[Parameter(Mandatory)][string]$TemporaryParent
+		[Parameter(Mandatory)][string]$TemporaryParent,
+		[switch]$AllowSharedGroups
 	)
 	$directory = Join-Path $TemporaryParent ('.package-discovery-' + [guid]::NewGuid().ToString())
 	$path = Join-Path $directory 'discovery.json'
@@ -93,7 +155,7 @@ function Get-CurrentPackageDiscovery {
 			-DiscoveryOutputPath $path -WhatIf -ErrorAction Stop)
 		if (-not [IO.File]::Exists($path)) { throw 'The review preview did not produce complete discovery data.' }
 		$data = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
-		$discovery = Get-PackageDiscoveryCandidates -Data $data
+		$discovery = Get-PackageDiscoveryCandidates -Data $data -AllowSharedGroups:$AllowSharedGroups
 		if ($discovery.ServicePrincipalId -ne "$ServicePrincipalId") { throw 'The refreshed discovery has a different application ID.' }
 		$discovery
 	}
@@ -110,7 +172,8 @@ function Test-DiscoveryPackageCandidate {
 		[Parameter(Mandatory)][object]$Discovery,
 		[Parameter(Mandatory)][guid]$RootGroupId,
 		[Parameter(Mandatory)][string[]]$GroupIds,
-		[guid]$ServicePrincipalId
+		[guid]$ServicePrincipalId,
+		[switch]$AllowSharedGroups
 	)
 	try {
 		$candidate = @($discovery.Candidates | Where-Object {
@@ -124,7 +187,7 @@ function Test-DiscoveryPackageCandidate {
 			throw 'The workbook groups do not match the current root and descendant groups. Regenerate the workbook.'
 		}
 		$inventory = @(Get-PackageCoverageInventory)
-		Get-PackageCoverageResult -GroupIds $actual -Inventory $inventory
+		Get-PackageCoverageResult -GroupIds $actual -Inventory $inventory -AllowSharedGroups:$AllowSharedGroups
 	}
 	catch {
 		[pscustomobject]@{ Status = 'Manual review'; Reason = "Unable to validate discovery and package coverage: $($_.Exception.Message)" }

@@ -76,6 +76,19 @@ Describe 'Discovery package coverage' {
 		{ Get-PackageCoverageInventory } | Should -Throw '*incomplete resource role or scope*'
 	}
 
+	It 'allows a shared subset while retaining exact-match and extra-role safeguards' {
+		$inventory = @([pscustomobject]@{
+			Id = $script:packageId; DisplayName = 'Existing'; HasExtra = $false
+			GroupIds = @($script:groupA, $script:groupB); MemberGroupIds = @($script:groupA, $script:groupB)
+		})
+		(Get-PackageCoverageResult -GroupIds @($script:groupA) -Inventory $inventory).Status | Should -Be 'Manual review'
+		(Get-PackageCoverageResult -GroupIds @($script:groupA) -Inventory $inventory -AllowSharedGroups).Status | Should -Be 'Ready'
+		$inventory[0].HasExtra = $true
+		(Get-PackageCoverageResult -GroupIds @($script:groupA, $script:groupB) -Inventory $inventory -AllowSharedGroups).Status | Should -Be 'Manual review'
+		$inventory[0].MemberGroupIds = @($script:groupA)
+		(Get-PackageCoverageResult -GroupIds @($script:groupA, $script:groupB) -Inventory $inventory -AllowSharedGroups).Status | Should -Be 'Manual review'
+	}
+
 	It 'uses app-only tenant-wide application permission <Permission> to check package coverage' -TestCases @(
 		@{ Permission = 'EntitlementManagement.Read.All' }
 		@{ Permission = 'EntitlementManagement.ReadWrite.All' }

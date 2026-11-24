@@ -157,7 +157,11 @@ function Get-PackageCoverageInventory {
 }
 
 function Get-PackageCoverageResult {
-	param([Parameter(Mandatory)][string[]]$GroupIds, [AllowEmptyCollection()][object[]]$Inventory)
+	param(
+		[Parameter(Mandatory)][string[]]$GroupIds,
+		[AllowEmptyCollection()][object[]]$Inventory,
+		[switch]$AllowSharedGroups
+	)
 	$wanted = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
 	foreach ($id in $GroupIds) {
 		$parsed = [guid]::Empty
@@ -170,9 +174,13 @@ function Get-PackageCoverageResult {
 	})
 	$manual = [System.Collections.Generic.List[string]]::new()
 	foreach ($package in $overlaps) {
-		$exact = -not $package.HasExtra -and $package.MemberGroupIds.Count -eq $wanted.Count -and
+		$sameMembers = $package.MemberGroupIds.Count -eq $wanted.Count -and
 			@($package.MemberGroupIds | Where-Object { -not $wanted.Contains($_) }).Count -eq 0
+		$sameResources = $package.GroupIds.Count -eq $wanted.Count -and
+			@($package.GroupIds | Where-Object { -not $wanted.Contains($_) }).Count -eq 0
+		$exact = -not $package.HasExtra -and $sameMembers
 		if (-not $exact) {
+			if ($AllowSharedGroups -and -not $sameResources) { continue }
 			$manual.Add("Partial resource overlap with '$($package.DisplayName)' ($($package.Id)).")
 			continue
 		}

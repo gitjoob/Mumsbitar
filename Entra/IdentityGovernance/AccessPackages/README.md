@@ -89,7 +89,7 @@ The discovery workflow keeps access-review and package creation separate.
 Run these commands from the `IdentityGovernance` directory after connecting:
 
 ```powershell
-Connect-MgGraph -Scopes 'AccessReview.ReadWrite.All','Application.Read.All','Group.Read.All','User.Read.All','EntitlementManagement.ReadWrite.All','RoleManagement.Read.Directory'
+Connect-MgGraph -Scopes 'AccessReview.ReadWrite.All','Application.Read.All','Group.Read.All','User.Read.All','EntitlementManagement.ReadWrite.All','RoleManagement.Read.Directory','Directory.Read.All'
 
 # One application:
 .\AccessReviews\Create-AccessReview.ps1 -ServicePrincipalId '<enterprise application object ID>' `
@@ -117,19 +117,39 @@ direct-user counts but not user membership lists.
 
 Each directly assigned root proposes one package with the root and every nested
 descendant as Member resources. Assigning the package adds users to **all** of
-these groups and may grant access to other applications. Nested membership does
-not prove effective access to the originating application. Keep the generated
-warning in each description. Check the `Topology` and `Manual review` worksheets,
-correct suggested names that violate naming rules, and complete approvers and
-business details. Unknown values are left blank. Blocked rows are not imported;
-resolve them externally and regenerate the workbook. The discovery ID columns
-and `Discovery metadata` sheet must be retained.
+these groups. Shared groups are included in each root's separate package, not
+merged into one package. The description lists the included groups and their
+direct Entra enterprise-application assignments, using current Graph data. This
+list does not establish access provided by other systems or mechanisms, and an
+application assignment does not guarantee effective access to the application.
+Reading group application assignments requires delegated or application
+`Directory.Read.All` (or `Directory.ReadWrite.All` or
+`AppRoleAssignment.ReadWrite.All`), admin consent, and any required delegated
+directory role.
+
+The `Topology` sheet shows each discovered application-assigned root and its
+nested descendants, including candidates that are not ready. A group can appear
+under multiple roots; this sheet is not a list of all applications the groups
+affect. Check `Manual review` for failed or uncertain checks, correct suggested
+names that violate naming rules, and complete approvers and business details.
+The exporter suggests a `Role` when a root or included descendant group name
+contains a standalone or camel-case `Admin`, `Administrator`, or `Superuser`
+term (including plurals and separated `Super User`). This name-based heuristic
+does not verify privileges or detect every privileged group. Review and edit the
+suggestion: the `Role` value is included in the published description. Unknown
+values are left blank. Blocked rows are not imported; resolve them and
+regenerate the workbook. Retain the discovery ID columns and `Discovery metadata`
+sheet. Before creation, the script rechecks the generated description; changed
+group names or application assignments require a regenerated workbook.
 
 The export and creation recheck enumerate packages across catalogs and compare
 their complete resource roles and scopes. A confirmed active exact match is
-skipped; partial matches, shared proposed groups, and uncertain activity require
-manual review. Policies without enough information to determine activity are
-not assumed inactive. Incomplete or forbidden Graph reads fail closed.
+skipped; shared groups and partial overlaps with other packages do not alone
+block new version 3 workbooks. A matching group set with extra roles, uncertain
+activity, incomplete reads, or forbidden Graph reads still require manual
+review. Policies without enough information to determine activity are not
+assumed inactive. Older version 1 and 2 workbooks retain their original
+shared-group safeguards and descriptions; regenerate them to use this workflow.
 To verify tenant-wide visibility, this workflow currently requires a delegated
 connection with a **directly assigned active directory-wide** Identity Governance
 Administrator or Global Administrator role, or an app-only connection whose
@@ -141,8 +161,8 @@ The delegated role check also requires `RoleManagement.Read.Directory` (or a
 supported higher permission) and a role allowed to read role assignments. Hidden
 membership also needs `Member.Read.Hidden`. If visibility or any required Graph
 read cannot be verified, candidates stay in `Manual review`. App-only package
-creation still requires the separate write, group, user and access-review
-permissions needed by the creation and discovery steps.
+creation still requires the separate write, group, user, directory and
+access-review permissions needed by the creation and discovery steps.
 
 On each package run the script refreshes discovery once, compares each row with
 the current root and descendants, and rechecks package coverage before creating

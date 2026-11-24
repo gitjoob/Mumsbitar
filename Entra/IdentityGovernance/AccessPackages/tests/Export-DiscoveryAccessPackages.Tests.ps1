@@ -22,7 +22,7 @@ Describe 'Discovery workbook export' {
 				@{ Id = $script:other; DisplayName = 'Other'; ChildIds = @($script:child) }
 			)
 		}
-		Mock Get-MgContext { @{ AuthType = 'Delegated' } }
+		Mock Get-MgContext { @{ AuthType = 'Delegated'; Scopes = @('Directory.Read.All') } }
 		Mock Get-MgGroup {
 			param($GroupId)
 			@{ id = $GroupId; displayName = 'Group'; groupTypes = @(); securityEnabled = $true }
@@ -32,6 +32,9 @@ Describe 'Discovery workbook export' {
 			if ($Uri -like '/v1.0/me?*') { return @{ id = '44444444-4444-4444-4444-444444444444' } }
 			if ($Uri -like '*/roleAssignments?*') { return @{ value = @(@{ directoryScopeId = '/'; roleDefinitionId = '45d8d3c5-c802-45c6-b32a-1d70b5e1e86e' }) } }
 			if ($Uri -like '*/accessPackages') { return @{ value = @() } }
+			if ($Uri -like '*/11111111-1111-1111-1111-111111111111/appRoleAssignments') { return @{ value = @(@{ resourceId = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'; resourceDisplayName = 'Application A' }) } }
+			if ($Uri -like '*/22222222-2222-2222-2222-222222222222/appRoleAssignments') { return @{ value = @(@{ resourceId = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb'; resourceDisplayName = 'Application B' }) } }
+			if ($Uri -like '*/33333333-3333-3333-3333-333333333333/appRoleAssignments') { return @{ value = @() } }
 			throw "Unexpected request $Uri"
 		}
 	}
@@ -39,12 +42,16 @@ Describe 'Discovery workbook export' {
 	It 'writes a usable draft with literal text and the full cyclic descendant set' {
 		$script:fixture | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $script:input
 		& $script:exportPath -DiscoveryPath $script:input -WorkbookPath $script:output
+		@(Import-Excel -Path $script:output -WorksheetName 'Manual review').Reason | Should -BeNullOrEmpty
 		$rows = @(Import-Excel -Path $script:output -WorksheetName Packages)
 		$rows | Should -HaveCount 1
 		$rows[0].GroupId.Split(';') | Should -Contain $script:root
 		$rows[0].GroupId.Split(';') | Should -Contain $script:child
 		$rows[0].'Approver 1 List' | Should -BeNullOrEmpty
-		$rows[0].Description | Should -Match 'adds the user to every listed group'
+		$rows[0].Role | Should -BeNullOrEmpty
+		$rows[0].Description | Should -Match 'Direct Entra application assignments for these groups: Application A; Application B'
+		$rows[0].Description | Should -Match 'Included groups: Root SG; Child'
+		$rows[0].Description | Should -Not -Match 'may grant'
 		$topology = @(Import-Excel -Path $script:output -WorksheetName Topology)
 		$topology | Should -HaveCount 2
 		@($topology | Where-Object 'Group ID' -eq $script:child)[0].'Parent group IDs' | Should -Be $script:root
@@ -55,6 +62,47 @@ Describe 'Discovery workbook export' {
 		}
 		finally { Close-ExcelPackage -ExcelPackage $excel -NoSave }
 		{ & $script:exportPath -DiscoveryPath $script:input -WorkbookPath $script:output } | Should -Throw '*already exists*'
+	}
+
+	It 'suggests privileged roles from root and descendant group names' {
+		$script:fixture.Groups[0].DisplayName = 'Application-Administrators'
+		$script:fixture.Groups[1].DisplayName = 'ApplicationSuperUsersGroup'
+		$script:fixture | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $script:input
+		& $script:exportPath -DiscoveryPath $script:input -WorkbookPath $script:output
+		$row = @(Import-Excel -Path $script:output -WorksheetName Packages)[0]
+		$row.Role | Should -Match 'Potential privileged access'
+		$row.Role | Should -Match 'Administrators'
+		$row.Role | Should -Match 'SuperUsers'
+		$row.'Action required' | Should -Match 'Verify the suggested privileged role'
+	}
+
+	It 'matches admin terms case-insensitively without matching unrelated words' {
+		$script:fixture.Groups[0].DisplayName = 'Finance administration'
+		$script:fixture.Groups[1].DisplayName = 'finance_admins'
+		$script:fixture | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $script:input
+		& $script:exportPath -DiscoveryPath $script:input -WorkbookPath $script:output
+		$row = @(Import-Excel -Path $script:output -WorksheetName Packages)[0]
+		$row.Role | Should -Be 'Potential privileged access (group name matches: admins)'
+	}
+
+	It 'does not suggest a role for privilege-like substrings in unrelated names' {
+		$script:fixture.Groups[0].DisplayName = 'Finance administration'
+		$script:fixture.Groups[1].DisplayName = 'Superuserland'
+		$script:fixture | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $script:input
+		& $script:exportPath -DiscoveryPath $script:input -WorkbookPath $script:output
+		$row = @(Import-Excel -Path $script:output -WorksheetName Packages)[0]
+		$row.Role | Should -BeNullOrEmpty
+	}
+
+	It 'matches separated super user terms without changing packages with no match' {
+		$script:fixture.Applications[0].GroupIds = @($script:root, $script:other)
+		$script:fixture.Groups[0].DisplayName = 'Application - SUPER USER'
+		$script:fixture.Groups[2].ChildIds = @()
+		$script:fixture | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $script:input
+		& $script:exportPath -DiscoveryPath $script:input -WorkbookPath $script:output
+		$rows = @(Import-Excel -Path $script:output -WorksheetName Packages)
+		@($rows | Where-Object 'Discovery RootGroupId' -eq $script:root)[0].Role | Should -Match 'SUPER USER'
+		@($rows | Where-Object 'Discovery RootGroupId' -eq $script:other)[0].Role | Should -BeNullOrEmpty
 	}
 
 	It 'combines multiple applications in one workbook while retaining each application ID' {
@@ -74,21 +122,26 @@ Describe 'Discovery workbook export' {
 		$rows.'Access Package Name' | Should -Contain 'Second app - Other'
 		$metadata = Open-ExcelPackage -Path $script:output
 		try {
-			$metadata.Workbook.Worksheets['Discovery metadata'].Cells[1, 2].Value | Should -Be '2'
+			$metadata.Workbook.Worksheets['Discovery metadata'].Cells[1, 2].Value | Should -Be '3'
 		}
 		finally { Close-ExcelPackage -ExcelPackage $metadata -NoSave }
 	}
 
-	It 'keeps shared descendants out of the import sheet' {
+	It 'keeps shared descendants in separate root packages' {
 		$script:fixture.Applications[0].GroupIds = @($script:root, $script:other)
 		$script:fixture | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $script:input
 		& $script:exportPath -DiscoveryPath $script:input -WorkbookPath $script:output
-		@(Import-Excel -Path $script:output -WorksheetName Packages) | Should -HaveCount 0
-		@(Import-Excel -Path $script:output -WorksheetName 'Manual review') | Should -HaveCount 2
+		$rows = @(Import-Excel -Path $script:output -WorksheetName Packages)
+		$rows | Should -HaveCount 2
+		foreach ($row in $rows) {
+			$row.GroupId.Split(';') | Should -Contain $script:child
+			$row.Description | Should -Match 'Application B'
+		}
+		@(Import-Excel -Path $script:output -WorksheetName 'Manual review') | Should -HaveCount 0
 	}
 
 	It 'supports an app-only connection with tenant-wide entitlement-management permission' {
-		Mock Get-MgContext { @{ AuthType = 'AppOnly'; Scopes = @('EntitlementManagement.Read.All') } }
+		Mock Get-MgContext { @{ AuthType = 'AppOnly'; Scopes = @('EntitlementManagement.Read.All', 'Directory.Read.All') } }
 		$script:fixture | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $script:input
 		& $script:exportPath -DiscoveryPath $script:input -WorkbookPath $script:output
 		@(Import-Excel -Path $script:output -WorksheetName Packages) | Should -HaveCount 1
@@ -103,5 +156,14 @@ Describe 'Discovery workbook export' {
 		$blocked = @(Import-Excel -Path $script:output -WorksheetName 'Manual review')
 		$blocked | Should -HaveCount 1
 		$blocked[0].Reason | Should -Match 'EntitlementManagement.Read.All'
+	}
+
+	It 'blocks a candidate when group application assignments cannot be read' {
+		Mock Get-MgContext { @{ AuthType = 'AppOnly'; Scopes = @('EntitlementManagement.Read.All') } }
+		$script:fixture | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $script:input
+		& $script:exportPath -DiscoveryPath $script:input -WorkbookPath $script:output
+		@(Import-Excel -Path $script:output -WorksheetName Packages) | Should -HaveCount 0
+		$blocked = @(Import-Excel -Path $script:output -WorksheetName 'Manual review')
+		$blocked[0].Reason | Should -Match 'Directory.Read.All'
 	}
 }
