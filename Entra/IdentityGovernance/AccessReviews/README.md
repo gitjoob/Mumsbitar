@@ -223,6 +223,31 @@ Connect-MgGraph -Scopes 'AccessReview.Read.All','User.Read.All','GroupMember.Rea
 
 Includes stages, individual users, decisions, recorded reviewers and current
 owners/managers, with reviewer departments from the current directory.
+The **Reviews needing attention** section expands to show:
+
+- **At risk:** an `InProgress` instance ending in less than 48 hours after the
+  snapshot, with strictly more than 50% of its selected decision items marked
+  `NotReviewed`. Exactly 48 hours or exactly 50% does not qualify.
+- **Needs attention:** missing instance status, deadline or progress, zero
+  decision items, or unrecognized outcomes that prevent a reliable assessment.
+  Failed instance listings are also shown.
+- **Overdue:** an `InProgress` instance whose recorded end time has passed.
+
+Each entry opens that instance's details. Counts use the single active stage
+when available, otherwise instance outcomes; unknown outcomes are not counted
+as reviewed or unreviewed. A known `NotReviewed` count above 50% is sufficient
+to flag a review even if other outcomes are unknown. Times and flags are fixed
+at report completion, not updated while the HTML is open. Run the report again
+for a fresh snapshot.
+
+The inventory provides expandable review entries and status, deadline and
+reviewer filters. Reviewer search includes configured scopes, recorded
+reviewers and decision actors, not a verified current assignment roster.
+The current-stage label shows an ordinal or final stage only when the runtime
+stage intervals fully and consecutively cover the instance's recorded dates;
+otherwise it shows `Stage unavailable`. It does not map runtime stage IDs to
+the current configuration or infer missing stages.
+
 The dashboard pie chart counts each matched review definition once by current
 status, not once per historical instance or stage. It opens on **All prefixes**.
 Choose a prefix from **Chart prefix** or click a prefix in **Summary by prefix**

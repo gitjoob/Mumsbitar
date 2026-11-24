@@ -83,6 +83,7 @@ button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible{ou
 dl{display:grid;grid-template-columns:minmax(110px,1fr) 3fr;gap:5px 15px}dt{font-weight:600}dd{margin:0;overflow-wrap:anywhere}
 pre,code{white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px}.filters{display:flex;gap:14px;flex-wrap:wrap}.filters label{flex:1;min-width:170px;font-size:12px;font-weight:600}.filters input,.filters select{display:block;width:100%;margin-top:5px}
 .table-wrap{overflow:auto}table{width:100%;border-collapse:collapse;font-size:13px}th,td{text-align:left;padding:13px 10px;border-bottom:1px solid var(--line);vertical-align:top}th{font-size:11px;text-transform:uppercase;color:var(--muted)}td{overflow-wrap:anywhere;max-width:350px}.badge{display:inline-block;background:var(--soft);color:var(--accent);padding:3px 9px;border-radius:18px;font-size:12px}
+.priority-list{padding-left:20px}.priority-list li{padding:7px 0}.inventory-review{margin:0}.inventory-review summary{overflow-wrap:anywhere}.inventory-review button{margin-top:8px}
 #pagination{display:flex;justify-content:center;gap:18px;align-items:center;margin-top:18px}footer{margin-top:24px;font-size:12px}[hidden]{display:none!important}
 @media(prefers-color-scheme:dark){:root:not([data-theme]){color-scheme:dark;--bg:#171315;--panel:#241d20;--ink:#f7edef;--muted:#c9b5bd;--line:#4c3941;--accent:#ff8da3;--soft:#472832;--warning:#ffda90;--warn-bg:#392e1c}}
 @media(max-width:650px){main{padding:18px 12px}h1{font-size:25px}.panel{padding:15px}.metrics{grid-template-columns:1fr 1fr}.timeline{flex-direction:column}.relationships{grid-template-columns:1fr}.theme-control{max-width:130px}dl{grid-template-columns:1fr}#pagination{gap:10px}}
@@ -803,6 +804,100 @@ function Get-AccessReviewStatusProgress {
 	[pscustomobject]@{ Summary = $summary; Source = $source }
 }
 
+function ConvertTo-AccessReviewStatusTime {
+	param([AllowNull()][object]$Value)
+	if ($Value -is [datetimeoffset]) { return $Value.ToUniversalTime() }
+	if ($Value -is [datetime]) {
+		if ($Value.Kind -eq [DateTimeKind]::Unspecified) { return $null }
+		return ([datetimeoffset]$Value).ToUniversalTime()
+	}
+	$text = [string]$Value
+	if ($text -notmatch '(?:Z|[+-]\d{2}:\d{2})$') { return $null }
+	$parsed = [datetimeoffset]::MinValue
+	if ([datetimeoffset]::TryParse($text, [System.Globalization.CultureInfo]::InvariantCulture,
+		[System.Globalization.DateTimeStyles]::None, [ref]$parsed)) {
+		return $parsed.ToUniversalTime()
+	}
+	$null
+}
+
+function Get-AccessReviewStatusDeadline {
+	param([AllowNull()][object]$Instance, [AllowNull()][object]$Snapshot)
+	$end = ConvertTo-AccessReviewStatusTime $Instance.End
+	$now = ConvertTo-AccessReviewStatusTime $Snapshot
+	if ($null -eq $end -or $null -eq $now) { return 'Unavailable' }
+	$remaining = $end - $now
+	if ($remaining.TotalSeconds -le 0) { return 'Overdue' }
+	if ($remaining.TotalHours -lt 48) { return 'Within 48 hours' }
+	'Later'
+}
+
+function Get-AccessReviewStatusRisk {
+	param([AllowNull()][object]$Instance, [AllowNull()][object]$Snapshot)
+	if (-not $Instance) { return 'None' }
+	if ([string]::IsNullOrWhiteSpace([string]$Instance.Status)) { return 'Needs attention' }
+	if ($Instance.Status -ne 'InProgress') { return 'None' }
+	$deadline = Get-AccessReviewStatusDeadline $Instance $Snapshot
+	$progress = Get-AccessReviewStatusProgress $Instance
+	if ($deadline -eq 'Unavailable') { return 'Needs attention' }
+	if ($deadline -eq 'Overdue') { return 'Overdue' }
+	if ($null -eq $progress.Summary -or $progress.Summary.Total -le 0) { return 'Needs attention' }
+	if ($deadline -ne 'Within 48 hours') { return 'None' }
+	if (2 * [long]$progress.Summary.NotReviewed -gt [long]$progress.Summary.Total) { return 'At risk' }
+	if ($progress.Summary.Other -gt 0) { return 'Needs attention' }
+	'None'
+}
+
+function Get-AccessReviewStatusStageLabel {
+	param([AllowNull()][object]$Instance)
+	if (-not $Instance -or $Instance.Status -ne 'InProgress' -or $Instance.StageError) { return 'Stage unavailable' }
+	$instanceStart = ConvertTo-AccessReviewStatusTime $Instance.Start
+	$instanceEnd = ConvertTo-AccessReviewStatusTime $Instance.End
+	if ($null -eq $instanceStart -or $null -eq $instanceEnd) { return 'Stage unavailable' }
+	$recordedStages = [System.Collections.Generic.List[object]]::new()
+	foreach ($stage in $Instance.Stages) {
+		$start = ConvertTo-AccessReviewStatusTime $stage.Start
+		$end = ConvertTo-AccessReviewStatusTime $stage.End
+		if ($null -eq $start -or $null -eq $end -or $end -le $start) { return 'Stage unavailable' }
+		$recordedStages.Add([pscustomobject]@{ Start = $start; End = $end; Status = $stage.Status })
+	}
+	$stages = @($recordedStages | Sort-Object Start)
+	if (-not $stages.Count -or $stages[0].Start -ne $instanceStart -or $stages[-1].End -ne $instanceEnd) {
+		return 'Stage unavailable'
+	}
+	$activeIndex = -1
+	for ($i = 0; $i -lt $stages.Count; $i++) {
+		if ($i -gt 0 -and $stages[$i - 1].End -ne $stages[$i].Start) { return 'Stage unavailable' }
+		if ($stages[$i].Status -eq 'InProgress') {
+			if ($activeIndex -ge 0) { return 'Stage unavailable' }
+			$activeIndex = $i
+		}
+	}
+	if ($activeIndex -lt 0) { return 'Stage unavailable' }
+	$number = $activeIndex + 1
+	if ($number -eq $stages.Count) { return "Final stage ($number of $($stages.Count))" }
+	"Stage $number of $($stages.Count)"
+}
+
+function Get-AccessReviewStatusLabel {
+	param([AllowNull()][string]$Status)
+	switch ($Status) {
+		'InProgress' { 'In progress' }
+		'NotStarted' { 'Not started' }
+		'AutoReviewing' { 'Automatic review in progress' }
+		'AutoReviewed' { 'Automatically reviewed' }
+		'' { 'Unavailable' }
+		default { $Status }
+	}
+}
+
+function Get-AccessReviewStatusTimeLabel {
+	param([AllowNull()][object]$Value)
+	$time = ConvertTo-AccessReviewStatusTime $Value
+	if ($null -eq $time) { return 'Unavailable' }
+	$time.ToString('yyyy-MM-dd HH:mm', [System.Globalization.CultureInfo]::InvariantCulture)
+}
+
 function New-AccessReviewStatusHtml {
 	param([Parameter(Mandatory)][object]$Report)
 	$body = [System.Text.StringBuilder]::new()
@@ -814,7 +909,7 @@ function New-AccessReviewStatusHtml {
 	$dontKnow = [long](($known | ForEach-Object { $_.Summary.DontKnow } | Measure-Object -Sum).Sum)
 	$other = [long](($known | ForEach-Object { $_.Summary.Other } | Measure-Object -Sum).Sum)
 	$null = $body.AppendLine('<main><header><div><p class="eyebrow">Identity governance / read-only snapshot</p><h1>Access review status</h1></div><div class="theme-control"><button id="theme" type="button" role="switch" aria-checked="false" aria-label="Dark mode">Dark mode</button><small id="theme-notice" role="status"></small></div></header>')
-	$null = $body.AppendLine("<p>Tenant: $(ConvertTo-AccessReviewHtmlText $Report.TenantId)<br>Collected: $(ConvertTo-AccessReviewHtmlText $Report.StartedAt) to $(ConvertTo-AccessReviewHtmlText $Report.FinishedAt)<br>Literal prefixes: $(ConvertTo-AccessReviewHtmlText ($Report.Prefixes -join ', '))</p>")
+	$null = $body.AppendLine("<p class=`"notice`"><strong>Snapshot finished:</strong> $(ConvertTo-AccessReviewHtmlText $Report.FinishedAt) (UTC). This report does not update automatically; run it again for current information.</p><details><summary>Report information</summary><p>Tenant: $(ConvertTo-AccessReviewHtmlText $Report.TenantId)<br>Collected: $(ConvertTo-AccessReviewHtmlText $Report.StartedAt) to $(ConvertTo-AccessReviewHtmlText $Report.FinishedAt)<br>Literal prefixes: $(ConvertTo-AccessReviewHtmlText ($Report.Prefixes -join ', '))</p></details>")
 	$null = $body.AppendLine('<p class="notice">All historical instances returned by Graph. This is a read-only, non-transactional snapshot, not proof of certification or removal. Review progress uses the active stage for running instances when one is returned; otherwise it uses instance outcomes. Each instance contributes at most one set of decisions, never the sum of its stages. Active-stage completion is not final review completion. Recorded outcomes include Approve, Deny and Don&#39;t know, and may include automatic/default decisions. Names, sign-in addresses, departments and IDs are private.</p>')
 	if (-not $Report.Completed -or $Report.Issues.Count) {
 		$null = $body.AppendLine("<p class=`"notice warning`" role=`"alert`"><strong>Partial data / collection issues.</strong> $($Report.Issues.Count) issue(s). Unavailable data is not treated as zero. See collection issues below.</p>")
@@ -829,6 +924,7 @@ function New-AccessReviewStatusHtml {
 		$null = $body.AppendLine("<div class=`"metric`"><strong>$($metric[1])</strong><span>$(ConvertTo-AccessReviewHtmlText $metric[0])</span></div>")
 	}
 	$null = $body.AppendLine("</section><p class=`"muted`">Decision-count coverage: $($known.Count) of $($instances.Count) instances. Future/current configured stages and runtime stages are shown separately. Current configuration and directory owners are not historical assignment snapshots.</p>")
+	$null = $body.AppendLine('<!--PRIORITIES-->')
 	$prefixGroups = @($Report.Definitions | Group-Object Prefix | Sort-Object Name)
 	$null = $body.AppendLine('<section id="status-dashboard" class="panel"><h2>Reviews by current status</h2><p class="muted">Each matching review definition is counted once. Historical instances and stages are not counted. Inventory filters are separate.</p>')
 	if ($prefixGroups.Count) {
@@ -872,7 +968,7 @@ function New-AccessReviewStatusHtml {
 		$text = ConvertTo-AccessReviewHtmlText $group.Name
 		$null = $body.AppendLine("<tr><td><button class=`"link`" type=`"button`" data-show-chart=`"$text`" aria-controls=`"status-dashboard`" aria-pressed=`"false`">$text</button></td><td>$($group.Count)</td><td>$($groupInstances.Count)</td><td>$($groupKnown.Count) / $($groupInstances.Count)</td><td>$sum</td><td>$done</td><td>$pending</td><td>$stagePending</td></tr>")
 	}
-	$null = $body.AppendLine('</tbody></table></div></section><section id="inventory" class="panel"><h2>Review and instance inventory</h2><div class="filters"><label>Search reviews, owners, reviewers or departments<input id="search" type="search"></label><label>Prefix<select id="prefix"><option value="">All prefixes</option>')
+	$null = $body.AppendLine('</tbody></table></div></section><section id="inventory" class="panel"><h2>Find a review</h2><p>Expand a review to open its details. Each row represents one review instance.</p><div class="filters"><label>Search reviews, owners, reviewers or departments<input id="search" type="search"></label><label>Reviewer name or address<input id="reviewer" type="search"></label><label>Deadline<select id="deadline"><option value="">All deadlines</option><option value="Within 48 hours">Within 48 hours</option><option value="Overdue">Overdue</option><option value="Later">Later</option><option value="Unavailable">Unavailable</option></select></label><label>Prefix<select id="prefix"><option value="">All prefixes</option>')
 	foreach ($prefix in @($Report.Definitions.Prefix | Sort-Object -Unique)) {
 		$text = ConvertTo-AccessReviewHtmlText $prefix
 		$null = $body.AppendLine("<option value=`"$text`">$text</option>")
@@ -880,16 +976,23 @@ function New-AccessReviewStatusHtml {
 	$null = $body.AppendLine('</select></label><label>Instance status<select id="instance-status"><option value="">All instance statuses</option>')
 	foreach ($status in @(@($instances.Status) + @('No instances / unavailable') | Where-Object { $_ } | Sort-Object -Unique)) {
 		$text = ConvertTo-AccessReviewHtmlText $status
-		$null = $body.AppendLine("<option value=`"$text`">$text</option>")
+		$label = ConvertTo-AccessReviewHtmlText (Get-AccessReviewStatusLabel $status)
+		$null = $body.AppendLine("<option value=`"$text`">$label</option>")
 	}
 	$null = $body.AppendLine('</select></label><label>Definition status<select id="definition-status"><option value="">All definition statuses</option>')
 	foreach ($status in @($Report.Definitions.Status | Where-Object { $_ } | Sort-Object -Unique)) {
 		$text = ConvertTo-AccessReviewHtmlText $status
-		$null = $body.AppendLine("<option value=`"$text`">$text</option>")
+		$label = ConvertTo-AccessReviewHtmlText (Get-AccessReviewStatusLabel $status)
+		$null = $body.AppendLine("<option value=`"$text`">$label</option>")
 	}
-	$null = $body.AppendLine('</select></label></div><p class="muted">Review progress uses the active stage for running reviews when available, not the potentially outdated instance outcomes. The source is shown beside each count. Open a review for raw instance outcomes and every stage. Finishing a stage does not mean the overall review has completed.</p><p id="inventory-count" role="status"></p><div class="table-wrap"><table><thead><tr><th>Review / prefix</th><th>Definition status</th><th>Instance status</th><th>Instance dates (UTC)</th><th>Review progress recorded / items</th><th>Progress source</th><th>Runtime stages</th></tr></thead><tbody id="status-rows">')
+	$null = $body.AppendLine('</select></label></div><p class="muted">Reviewer search includes recorded and configured reviewers; it does not prove who is currently assigned. Progress uses the active stage when available, otherwise the instance. Completing a stage does not mean the whole review is complete.</p><p id="inventory-count" role="status"></p><div class="table-wrap"><table><thead><tr><th>Review / prefix</th><th>Definition status</th><th>Instance status</th><th>Instance dates (UTC)</th><th>Review progress recorded / items</th><th>Progress source</th><th>Current stage</th></tr></thead><tbody id="status-rows">')
 	$details = [System.Text.StringBuilder]::new()
 	$detailPages = [System.Collections.Generic.List[string]]::new()
+	$priorityRows = @{
+		'At risk' = [System.Collections.Generic.List[string]]::new()
+		'Needs attention' = [System.Collections.Generic.List[string]]::new()
+		'Overdue' = [System.Collections.Generic.List[string]]::new()
+	}
 	$index = 0
 	foreach ($definition in $Report.Definitions) {
 		$entries = @($definition.Instances)
@@ -899,27 +1002,56 @@ function New-AccessReviewStatusHtml {
 			$search = ConvertTo-AccessReviewHtmlText (@{ Review = $definition.DisplayName; Configuration = $definition.Configuration; Owners = $definition.CurrentResources; Instance = $instance } | ConvertTo-Json -Depth 15 -Compress)
 			$selectedProgress = Get-AccessReviewStatusProgress $instance
 			$progress = if ($null -ne $selectedProgress.Summary) { "$($selectedProgress.Summary.Recorded) / $($selectedProgress.Summary.Total)" } else { 'Unavailable / not materialized' }
-			$stageCount = if ($instance.StageError) { 'Unavailable' } elseif ($instance) { "$($instance.Stages.Count)" } else { 'Not materialized' }
-			$activeProgress = ConvertTo-AccessReviewHtmlText $selectedProgress.Source
-			$null = $body.AppendLine("<tr data-prefix=`"$(ConvertTo-AccessReviewHtmlText $definition.Prefix)`" data-instance=`"$(ConvertTo-AccessReviewHtmlText $status)`" data-definition=`"$(ConvertTo-AccessReviewHtmlText $definition.Status)`" data-search=`"$search`"><td><button class=`"link view`" data-target=`"status-$index`">$(ConvertTo-AccessReviewHtmlText $definition.DisplayName)</button><small>$(ConvertTo-AccessReviewHtmlText $definition.Prefix)</small></td><td>$(ConvertTo-AccessReviewHtmlText $definition.Status)</td><td><span class=`"badge`">$(ConvertTo-AccessReviewHtmlText $status)</span></td><td>$(ConvertTo-AccessReviewHtmlText $instance.Start)<br>$(ConvertTo-AccessReviewHtmlText $instance.End)</td><td>$progress</td><td>$activeProgress</td><td>$stageCount</td></tr>")
+			$stageLabel = Get-AccessReviewStatusStageLabel $instance
+			$deadline = Get-AccessReviewStatusDeadline $instance $Report.FinishedAt
+			$risk = Get-AccessReviewStatusRisk $instance $Report.FinishedAt
+			if (-not $instance -and ($definition.Error -or $definition.Status -eq 'InProgress')) { $risk = 'Needs attention' }
+			$reviewerSearch = ConvertTo-AccessReviewHtmlText (@{
+				Configured = @($definition.Configuration | ForEach-Object { $_.Reviewers; $_.Fallbacks })
+				Instance = $instance.Reviewers; Fallbacks = $instance.Fallbacks; Contacted = $instance.ContactedReviewers
+				Actors = $instance.Summary.Actors
+				Stages = @($instance.Stages | ForEach-Object { $_.Reviewers; $_.Fallbacks; $_.Summary.Actors })
+			} | ConvertTo-Json -Depth 15 -Compress)
+			$activeProgress = if ($selectedProgress.Source -like 'Active stage *') { 'Current stage' }
+				elseif ($selectedProgress.Source -eq 'Active-stage progress unavailable') { 'Current stage unavailable' }
+				else { 'Review instance' }
+			$name = ConvertTo-AccessReviewHtmlText $definition.DisplayName
+			$instanceStatusLabel = ConvertTo-AccessReviewHtmlText (Get-AccessReviewStatusLabel $status)
+			$definitionStatusLabel = ConvertTo-AccessReviewHtmlText (Get-AccessReviewStatusLabel $definition.Status)
+			$startLabel = Get-AccessReviewStatusTimeLabel $instance.Start
+			$endLabel = Get-AccessReviewStatusTimeLabel $instance.End
+			$null = $body.AppendLine("<tr data-prefix=`"$(ConvertTo-AccessReviewHtmlText $definition.Prefix)`" data-instance=`"$(ConvertTo-AccessReviewHtmlText $status)`" data-definition=`"$(ConvertTo-AccessReviewHtmlText $definition.Status)`" data-deadline=`"$deadline`" data-reviewers=`"$reviewerSearch`" data-search=`"$search`"><td><details class=`"inventory-review`"><summary>$name</summary><small>$(ConvertTo-AccessReviewHtmlText $definition.Prefix)</small><button type=`"button`" class=`"link view`" data-target=`"status-$index`">Open review details</button></details></td><td>$definitionStatusLabel</td><td><span class=`"badge`">$instanceStatusLabel</span></td><td>$startLabel<br>$endLabel</td><td>$progress</td><td>$activeProgress</td><td>$(ConvertTo-AccessReviewHtmlText $stageLabel)</td></tr>")
+			if ($priorityRows.ContainsKey($risk)) {
+				$pending = if ($null -ne $selectedProgress.Summary) {
+					if ($selectedProgress.Summary.Total -eq 0) { 'No decision items returned' }
+					else { "$($selectedProgress.Summary.NotReviewed) of $($selectedProgress.Summary.Total) not reviewed" }
+				}
+				else { 'Review progress unavailable' }
+				$endText = if ($deadline -eq 'Unavailable') { 'Deadline unavailable' } else { "Ends $endLabel (UTC)" }
+				$uncertainty = if ($definition.Error -and -not $instance) { ' | Instance listing unavailable' }
+					elseif (-not $instance) { ' | No instance returned' }
+					elseif (-not $instance.Status) { ' | Instance status unavailable' }
+					elseif ($selectedProgress.Summary.Other -gt 0) { ' | Some outcomes are unknown' } else { '' }
+				$priorityRows[$risk].Add("<li><button type=`"button`" class=`"link view`" data-target=`"status-$index`">$name</button><small>$endText | $pending | $activeProgress$uncertainty</small></li>")
+			}
 			$null = $details.AppendLine("<article id=`"status-$index`" class=`"review-detail`" hidden><h3 tabindex=`"-1`">$(ConvertTo-AccessReviewHtmlText $definition.DisplayName)</h3><p>Definition: <code>$(ConvertTo-AccessReviewHtmlText $definition.Id)</code> | $(ConvertTo-AccessReviewHtmlText $definition.Status)<br>Instance: <code>$(ConvertTo-AccessReviewHtmlText $instance.Id)</code> | $(ConvertTo-AccessReviewHtmlText $status)</p><p>$(ConvertTo-AccessReviewHtmlText $definition.Description)</p>")
 			if ($definition.Error) { $null = $details.AppendLine("<p class=`"notice warning`">Instance listing unavailable: $(ConvertTo-AccessReviewHtmlText $definition.Error)</p>") }
-			$null = $details.AppendLine('<details open><summary>All configured stages (current definition, not historical evidence)</summary><p class="notice">These stages include future stages not returned by the runtime API. Settings may have changed since older instances ran. Named users may be captured owners or fallbacks; their original policy label cannot be inferred from user IDs alone.</p>')
+			$null = $details.AppendLine('<details><summary>All configured stages (current definition, not historical evidence)</summary><p class="notice">These stages include future stages not returned by the runtime API. Settings may have changed since older instances ran. Named users may be captured owners or fallbacks; their original policy label cannot be inferred from user IDs alone.</p>')
 			foreach ($setting in $definition.Configuration) {
 				$null = $details.AppendLine("<h4>Configured stage $(ConvertTo-AccessReviewHtmlText $setting.Id)</h4><p>Duration: $(ConvertTo-AccessReviewHtmlText $setting.DurationInDays) days. Depends on: $(ConvertTo-AccessReviewHtmlText ($setting.DependsOn -join ', '))</p>$(ConvertTo-AccessReviewStatusScopesHtml $setting.Reviewers)<h4>Configured fallbacks</h4>$(ConvertTo-AccessReviewStatusScopesHtml $setting.Fallbacks)")
 			}
 			$null = $details.AppendLine("<details><summary>Current definition resource scope</summary><pre>$(ConvertTo-AccessReviewHtmlText ($definition.Scope | ConvertTo-Json -Depth 10))</pre></details><h4>Current definition resource owners (directory snapshot)</h4>$(ConvertTo-AccessReviewStatusOwnersHtml $definition.CurrentResources)</details>")
 			if ($instance) {
 				$null = $details.AppendLine("<details><summary>Recorded instance resource scope</summary><pre>$(ConvertTo-AccessReviewHtmlText ($instance.Scope | ConvertTo-Json -Depth 10))</pre></details>")
-				$null = $details.AppendLine("<h4>Instance-level outcomes</h4>$(ConvertTo-AccessReviewStatusSummaryHtml $instance.Summary)")
+				$null = $details.AppendLine("<details><summary>Review decisions and users (instance)</summary><h4>Instance-level outcomes</h4>$(ConvertTo-AccessReviewStatusSummaryHtml $instance.Summary)</details>")
 				foreach ($field in @('DecisionError', 'ContactError', 'StageError')) {
 					if ($instance.$field) { $null = $details.AppendLine("<p class=`"notice warning`">$(ConvertTo-AccessReviewHtmlText $field): $(ConvertTo-AccessReviewHtmlText $instance.$field)</p>") }
 				}
-				$null = $details.AppendLine("<details open><summary>Recorded instance reviewers (instance-wide, not mapped to stages)</summary><p>Graph's contactedReviewers collection includes reviewers irrespective of notification delivery. This is not a per-stage roster.</p>$(ConvertTo-AccessReviewStatusUsersHtml $instance.ContactedReviewers -ShowDepartment)</details><h4>Instance reviewer scopes</h4>$(ConvertTo-AccessReviewStatusScopesHtml $instance.Reviewers)<h4>Instance fallbacks</h4>$(ConvertTo-AccessReviewStatusScopesHtml $instance.Fallbacks)<details><summary>Current owners of resources recorded for this instance</summary>$(ConvertTo-AccessReviewStatusOwnersHtml $instance.Resources)</details>")
+				$null = $details.AppendLine("<details><summary>Recorded instance reviewers (instance-wide, not mapped to stages)</summary><p>Graph's contactedReviewers collection includes reviewers irrespective of notification delivery. This is not a per-stage roster.</p>$(ConvertTo-AccessReviewStatusUsersHtml $instance.ContactedReviewers -ShowDepartment)</details><details><summary>Instance reviewer rules and fallbacks</summary><h4>Instance reviewer scopes</h4>$(ConvertTo-AccessReviewStatusScopesHtml $instance.Reviewers)<h4>Instance fallbacks</h4>$(ConvertTo-AccessReviewStatusScopesHtml $instance.Fallbacks)</details><details><summary>Current owners of resources recorded for this instance</summary>$(ConvertTo-AccessReviewStatusOwnersHtml $instance.Resources)</details>")
 				$null = $details.AppendLine('<h4>Runtime stages</h4><p class="muted">Sorted by recorded start time and ID; runtime GUIDs are not assumed to map to current configured stage IDs.</p>')
 				if (-not $instance.Stages.Count -and -not $instance.StageError) { $null = $details.AppendLine('<p>No runtime stages returned. Instance-level decisions remain separate; no stage count or future stage status is invented.</p>') }
 				foreach ($stage in $instance.Stages) {
-					$null = $details.AppendLine("<details open class=`"runtime-stage`"><summary>Runtime stage <code>$(ConvertTo-AccessReviewHtmlText $stage.Id)</code> - $(ConvertTo-AccessReviewHtmlText $stage.Status)</summary><p>Start: $(ConvertTo-AccessReviewHtmlText $stage.Start)<br>End: $(ConvertTo-AccessReviewHtmlText $stage.End)</p><h4>Stage reviewer scopes</h4>$(ConvertTo-AccessReviewStatusScopesHtml $stage.Reviewers)<h4>Stage fallbacks</h4>$(ConvertTo-AccessReviewStatusScopesHtml $stage.Fallbacks)$(ConvertTo-AccessReviewStatusSummaryHtml $stage.Summary)")
+					$null = $details.AppendLine("<details class=`"runtime-stage`"><summary>Recorded stage <code>$(ConvertTo-AccessReviewHtmlText $stage.Id)</code> - $(ConvertTo-AccessReviewHtmlText $stage.Status)</summary><p>Start: $(ConvertTo-AccessReviewHtmlText $stage.Start)<br>End: $(ConvertTo-AccessReviewHtmlText $stage.End)</p><h4>Stage reviewer scopes</h4>$(ConvertTo-AccessReviewStatusScopesHtml $stage.Reviewers)<h4>Stage fallbacks</h4>$(ConvertTo-AccessReviewStatusScopesHtml $stage.Fallbacks)$(ConvertTo-AccessReviewStatusSummaryHtml $stage.Summary)")
 					if ($stage.Error) { $null = $details.AppendLine("<p class=`"notice warning`">$(ConvertTo-AccessReviewHtmlText $stage.Error)</p>") }
 					$null = $details.AppendLine('</details>')
 				}
@@ -937,6 +1069,21 @@ function New-AccessReviewStatusHtml {
 		$null = $body.AppendLine("<li><strong>$(ConvertTo-AccessReviewHtmlText $issue.Source)</strong>: $(ConvertTo-AccessReviewHtmlText $issue.Message)<small>Definition: $(ConvertTo-AccessReviewHtmlText $issue.DefinitionId) | Instance: $(ConvertTo-AccessReviewHtmlText $issue.InstanceId)</small></li>")
 	}
 	$null = $body.AppendLine('</ul></section><footer>Read-only report. No reviews, decisions, notifications, owners or memberships were changed. Directory profiles and owners are current lookups, not guaranteed historical identities or assignments.</footer></main>')
+	$priorities = [System.Text.StringBuilder]::new()
+	$null = $priorities.AppendLine('<section id="priorities" class="panel"><h2>Reviews needing attention</h2><p>Based on the snapshot time, not live updates. At risk means an active review ends in less than 48 hours and more than half of its items are not reviewed. Progress uses the active stage when available, otherwise instance outcomes.</p>')
+	foreach ($label in @('At risk', 'Needs attention', 'Overdue')) {
+		$items = $priorityRows[$label]
+		$explanation = switch ($label) {
+			'At risk' { 'Known deadline and progress meet both thresholds.' }
+			'Needs attention' { 'A deadline or progress is unavailable, no items were returned, or unknown outcomes prevent a reliable assessment.' }
+			'Overdue' { 'The recorded end time has passed but the instance still reports InProgress.' }
+		}
+		$null = $priorities.AppendLine("<details><summary>$label ($($items.Count))</summary><p>$explanation</p>")
+		if ($items.Count) { $null = $priorities.AppendLine("<ul class=`"priority-list`">$($items -join '')</ul>") }
+		else { $null = $priorities.AppendLine('<p>None in this snapshot.</p>') }
+		$null = $priorities.AppendLine('</details>')
+	}
+	$null = $priorities.AppendLine('</section>')
 	$template = @'
 <!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
@@ -961,6 +1108,8 @@ if (chartPrefix) {
 }
 const rows = [...document.querySelectorAll('#status-rows tr')];
 const search = document.getElementById('search');
+const reviewer = document.getElementById('reviewer');
+const deadline = document.getElementById('deadline');
 const prefix = document.getElementById('prefix');
 const instanceStatus = document.getElementById('instance-status');
 const definitionStatus = document.getElementById('definition-status');
@@ -979,9 +1128,12 @@ function render() {
 }
 function filter() {
   const term = search.value.toLocaleLowerCase();
+  const reviewerTerm = reviewer.value.toLocaleLowerCase();
   filtered = rows.filter(row => (!prefix.value || row.dataset.prefix === prefix.value)
     && (!instanceStatus.value || row.dataset.instance === instanceStatus.value)
     && (!definitionStatus.value || row.dataset.definition === definitionStatus.value)
+    && (!deadline.value || row.dataset.deadline === deadline.value)
+    && row.dataset.reviewers.toLocaleLowerCase().includes(reviewerTerm)
     && row.dataset.search.toLocaleLowerCase().includes(term));
   current = 0;
   detailHost.replaceChildren();
@@ -989,7 +1141,8 @@ function filter() {
   render();
 }
 search.addEventListener('input', filter);
-for (const select of [prefix, instanceStatus, definitionStatus]) select.addEventListener('change', filter);
+reviewer.addEventListener('input', filter);
+for (const select of [prefix, instanceStatus, definitionStatus, deadline]) select.addEventListener('change', filter);
 document.getElementById('previous').addEventListener('click', () => { current--; render(); });
 document.getElementById('next').addEventListener('click', () => { current++; render(); });
 document.addEventListener('click', event => {
@@ -1008,5 +1161,6 @@ render();
 '@
 	$detailJson = ConvertTo-Json -InputObject @($detailPages.ToArray()) -Compress
 	$detailJson = $detailJson.Replace('<', '\u003c').Replace('>', '\u003e').Replace('&', '\u0026')
-	$template.Replace('<!--STYLE-->', (Get-AccessReviewReportStyle)).Replace('/*THEME*/', (Get-AccessReviewReportThemeScript)).Replace('<!--DETAILS-->', $detailJson).Replace('<!--REPORT-->', $body.ToString())
+	$reportHtml = $body.ToString().Replace('<!--PRIORITIES-->', $priorities.ToString())
+	$template.Replace('<!--STYLE-->', (Get-AccessReviewReportStyle)).Replace('/*THEME*/', (Get-AccessReviewReportThemeScript)).Replace('<!--DETAILS-->', $detailJson).Replace('<!--REPORT-->', $reportHtml)
 }

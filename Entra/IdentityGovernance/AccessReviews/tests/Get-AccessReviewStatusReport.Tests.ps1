@@ -367,15 +367,15 @@ Describe 'Read-only historical access review status' {
 		$null = & $reporter -HtmlReportPath $outputPath
 		$html = Get-Content $outputPath -Raw
 		$html | Should -Match '<th>Review progress recorded / items</th><th>Progress source</th>'
-		$html | Should -Match "<td>1 / 2</td><td>Active stage $stageId</td><td>1</td>"
-		$html | Should -Match '<td>Instance outcomes</td>'
+		$html | Should -Match '<td>1 / 2</td><td>Current stage</td><td>Stage unavailable</td>'
+		$html | Should -Match '<td>Review instance</td>'
 	}
 
 	It 'shows unavailable active-stage progress when its decisions cannot be read' {
 		$responses["$instanceRoot/$newId/stages"].value[0].status = 'InProgress'
 		$failures["$instanceRoot/$newId/stages/$stageId/decisions$decisionSelect"] = 'Stage decisions unavailable'
 		$null = & $reporter -HtmlReportPath $outputPath -WarningAction SilentlyContinue
-		(Get-Content $outputPath -Raw) | Should -Match "<td>Unavailable / not materialized</td><td>Active stage $stageId</td>"
+		(Get-Content $outputPath -Raw) | Should -Match '<td>Unavailable / not materialized</td><td>Current stage</td>'
 		(Get-Content $outputPath -Raw) | Should -Match '<td>1 / 2</td><td>3</td><td>3</td><td>0 \(partial\)</td><td>Unavailable</td>'
 	}
 
@@ -391,7 +391,7 @@ Describe 'Read-only historical access review status' {
 		$report = & $reporter -Prefixes RVDC -HtmlReportPath $outputPath
 		$report.Definitions[0].Instances[0].Summary.Recorded | Should -Be 0
 		$html = Get-Content $outputPath -Raw
-		$html | Should -Match "<td>55 / 55</td><td>Active stage $stageId</td>"
+		$html | Should -Match '<td>55 / 55</td><td>Current stage</td>'
 		$html | Should -Match '<strong>55</strong><span>Available review progress items'
 		$html | Should -Match '<strong>55</strong><span>Recorded outcomes'
 		$html | Should -Match 'data-show-chart="RVDC"[^>]*>RVDC</button></td><td>1</td><td>1</td><td>1 / 1</td><td>55</td><td>55</td><td>0</td><td>0</td>'
@@ -403,7 +403,7 @@ Describe 'Read-only historical access review status' {
 		$responses[$instanceRoot].value[1].status = 'Completed'
 		$responses["$instanceRoot/$newId/stages"].value[0].status = 'InProgress'
 		$null = & $reporter -HtmlReportPath $outputPath
-		(Get-Content $outputPath -Raw) | Should -Match '<td>1 / 4</td><td>Instance outcomes</td>'
+		(Get-Content $outputPath -Raw) | Should -Match '<td>1 / 4</td><td>Review instance</td>'
 	}
 
 	It 'does not combine multiple active stages into misleading instance progress' {
@@ -413,7 +413,7 @@ Describe 'Read-only historical access review status' {
 		$responses["$instanceRoot/$newId/stages/$secondStage/decisions$decisionSelect"] = @{ value = @((New-StatusDecision 's2' 'Approve')) }
 		$null = & $reporter -HtmlReportPath $outputPath
 		$html = Get-Content $outputPath -Raw
-		$html | Should -Match '<td>Unavailable / not materialized</td><td>Active-stage progress unavailable</td>'
+		$html | Should -Match '<td>Unavailable / not materialized</td><td>Current stage unavailable</td>'
 		$html | Should -Match '<strong>3</strong><span>Available review progress items'
 	}
 
@@ -563,6 +563,29 @@ Describe 'Read-only historical access review status' {
 		$report = & $reporter -HtmlReportPath (Join-Path $TestDrive 'failed-instances.html') -WarningAction SilentlyContinue
 		$report.Definitions[0].Error | Should -Be 'Instances forbidden'
 		(Get-Content (Join-Path $TestDrive 'failed-instances.html') -Raw) | Should -Match 'Instance listing unavailable: Instances forbidden'
+		(Get-Content (Join-Path $TestDrive 'failed-instances.html') -Raw) | Should -Match '<summary>Needs attention \(1\)</summary>'
+	}
+
+	It 'puts an at-risk active instance in a clickable section using active-stage decisions' {
+		$instance = $responses[$instanceRoot].value[1]
+		$instance.endDateTime = [datetime]::UtcNow.AddHours(10).ToString('o')
+		$stage = $responses["$instanceRoot/$newId/stages"].value[0]
+		$stage.status = 'InProgress'
+		$stage.startDateTime = $instance.startDateTime
+		$stage.endDateTime = $instance.endDateTime
+		$responses["$instanceRoot/$newId/stages/$stageId/decisions$decisionSelect"].value = @(
+			(New-StatusDecision 's1' 'NotReviewed'), (New-StatusDecision 's2' 'NotReviewed'),
+			(New-StatusDecision 's3' 'NotReviewed'), (New-StatusDecision 's4' 'Approve')
+		)
+		$null = & $reporter -HtmlReportPath $outputPath
+		$html = Get-Content $outputPath -Raw
+		$html | Should -Match '(?s)<summary>At risk \(1\)</summary>.*?data-target="status-0">AR Finance</button>.*?3 of 4 not reviewed'
+		$html | Should -Match 'Final stage \(1 of 1\)'
+		$html | Should -Match '<details class="inventory-review"><summary>AR Finance</summary>'
+		$html | Should -Match 'id="deadline"'
+		$html | Should -Match 'id="reviewer"'
+		$html | Should -Match 'Snapshot finished:'
+		@($requests | Where-Object Method -NE GET) | Should -HaveCount 0
 	}
 
 	It 'writes an empty matched report without issuing resource reads' {
@@ -572,6 +595,86 @@ Describe 'Read-only historical access review status' {
 		Test-Path -LiteralPath $outputPath | Should -BeTrue
 		(Get-Content $outputPath -Raw) | Should -Match 'No review definitions available for the status chart'
 		(Get-Content $outputPath -Raw) | Should -Not -Match 'class="status-pie"'
+	}
+
+	Describe 'Status report risk and stage calculations' {
+		BeforeAll {
+			. (Join-Path $PSScriptRoot '../AccessReview.Reporting.ps1')
+			$script:snapshot = '2026-01-01T00:00:00Z'
+		}
+
+		BeforeEach {
+			$script:sample = [pscustomobject]@{
+				Status = 'InProgress'; Start = '2025-12-31T00:00:00Z'; End = '2026-01-02T00:00:00Z'
+				StageError = $null; Stages = @()
+				Summary = [pscustomobject]@{ Total = 100; NotReviewed = 51; Other = 0 }
+			}
+		}
+
+		It 'uses strict 48-hour and 50-percent boundaries' {
+			Get-AccessReviewStatusRisk $sample $snapshot | Should -Be 'At risk'
+			$sample.End = '2026-01-03T00:00:00Z'
+			Get-AccessReviewStatusRisk $sample $snapshot | Should -Be 'None'
+			$sample.End = '2026-01-02T23:59:59Z'
+			$sample.Summary.NotReviewed = 50
+			Get-AccessReviewStatusRisk $sample $snapshot | Should -Be 'None'
+			$sample.Summary.NotReviewed = 51
+			Get-AccessReviewStatusRisk $sample $snapshot | Should -Be 'At risk'
+			$sample.End = $snapshot
+			Get-AccessReviewStatusRisk $sample $snapshot | Should -Be 'Overdue'
+			$sample.Status = 'Completed'
+			Get-AccessReviewStatusRisk $sample $snapshot | Should -Be 'None'
+		}
+
+		It 'marks unknown deadlines and progress for attention without inferring zeros' {
+			$sample.End = 'invalid'
+			Get-AccessReviewStatusRisk $sample $snapshot | Should -Be 'Needs attention'
+			$sample.End = '2026-01-02T00:00:00'
+			Get-AccessReviewStatusRisk $sample $snapshot | Should -Be 'Needs attention'
+			$sample.End = '2026-01-02T00:00:00Z'
+			$sample.Summary = $null
+			Get-AccessReviewStatusRisk $sample $snapshot | Should -Be 'Needs attention'
+			$sample.Summary = [pscustomobject]@{ Total = 0; NotReviewed = 0; Other = 0 }
+			Get-AccessReviewStatusRisk $sample $snapshot | Should -Be 'Needs attention'
+			$sample.Summary = [pscustomobject]@{ Total = 10; NotReviewed = 2; Other = 3 }
+			Get-AccessReviewStatusRisk $sample $snapshot | Should -Be 'Needs attention'
+			$sample.Summary.NotReviewed = 6
+			Get-AccessReviewStatusRisk $sample $snapshot | Should -Be 'At risk'
+		}
+
+		It 'does not use instance counts when the active stage cannot be read' {
+			$sample.Stages = @([pscustomobject]@{ Status = 'InProgress'; Summary = $null })
+			Get-AccessReviewStatusRisk $sample $snapshot | Should -Be 'Needs attention'
+			$sample.StageError = 'Forbidden'
+			Get-AccessReviewStatusRisk $sample $snapshot | Should -Be 'Needs attention'
+		}
+
+		It 'labels stage order only when runtime dates cover the whole instance' {
+			$sample.Start = '2026-01-01T00:00:00Z'
+			$sample.End = '2026-01-04T00:00:00Z'
+			$sample.Stages = @(
+				[pscustomobject]@{ Start = '2026-01-01T00:00:00Z'; End = '2026-01-02T00:00:00Z'; Status = 'Completed' },
+				[pscustomobject]@{ Start = '2026-01-02T00:00:00Z'; End = '2026-01-03T00:00:00Z'; Status = 'InProgress' },
+				[pscustomobject]@{ Start = '2026-01-03T00:00:00Z'; End = '2026-01-04T00:00:00Z'; Status = 'NotStarted' }
+			)
+			Get-AccessReviewStatusStageLabel $sample | Should -Be 'Stage 2 of 3'
+			$sample.Stages[1].Status = 'Completed'
+			$sample.Stages[2].Status = 'InProgress'
+			Get-AccessReviewStatusStageLabel $sample | Should -Be 'Final stage (3 of 3)'
+			$sample.End = '2026-01-03T00:00:00Z'
+			$sample.Stages = @($sample.Stages[0], $sample.Stages[1])
+			$sample.Stages[0].Status = 'InProgress'
+			Get-AccessReviewStatusStageLabel $sample | Should -Be 'Stage 1 of 2'
+			$sample.Stages[0].Status = 'Completed'
+			$sample.Stages[1].Status = 'InProgress'
+			Get-AccessReviewStatusStageLabel $sample | Should -Be 'Final stage (2 of 2)'
+			$sample.Stages[1].Start = '2026-01-01T12:00:00Z'
+			Get-AccessReviewStatusStageLabel $sample | Should -Be 'Stage unavailable'
+			$sample.Stages = @($sample.Stages[1])
+			Get-AccessReviewStatusStageLabel $sample | Should -Be 'Stage unavailable'
+			$sample.Stages = @()
+			Get-AccessReviewStatusStageLabel $sample | Should -Be 'Stage unavailable'
+		}
 	}
 
 	It 'rejects unsafe or repeated collection paging and still exports an explicitly partial report' -TestCases @(
