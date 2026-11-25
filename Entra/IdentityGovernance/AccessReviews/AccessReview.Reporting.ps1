@@ -807,23 +807,43 @@ function Get-AccessReviewStatusProgress {
 function ConvertTo-AccessReviewStatusTime {
 	param([AllowNull()][object]$Value)
 	if ($Value -is [datetimeoffset]) { return $Value.ToUniversalTime() }
+	# Graph timestamps are UTC; deserializers may drop the zone, so Unspecified is treated as UTC.
 	if ($Value -is [datetime]) {
-		if ($Value.Kind -eq [DateTimeKind]::Unspecified) { return $null }
+		if ($Value.Kind -eq [DateTimeKind]::Unspecified) { return [datetimeoffset]::new($Value.Ticks, [timespan]::Zero) }
 		return ([datetimeoffset]$Value).ToUniversalTime()
 	}
 	$text = [string]$Value
-	if ($text -notmatch '(?:Z|[+-]\d{2}:\d{2})$') { return $null }
+	if ($text -notmatch '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}') { return $null }
 	$parsed = [datetimeoffset]::MinValue
 	if ([datetimeoffset]::TryParse($text, [System.Globalization.CultureInfo]::InvariantCulture,
-		[System.Globalization.DateTimeStyles]::None, [ref]$parsed)) {
+		[System.Globalization.DateTimeStyles]::AssumeUniversal, [ref]$parsed)) {
 		return $parsed.ToUniversalTime()
 	}
 	$null
 }
 
+function Get-AccessReviewStatusActiveStage {
+	param([AllowNull()][object]$Instance)
+	if (-not $Instance -or $Instance.Status -ne 'InProgress' -or $Instance.StageError) { return $null }
+	$active = @($Instance.Stages | Where-Object Status -EQ 'InProgress')
+	if ($active.Count -eq 1) { return $active[0] }
+	$null
+}
+
+function Get-AccessReviewStatusDeadlineTime {
+	param([AllowNull()][object]$Instance)
+	$instanceEnd = ConvertTo-AccessReviewStatusTime $Instance.End
+	$stage = Get-AccessReviewStatusActiveStage $Instance
+	if ($stage) {
+		$stageEnd = ConvertTo-AccessReviewStatusTime $stage.End
+		if ($null -ne $stageEnd -and ($null -eq $instanceEnd -or $stageEnd -lt $instanceEnd)) { return $stageEnd }
+	}
+	$instanceEnd
+}
+
 function Get-AccessReviewStatusDeadline {
 	param([AllowNull()][object]$Instance, [AllowNull()][object]$Snapshot)
-	$end = ConvertTo-AccessReviewStatusTime $Instance.End
+	$end = Get-AccessReviewStatusDeadlineTime $Instance
 	$now = ConvertTo-AccessReviewStatusTime $Snapshot
 	if ($null -eq $end -or $null -eq $now) { return 'Unavailable' }
 	$remaining = $end - $now
@@ -849,34 +869,30 @@ function Get-AccessReviewStatusRisk {
 }
 
 function Get-AccessReviewStatusStageLabel {
-	param([AllowNull()][object]$Instance)
-	if (-not $Instance -or $Instance.Status -ne 'InProgress' -or $Instance.StageError) { return 'Stage unavailable' }
-	$instanceStart = ConvertTo-AccessReviewStatusTime $Instance.Start
-	$instanceEnd = ConvertTo-AccessReviewStatusTime $Instance.End
-	if ($null -eq $instanceStart -or $null -eq $instanceEnd) { return 'Stage unavailable' }
-	$recordedStages = [System.Collections.Generic.List[object]]::new()
-	foreach ($stage in $Instance.Stages) {
-		$start = ConvertTo-AccessReviewStatusTime $stage.Start
-		$end = ConvertTo-AccessReviewStatusTime $stage.End
-		if ($null -eq $start -or $null -eq $end -or $end -le $start) { return 'Stage unavailable' }
-		$recordedStages.Add([pscustomobject]@{ Start = $start; End = $end; Status = $stage.Status })
-	}
-	$stages = @($recordedStages | Sort-Object Start)
-	if (-not $stages.Count -or $stages[0].Start -ne $instanceStart -or $stages[-1].End -ne $instanceEnd) {
+	param([AllowNull()][object]$Instance, [AllowNull()][object[]]$Configuration)
+	if (-not $Instance) { return 'Stage unavailable' }
+	if ($Instance.Status -ne 'InProgress') { return 'Review not running' }
+	if ($Instance.StageError) { return 'Stage unavailable' }
+	$configured = @($Configuration | Where-Object { $_ })
+	$singleStage = $configured.Count -eq 1 -and $configured[0].Id -eq 'Single-stage configuration'
+	$runtime = @($Instance.Stages | Where-Object { $_ })
+	if (-not $runtime.Count) {
+		if ($singleStage) { return 'Final stage (1 of 1)' }
 		return 'Stage unavailable'
 	}
-	$activeIndex = -1
-	for ($i = 0; $i -lt $stages.Count; $i++) {
-		if ($i -gt 0 -and $stages[$i - 1].End -ne $stages[$i].Start) { return 'Stage unavailable' }
-		if ($stages[$i].Status -eq 'InProgress') {
-			if ($activeIndex -ge 0) { return 'Stage unavailable' }
-			$activeIndex = $i
-		}
+	$active = Get-AccessReviewStatusActiveStage $Instance
+	if (-not $active) { return 'Stage unavailable' }
+	$activeStart = ConvertTo-AccessReviewStatusTime $active.Start
+	if ($null -eq $activeStart) { return 'Stage unavailable' }
+	$number = 1
+	foreach ($stage in $runtime) {
+		if ([object]::ReferenceEquals($stage, $active)) { continue }
+		$start = ConvertTo-AccessReviewStatusTime $stage.Start
+		if ($null -ne $start -and $start -lt $activeStart) { $number++ }
 	}
-	if ($activeIndex -lt 0) { return 'Stage unavailable' }
-	$number = $activeIndex + 1
-	if ($number -eq $stages.Count) { return "Final stage ($number of $($stages.Count))" }
-	"Stage $number of $($stages.Count)"
+	$total = [math]::Max([math]::Max($runtime.Count, $number), $(if ($singleStage) { 1 } else { $configured.Count }))
+	if ($number -eq $total) { return "Final stage ($number of $total)" }
+	"Stage $number of $total"
 }
 
 function Get-AccessReviewStatusLabel {
@@ -1002,7 +1018,7 @@ function New-AccessReviewStatusHtml {
 			$search = ConvertTo-AccessReviewHtmlText (@{ Review = $definition.DisplayName; Configuration = $definition.Configuration; Owners = $definition.CurrentResources; Instance = $instance } | ConvertTo-Json -Depth 15 -Compress)
 			$selectedProgress = Get-AccessReviewStatusProgress $instance
 			$progress = if ($null -ne $selectedProgress.Summary) { "$($selectedProgress.Summary.Recorded) / $($selectedProgress.Summary.Total)" } else { 'Unavailable / not materialized' }
-			$stageLabel = Get-AccessReviewStatusStageLabel $instance
+			$stageLabel = Get-AccessReviewStatusStageLabel $instance @($definition.Configuration)
 			$deadline = Get-AccessReviewStatusDeadline $instance $Report.FinishedAt
 			$risk = Get-AccessReviewStatusRisk $instance $Report.FinishedAt
 			if (-not $instance -and ($definition.Error -or $definition.Status -eq 'InProgress')) { $risk = 'Needs attention' }
@@ -1027,7 +1043,11 @@ function New-AccessReviewStatusHtml {
 					else { "$($selectedProgress.Summary.NotReviewed) of $($selectedProgress.Summary.Total) not reviewed" }
 				}
 				else { 'Review progress unavailable' }
-				$endText = if ($deadline -eq 'Unavailable') { 'Deadline unavailable' } else { "Ends $endLabel (UTC)" }
+				$deadlineTime = Get-AccessReviewStatusDeadlineTime $instance
+				$deadlineEnd = ConvertTo-AccessReviewStatusTime $instance.End
+				$endText = if ($deadline -eq 'Unavailable') { 'Deadline unavailable' }
+					elseif ($null -ne $deadlineEnd -and $deadlineTime -lt $deadlineEnd) { "Current stage ends $(Get-AccessReviewStatusTimeLabel $deadlineTime) (UTC)" }
+					else { "Ends $endLabel (UTC)" }
 				$uncertainty = if ($definition.Error -and -not $instance) { ' | Instance listing unavailable' }
 					elseif (-not $instance) { ' | No instance returned' }
 					elseif (-not $instance.Status) { ' | Instance status unavailable' }

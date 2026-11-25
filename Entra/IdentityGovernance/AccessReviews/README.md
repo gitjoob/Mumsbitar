@@ -225,13 +225,16 @@ Includes stages, individual users, decisions, recorded reviewers and current
 owners/managers, with reviewer departments from the current directory.
 The **Reviews needing attention** section expands to show:
 
-- **At risk:** an `InProgress` instance ending in less than 48 hours after the
-  snapshot, with strictly more than 50% of its selected decision items marked
-  `NotReviewed`. Exactly 48 hours or exactly 50% does not qualify.
+- **At risk:** an `InProgress` instance whose current deadline is less than 48
+  hours after the snapshot, with strictly more than 50% of its selected decision
+  items marked `NotReviewed`. Exactly 48 hours or exactly 50% does not qualify.
+  The current deadline is the single active stage's end time when that is
+  earlier than the instance end (multi-stage reviews); otherwise it is the
+  instance end. Graph timestamps without a timezone are treated as UTC.
 - **Needs attention:** missing instance status, deadline or progress, zero
   decision items, or unrecognized outcomes that prevent a reliable assessment.
   Failed instance listings are also shown.
-- **Overdue:** an `InProgress` instance whose recorded end time has passed.
+- **Overdue:** an `InProgress` instance whose current deadline has passed.
 
 Each entry opens that instance's details. Counts use the single active stage
 when available, otherwise instance outcomes; unknown outcomes are not counted
@@ -243,10 +246,13 @@ for a fresh snapshot.
 The inventory provides expandable review entries and status, deadline and
 reviewer filters. Reviewer search includes configured scopes, recorded
 reviewers and decision actors, not a verified current assignment roster.
-The current-stage label shows an ordinal or final stage only when the runtime
-stage intervals fully and consecutively cover the instance's recorded dates;
-otherwise it shows `Stage unavailable`. It does not map runtime stage IDs to
-the current configuration or infer missing stages.
+The current-stage label shows `Final stage (1 of 1)` for running single-stage
+reviews. For multi-stage reviews it shows `Stage n of total` (or `Final stage`),
+where `n` is the single active runtime stage's position by start time and
+`total` is the larger of the configured and returned stage counts. It shows
+`Review not running` for instances that are not `InProgress`, and
+`Stage unavailable` when stages could not be read or zero/several stages are
+active. The configured count comes from the current definition.
 
 The dashboard pie chart counts each matched review definition once by current
 status, not once per historical instance or stage. It opens on **All prefixes**.

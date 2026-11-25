@@ -367,7 +367,7 @@ Describe 'Read-only historical access review status' {
 		$null = & $reporter -HtmlReportPath $outputPath
 		$html = Get-Content $outputPath -Raw
 		$html | Should -Match '<th>Review progress recorded / items</th><th>Progress source</th>'
-		$html | Should -Match '<td>1 / 2</td><td>Current stage</td><td>Stage unavailable</td>'
+		$html | Should -Match '<td>1 / 2</td><td>Current stage</td><td>Stage 1 of 3</td>'
 		$html | Should -Match '<td>Review instance</td>'
 	}
 
@@ -580,7 +580,7 @@ Describe 'Read-only historical access review status' {
 		$null = & $reporter -HtmlReportPath $outputPath
 		$html = Get-Content $outputPath -Raw
 		$html | Should -Match '(?s)<summary>At risk \(1\)</summary>.*?data-target="status-0">AR Finance</button>.*?3 of 4 not reviewed'
-		$html | Should -Match 'Final stage \(1 of 1\)'
+		$html | Should -Match 'Stage 1 of 3'
 		$html | Should -Match '<details class="inventory-review"><summary>AR Finance</summary>'
 		$html | Should -Match 'id="deadline"'
 		$html | Should -Match 'id="reviewer"'
@@ -630,7 +630,9 @@ Describe 'Read-only historical access review status' {
 			$sample.End = 'invalid'
 			Get-AccessReviewStatusRisk $sample $snapshot | Should -Be 'Needs attention'
 			$sample.End = '2026-01-02T00:00:00'
-			Get-AccessReviewStatusRisk $sample $snapshot | Should -Be 'Needs attention'
+			Get-AccessReviewStatusRisk $sample $snapshot | Should -Be 'At risk'
+			$sample.End = [datetime]::new(2026, 1, 2, 0, 0, 0, [DateTimeKind]::Unspecified)
+			Get-AccessReviewStatusRisk $sample $snapshot | Should -Be 'At risk'
 			$sample.End = '2026-01-02T00:00:00Z'
 			$sample.Summary = $null
 			Get-AccessReviewStatusRisk $sample $snapshot | Should -Be 'Needs attention'
@@ -649,31 +651,33 @@ Describe 'Read-only historical access review status' {
 			Get-AccessReviewStatusRisk $sample $snapshot | Should -Be 'Needs attention'
 		}
 
-		It 'labels stage order only when runtime dates cover the whole instance' {
-			$sample.Start = '2026-01-01T00:00:00Z'
-			$sample.End = '2026-01-04T00:00:00Z'
+		It 'uses the active stage deadline when it ends before the instance' {
+			$sample.End = '2026-01-20T00:00:00Z'
+			$sample.Stages = @([pscustomobject]@{
+				Status = 'InProgress'; Start = '2025-12-25T00:00:00Z'; End = '2026-01-02T00:00:00Z'
+				Summary = [pscustomobject]@{ Total = 4; NotReviewed = 4; Other = 0 }
+			})
+			Get-AccessReviewStatusDeadline $sample $snapshot | Should -Be 'Within 48 hours'
+			Get-AccessReviewStatusRisk $sample $snapshot | Should -Be 'At risk'
+		}
+
+		It 'labels the active stage position against runtime and configured stages' {
+			$multi = @([pscustomobject]@{ Id = '1' }, [pscustomobject]@{ Id = '2' }, [pscustomobject]@{ Id = '3' })
+			$single = @([pscustomobject]@{ Id = 'Single-stage configuration' })
+			Get-AccessReviewStatusStageLabel $sample $single | Should -Be 'Final stage (1 of 1)'
+			Get-AccessReviewStatusStageLabel $sample $multi | Should -Be 'Stage unavailable'
 			$sample.Stages = @(
-				[pscustomobject]@{ Start = '2026-01-01T00:00:00Z'; End = '2026-01-02T00:00:00Z'; Status = 'Completed' },
-				[pscustomobject]@{ Start = '2026-01-02T00:00:00Z'; End = '2026-01-03T00:00:00Z'; Status = 'InProgress' },
-				[pscustomobject]@{ Start = '2026-01-03T00:00:00Z'; End = '2026-01-04T00:00:00Z'; Status = 'NotStarted' }
+				[pscustomobject]@{ Start = '2026-01-01T00:00:00.123Z'; End = '2026-01-02T00:00:00Z'; Status = 'Completed' },
+				[pscustomobject]@{ Start = '2026-01-02T00:00:00Z'; End = '2026-01-03T00:00:00Z'; Status = 'InProgress' }
 			)
-			Get-AccessReviewStatusStageLabel $sample | Should -Be 'Stage 2 of 3'
-			$sample.Stages[1].Status = 'Completed'
-			$sample.Stages[2].Status = 'InProgress'
-			Get-AccessReviewStatusStageLabel $sample | Should -Be 'Final stage (3 of 3)'
-			$sample.End = '2026-01-03T00:00:00Z'
-			$sample.Stages = @($sample.Stages[0], $sample.Stages[1])
+			Get-AccessReviewStatusStageLabel $sample $multi | Should -Be 'Stage 2 of 3'
+			Get-AccessReviewStatusStageLabel $sample $null | Should -Be 'Final stage (2 of 2)'
+			$sample.Stages += [pscustomobject]@{ Start = $null; End = $null; Status = 'NotStarted' }
+			Get-AccessReviewStatusStageLabel $sample $null | Should -Be 'Stage 2 of 3'
 			$sample.Stages[0].Status = 'InProgress'
-			Get-AccessReviewStatusStageLabel $sample | Should -Be 'Stage 1 of 2'
-			$sample.Stages[0].Status = 'Completed'
-			$sample.Stages[1].Status = 'InProgress'
-			Get-AccessReviewStatusStageLabel $sample | Should -Be 'Final stage (2 of 2)'
-			$sample.Stages[1].Start = '2026-01-01T12:00:00Z'
-			Get-AccessReviewStatusStageLabel $sample | Should -Be 'Stage unavailable'
-			$sample.Stages = @($sample.Stages[1])
-			Get-AccessReviewStatusStageLabel $sample | Should -Be 'Stage unavailable'
-			$sample.Stages = @()
-			Get-AccessReviewStatusStageLabel $sample | Should -Be 'Stage unavailable'
+			Get-AccessReviewStatusStageLabel $sample $multi | Should -Be 'Stage unavailable'
+			$sample.Status = 'Completed'
+			Get-AccessReviewStatusStageLabel $sample $multi | Should -Be 'Review not running'
 		}
 	}
 
