@@ -49,9 +49,12 @@ Describe 'Discovery workbook export' {
 		$rows[0].'Approver 1 List' | Should -BeNullOrEmpty
 		$rows[0].Role | Should -BeNullOrEmpty
 		$rows[0].Description | Should -Match 'Package resource: Root SG'
-		$rows[0].Description | Should -Match 'Users in nested groups \(Child\) are nested members of the root group'
+		$rows[0].Description | Should -Not -Match 'Gives you membership in 6 Entra Groups'
+		$rows[0].Description | Should -Match 'grants assigned users membership in the root group only; it does not add them to nested groups'
+		$rows[0].Description | Should -Match "Nested groups in the root group's membership hierarchy: Child"
+		$rows[0].Description | Should -Match 'Existing members of these groups are transitively members of the root group'
 		$rows[0].Description | Should -Match 'Direct Entra enterprise application assignments by group: Root SG: Application A\. Child: Application B'
-		$rows[0].Description | Should -Match 'assignments on nested groups may provide their members with access to additional enterprise applications through nested membership'
+		$rows[0].Description | Should -Match 'being assigned to the root through this package does not add a user to a nested group'
 		$rows[0].Description | Should -Not -Match 'may grant'
 		$topology = @(Import-Excel -Path $script:output -WorksheetName Topology)
 		$topology | Should -HaveCount 2

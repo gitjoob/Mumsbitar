@@ -162,14 +162,14 @@ function Get-DiscoveryPackageDescription {
 			}
 		) -join '. '
 		$nestedText = if ($nestedNames.Count) {
-			" Users in nested groups ($($nestedNames -join '; ')) are nested members of the root group."
+			" Nested groups in the root group's membership hierarchy: $($nestedNames -join '; '). Existing members of these groups are transitively members of the root group and may receive access through the root group's assignments."
+		}
+		else { ' No nested groups were discovered.' }
+		$nestedAssignmentText = if ($nestedNames.Count) {
+			' Assignments shown for nested groups apply to those groups and their own members; being assigned to the root through this package does not add a user to a nested group.'
 		}
 		else { '' }
-		$nestedApplicationText = if ($nestedNames.Count) {
-			' Direct application assignments on nested groups may provide their members with access to additional enterprise applications through nested membership.'
-		}
-		else { '' }
-		"Package resource: $rootName.$nestedText Direct Entra enterprise application assignments by group: $assignmentLines.$nestedApplicationText"
+		"Package resource: $rootName. This package grants assigned users membership in the root group only; it does not add them to nested groups.$nestedText Direct Entra enterprise application assignments by group: $assignmentLines.$nestedAssignmentText"
 	}
 	else {
 		"Included groups: $($names -join '; '). Direct Entra application assignments for these groups: $appText."

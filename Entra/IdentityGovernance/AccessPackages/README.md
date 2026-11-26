@@ -120,15 +120,15 @@ directory: they contain application and group information. Discovery records
 direct-user counts but not user membership lists.
 
 By default, each directly assigned root proposes one package with only the root
-group as a Member resource. Assigning the package adds users only to that root;
-users in nested groups are nested members of the root and are described in the
-package description, not added as separate resources. Shared groups are
-described under each root's separate package, not merged into one package. The
-description lists direct Entra enterprise-application assignments by group, so
-assignments on nested groups are visible as potential additional application
-access through nesting. This list does not establish access provided by other
-systems or mechanisms, and an application assignment does not guarantee
-effective access to the application.
+group as a Member resource. The package adds assigned users to the root only;
+it does not add them to nested groups. Nested groups in the root's membership
+hierarchy, and their existing members' transitive membership in the root, are
+explained in the description. Shared groups are described under each root's
+separate package, not merged into one package. The description lists direct
+Entra enterprise-application assignments by group. Assignments on nested groups
+apply to those groups' own members, not to users merely assigned to the root
+through this package. An application assignment does not guarantee effective
+access to the application.
 Reading group application assignments requires delegated or application
 `Directory.Read.All` (or `Directory.ReadWrite.All` or
 `AppRoleAssignment.ReadWrite.All`), admin consent, and any required delegated
