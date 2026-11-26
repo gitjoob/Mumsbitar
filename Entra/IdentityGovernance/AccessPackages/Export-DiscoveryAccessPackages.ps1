@@ -32,7 +32,7 @@ if (-not [IO.Directory]::Exists([IO.Path]::GetDirectoryName($outputPath))) { thr
 $data = Get-Content -LiteralPath $inputPath -Raw | ConvertFrom-Json
 $discovery = Get-PackageDiscoveryCandidates -Data $data -AllowSharedGroups
 $applicationIds = @($discovery.ServicePrincipalIds)
-$workbookVersion = if ($OnePackagePerGroup) { 4 } else { 3 }
+$workbookVersion = if ($OnePackagePerGroup) { 4 } else { 5 }
 $groups = $discovery.Groups
 $candidates = if ($OnePackagePerGroup) {
 	$seenGroups = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
@@ -57,15 +57,16 @@ $applicationCache = @{}
 foreach ($candidate in $candidates) {
 	$reasons = [System.Collections.Generic.List[string]]::new()
 	if ($candidate.Reason) { $reasons.Add($candidate.Reason) }
+	$resourceGroupIds = if ($OnePackagePerGroup) { $candidate.GroupIds } else { @($candidate.Root) }
 	if ($inventoryError) { $reasons.Add("Cannot establish package coverage: $inventoryError") }
 	else {
 		try {
-			$coverage = Get-PackageCoverageResult -GroupIds $candidate.GroupIds -Inventory $inventory -AllowSharedGroups
+			$coverage = Get-PackageCoverageResult -GroupIds $resourceGroupIds -Inventory $inventory -AllowSharedGroups
 			if ($coverage.Status -ne 'Ready') { $candidate.Status = $coverage.Status; $reasons.Add($coverage.Reason) }
 		}
 		catch { $reasons.Add("Cannot establish package activity: $($_.Exception.Message)") }
 	}
-	foreach ($id in $candidate.GroupIds) {
+	foreach ($id in $resourceGroupIds) {
 		if (-not $eligibility.ContainsKey($id)) {
 			try { $null = Get-PackageGroup -GroupId $id; $eligibility[$id] = '' }
 			catch { $eligibility[$id] = $_.Exception.Message }
@@ -78,7 +79,7 @@ foreach ($candidate in $candidates) {
 		}
 		else {
 			$candidate.Description = Get-DiscoveryPackageDescription -GroupIds $candidate.GroupIds `
-				-Groups $groups -ApplicationCache $applicationCache
+				-Groups $groups -ApplicationCache $applicationCache -RootGroupId $candidate.Root
 		}
 	}
 	catch {
@@ -115,6 +116,7 @@ try {
 	$topologyRow = 2
 	$privilegedRolePattern = '(?:(?<![\p{L}\p{N}])|(?<=[a-z])(?=[A-Z]))(?i:admin(?:s|istrators?)?|super[\s_-]*users?)(?:(?![\p{L}\p{N}])|(?=[A-Z][a-z]))'
 	foreach ($candidate in $candidates) {
+		$resourceGroupIds = if ($OnePackagePerGroup) { $candidate.GroupIds } else { @($candidate.Root) }
 		$rootName = [string]$groups[$candidate.Root].DisplayName
 		$appName = [string]$candidate.ServicePrincipalName
 		$name = "$appName - $rootName".Trim(' ', '-')
@@ -132,7 +134,7 @@ try {
 			if (-not $name -or $name -match '(?i)(?<![a-z0-9])(?:access[\s_-]*package|ap|sg)(?![a-z0-9])') {
 				$action = "Replace the suggested package name; it violates naming rules. $action"
 			}
-			$values = @($role, '', '', '', ($candidate.GroupIds -join ';'), $description, $name, '', '', '', $candidate.ServicePrincipalId, $candidate.Root, $action)
+			$values = @($role, '', '', '', ($resourceGroupIds -join ';'), $description, $name, '', '', '', $candidate.ServicePrincipalId, $candidate.Root, $action)
 			for ($i = 0; $i -lt $values.Count; $i++) { $sheet.Cells[$sheetRow, ($i + 1)].Value = [string]$values[$i] }
 			$sheetRow++
 		}

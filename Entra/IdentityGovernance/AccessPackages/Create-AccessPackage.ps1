@@ -109,7 +109,7 @@ if ($isWorkbook) {
 		try {
 			$metadata = $package.Workbook.Worksheets['Discovery metadata']
 			$metadataVersion = "$($metadata.Cells[1, 2].Value)"
-			if ($metadata.Cells[1, 1].Value -ne 'Discovery workbook version' -or $metadataVersion -notin @('1', '2', '3', '4') -or
+			if ($metadata.Cells[1, 1].Value -ne 'Discovery workbook version' -or $metadataVersion -notin @('1', '2', '3', '4', '5') -or
 				-not $metadata.Dimension -or $metadata.Dimension.End.Row -lt 2) {
 				throw 'Discovery workbook metadata is invalid.'
 			}
@@ -126,7 +126,7 @@ if ($isWorkbook) {
 			}
 			if (($metadataVersion -eq '1' -and $discoveryApplicationIds.Count -ne 1) -or
 				($metadataVersion -eq '2' -and $discoveryApplicationIds.Count -lt 2) -or
-				($metadataVersion -in '3', '4' -and $discoveryApplicationIds.Count -lt 1)) {
+				($metadataVersion -in '3', '4', '5' -and $discoveryApplicationIds.Count -lt 1)) {
 				throw 'Discovery workbook metadata does not match its version.'
 			}
 		}
@@ -590,7 +590,7 @@ if ($isDiscoveryWorkbook) {
 			throw 'Each discovery workbook row must retain its original application and root group IDs.'
 		}
 		foreach ($id in @(Get-WorkbookGroupIds -Text (Get-InputText $row 'GroupId') -Column 'GroupId' | Select-Object -Unique)) {
-			if ($groupOwners.ContainsKey($id) -and $metadataVersion -ne '3') { $discoveryOverlaps[$id] = $true }
+			if ($groupOwners.ContainsKey($id) -and $metadataVersion -notin '3', '5') { $discoveryOverlaps[$id] = $true }
 			else { $groupOwners[$id] = $true }
 		}
 	}
@@ -600,7 +600,7 @@ if ($isDiscoveryWorkbook) {
 		try {
 			$currentDiscoveries["$applicationId"] = Get-CurrentPackageDiscovery -ServicePrincipalId ([guid]$applicationId) `
 				-ReviewScriptPath $reviewScript -TemporaryParent ([IO.Path]::GetDirectoryName($workbookPath)) `
-				-AllowSharedGroups:($metadataVersion -in '3', '4')
+				-AllowSharedGroups:($metadataVersion -in '3', '4', '5')
 		}
 		catch { throw "Unable to refresh application '$applicationId' group discovery; no packages were created. $($_.Exception.Message)" }
 	}
@@ -795,8 +795,8 @@ foreach ($row in $rows) {
 					$currentDiscovery = $currentDiscoveries["$rowApplication"]
 					$coverage = Test-DiscoveryPackageCandidate -Discovery $currentDiscovery `
 						-RootGroupId ([guid](Get-InputText $row 'Discovery RootGroupId')) -GroupIds $result.GroupIds `
-						-ServicePrincipalId $rowApplication -AllowSharedGroups:($metadataVersion -in '3', '4') `
-						-SingleGroup:($metadataVersion -eq '4')
+						-ServicePrincipalId $rowApplication -AllowSharedGroups:($metadataVersion -in '3', '4', '5') `
+						-SingleGroup:($metadataVersion -eq '4') -RootOnly:($metadataVersion -eq '5')
 					if ($coverage.Status -ne 'Ready') { $result.Status = $coverage.Status; $result.Reason = $coverage.Reason }
 					elseif ($metadataVersion -eq '3') {
 						try {
@@ -810,6 +810,25 @@ foreach ($row in $rows) {
 						catch {
 							$result.Status = 'Manual review'
 							$result.Reason = "Unable to verify group application assignments: $($_.Exception.Message)"
+						}
+					}
+					elseif ($metadataVersion -eq '5') {
+						try {
+							$rootCandidate = @($currentDiscovery.Candidates | Where-Object {
+								$_.Root -eq (Get-InputText $row 'Discovery RootGroupId') -and $_.ServicePrincipalId -eq "$rowApplication"
+							})
+							if ($rootCandidate.Count -ne 1) { throw 'The discovered root is no longer unique.' }
+							$currentDescription = Get-DiscoveryPackageDescription -GroupIds $rootCandidate[0].GroupIds `
+								-Groups $currentDiscovery.Groups -ApplicationCache $discoveryApplicationCache `
+								-RootGroupId ([string](Get-InputText $row 'Discovery RootGroupId'))
+							if (-not $description.Contains($currentDescription)) {
+								$result.Status = 'Manual review'
+								$result.Reason = 'The root or nested groups or their application assignments in the description have changed. Regenerate the workbook.'
+							}
+						}
+						catch {
+							$result.Status = 'Manual review'
+							$result.Reason = "Unable to verify root and nested group details: $($_.Exception.Message)"
 						}
 					}
 					elseif ($metadataVersion -eq '4') {

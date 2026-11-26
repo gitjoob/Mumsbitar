@@ -81,6 +81,16 @@ Describe 'Discovery package creation safeguards' {
 		foreach ($candidate in $discovery.Candidates) { $candidate.GroupIds | Should -Contain $script:child }
 	}
 
+	It 'validates a root-only package resource against its discovered root' {
+		$discovery = Get-PackageDiscoveryCandidates $script:data
+		(Test-DiscoveryPackageCandidate -Discovery $discovery -RootGroupId $script:root `
+			-GroupIds @($script:root) -RootOnly).Status | Should -Be 'Ready'
+		$result = Test-DiscoveryPackageCandidate -Discovery $discovery -RootGroupId $script:root `
+			-GroupIds @($script:root, $script:child) -RootOnly
+		$result.Status | Should -Be 'Manual review'
+		$result.Reason | Should -Match 'only its original discovered root group'
+	}
+
 	It 'describes only the applications directly assigned to the included groups' {
 		Mock Get-MgContext { @{ AuthType = 'AppOnly'; Scopes = @('Directory.Read.All') } }
 		Mock Get-PackageCoverageCollection {

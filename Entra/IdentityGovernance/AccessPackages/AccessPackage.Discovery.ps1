@@ -109,10 +109,15 @@ function Get-DiscoveryPackageDescription {
 	param(
 		[Parameter(Mandatory)][string[]]$GroupIds,
 		[Parameter(Mandatory)][hashtable]$Groups,
-		[Parameter(Mandatory)][hashtable]$ApplicationCache
+		[Parameter(Mandatory)][hashtable]$ApplicationCache,
+		[string]$RootGroupId
 	)
+	if ($RootGroupId -and $RootGroupId -notin $GroupIds) {
+		throw "Root group '$RootGroupId' is missing from the discovered group set."
+	}
 	$names = [System.Collections.Generic.List[string]]::new()
 	$applications = @{}
+	$groupApplications = @{}
 	foreach ($id in @($GroupIds | Sort-Object -Unique)) {
 		if (-not $Groups.ContainsKey($id) -or [string]::IsNullOrWhiteSpace([string]$Groups[$id].DisplayName)) {
 			throw "Cannot establish the name of group '$id'."
@@ -121,6 +126,7 @@ function Get-DiscoveryPackageDescription {
 		if (-not $ApplicationCache.ContainsKey($id)) {
 			$ApplicationCache[$id] = @(Get-DiscoveryGroupApplications -GroupId ([guid]$id))
 		}
+		$groupApplications[$id] = @($ApplicationCache[$id])
 		foreach ($application in $ApplicationCache[$id]) {
 			if ($applications.ContainsKey($application.Id) -and $applications[$application.Id] -ne $application.Name) {
 				throw "Graph returned inconsistent application names for '$($application.Id)'."
@@ -135,7 +141,39 @@ function Get-DiscoveryPackageDescription {
 		else { $name }
 	} | Sort-Object)
 	$appText = if ($appNames.Count) { $appNames -join '; ' } else { 'None' }
-	"Included groups: $($names -join '; '). Direct Entra application assignments for these groups: $appText."
+	if ($RootGroupId) {
+		$rootName = [string]$Groups[$RootGroupId].DisplayName
+		$nestedIds = @($GroupIds | Where-Object { $_ -ne $RootGroupId } | Sort-Object -Unique)
+		$orderedIds = @($RootGroupId) + $nestedIds
+		$nestedNames = @($nestedIds | ForEach-Object { [string]$Groups[$_].DisplayName })
+		$assignmentLines = @(
+			foreach ($id in $orderedIds) {
+				$groupName = [string]$Groups[$id].DisplayName
+				$assignedNames = @(
+					foreach ($application in $groupApplications[$id]) {
+						if (@($applications.Values | Where-Object { $_ -eq $application.Name }).Count -gt 1) {
+							"$($application.Name) ($($application.Id))"
+						}
+						else { $application.Name }
+					}
+				) | Sort-Object
+				$assignedText = if ($assignedNames.Count) { $assignedNames -join '; ' } else { 'None' }
+				"$groupName`: $assignedText"
+			}
+		) -join '. '
+		$nestedText = if ($nestedNames.Count) {
+			" Users in nested groups ($($nestedNames -join '; ')) are nested members of the root group."
+		}
+		else { '' }
+		$nestedApplicationText = if ($nestedNames.Count) {
+			' Direct application assignments on nested groups may provide their members with access to additional enterprise applications through nested membership.'
+		}
+		else { '' }
+		"Package resource: $rootName.$nestedText Direct Entra enterprise application assignments by group: $assignmentLines.$nestedApplicationText"
+	}
+	else {
+		"Included groups: $($names -join '; '). Direct Entra application assignments for these groups: $appText."
+	}
 }
 
 function Get-DiscoverySingleGroupDescription {
@@ -182,11 +220,22 @@ function Test-DiscoveryPackageCandidate {
 		[Parameter(Mandatory)][string[]]$GroupIds,
 		[guid]$ServicePrincipalId,
 		[switch]$AllowSharedGroups,
-		[switch]$SingleGroup
+		[switch]$SingleGroup,
+		[switch]$RootOnly
 	)
 	try {
 		$actual = @($GroupIds | Sort-Object -Unique)
-		if ($SingleGroup) {
+		if ($RootOnly) {
+			if ($actual.Count -ne 1 -or $actual[0] -ne "$RootGroupId") {
+				throw 'The workbook must contain only its original discovered root group. Regenerate the workbook.'
+			}
+			$candidate = @($Discovery.Candidates | Where-Object {
+				$_.Root -eq "$RootGroupId" -and (-not $ServicePrincipalId -or $_.ServicePrincipalId -eq "$ServicePrincipalId")
+			})
+			if ($candidate.Count -ne 1) { throw 'The root is no longer directly assigned to the application.' }
+			if ($candidate[0].Status -ne 'Ready') { throw $candidate[0].Reason }
+		}
+		elseif ($SingleGroup) {
 			if ($actual.Count -ne 1 -or $actual[0] -ne "$RootGroupId") {
 				throw 'The workbook must contain exactly its original discovered group. Regenerate the workbook.'
 			}

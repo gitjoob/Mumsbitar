@@ -39,18 +39,19 @@ Describe 'Discovery workbook export' {
 		}
 	}
 
-	It 'writes a usable draft with literal text and the full cyclic descendant set' {
+	It 'writes only the root resource and describes nested groups in the draft' {
 		$script:fixture | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $script:input
 		& $script:exportPath -DiscoveryPath $script:input -WorkbookPath $script:output
 		@(Import-Excel -Path $script:output -WorksheetName 'Manual review').Reason | Should -BeNullOrEmpty
 		$rows = @(Import-Excel -Path $script:output -WorksheetName Packages)
 		$rows | Should -HaveCount 1
-		$rows[0].GroupId.Split(';') | Should -Contain $script:root
-		$rows[0].GroupId.Split(';') | Should -Contain $script:child
+		$rows[0].GroupId | Should -Be $script:root
 		$rows[0].'Approver 1 List' | Should -BeNullOrEmpty
 		$rows[0].Role | Should -BeNullOrEmpty
-		$rows[0].Description | Should -Match 'Direct Entra application assignments for these groups: Application A; Application B'
-		$rows[0].Description | Should -Match 'Included groups: Root SG; Child'
+		$rows[0].Description | Should -Match 'Package resource: Root SG'
+		$rows[0].Description | Should -Match 'Users in nested groups \(Child\) are nested members of the root group'
+		$rows[0].Description | Should -Match 'Direct Entra enterprise application assignments by group: Root SG: Application A\. Child: Application B'
+		$rows[0].Description | Should -Match 'assignments on nested groups may provide their members with access to additional enterprise applications through nested membership'
 		$rows[0].Description | Should -Not -Match 'may grant'
 		$topology = @(Import-Excel -Path $script:output -WorksheetName Topology)
 		$topology | Should -HaveCount 2
@@ -122,7 +123,7 @@ Describe 'Discovery workbook export' {
 		$rows.'Access Package Name' | Should -Contain 'Second app - Other'
 		$metadata = Open-ExcelPackage -Path $script:output
 		try {
-			$metadata.Workbook.Worksheets['Discovery metadata'].Cells[1, 2].Value | Should -Be '3'
+			$metadata.Workbook.Worksheets['Discovery metadata'].Cells[1, 2].Value | Should -Be '5'
 		}
 		finally { Close-ExcelPackage -ExcelPackage $metadata -NoSave }
 	}
@@ -134,7 +135,7 @@ Describe 'Discovery workbook export' {
 		$rows = @(Import-Excel -Path $script:output -WorksheetName Packages)
 		$rows | Should -HaveCount 2
 		foreach ($row in $rows) {
-			$row.GroupId.Split(';') | Should -Contain $script:child
+			$row.GroupId | Should -Be $row.'Discovery RootGroupId'
 			$row.Description | Should -Match 'Application B'
 		}
 		@(Import-Excel -Path $script:output -WorksheetName 'Manual review') | Should -HaveCount 0

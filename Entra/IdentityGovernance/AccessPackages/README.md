@@ -119,13 +119,16 @@ Both files and the workbook require new filenames. Store them in a private
 directory: they contain application and group information. Discovery records
 direct-user counts but not user membership lists.
 
-By default, each directly assigned root proposes one package with the root and every nested
-descendant as Member resources. Assigning the package adds users to **all** of
-these groups. Shared groups are included in each root's separate package, not
-merged into one package. The description lists the included groups and their
-direct Entra enterprise-application assignments, using current Graph data. This
-list does not establish access provided by other systems or mechanisms, and an
-application assignment does not guarantee effective access to the application.
+By default, each directly assigned root proposes one package with only the root
+group as a Member resource. Assigning the package adds users only to that root;
+users in nested groups are nested members of the root and are described in the
+package description, not added as separate resources. Shared groups are
+described under each root's separate package, not merged into one package. The
+description lists direct Entra enterprise-application assignments by group, so
+assignments on nested groups are visible as potential additional application
+access through nesting. This list does not establish access provided by other
+systems or mechanisms, and an application assignment does not guarantee
+effective access to the application.
 Reading group application assignments requires delegated or application
 `Directory.Read.All` (or `Directory.ReadWrite.All` or
 `AppRoleAssignment.ReadWrite.All`), admin consent, and any required delegated
@@ -148,7 +151,7 @@ nested descendants, including candidates that are not ready. A group can appear
 under multiple roots; this sheet is not a list of all applications the groups
 affect. Check `Manual review` for failed or uncertain checks, correct suggested
 names that violate naming rules, and complete approvers and business details.
-The exporter suggests a `Role` when a root or included descendant group name
+The exporter suggests a `Role` when a root or nested descendant group name
 contains a standalone or camel-case `Admin`, `Administrator`, or `Superuser`
 term (including plurals and separated `Super User`). This name-based heuristic
 does not verify privileges or detect every privileged group. Review and edit the
