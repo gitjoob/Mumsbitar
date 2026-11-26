@@ -629,6 +629,7 @@ foreach ($row in $rows) {
 	$nameColumn = if ($isWorkbook) { 'Access Package Name' } else { 'Name' }
 	$result = [ordered]@{
 		Name = Get-InputText $row $nameColumn
+		Description = $null
 		GroupId = Get-InputText $row $groupColumn
 		GroupIds = @()
 		GroupNames = @()
@@ -674,6 +675,7 @@ foreach ($row in $rows) {
 		)
 		$description = (@(Get-InputText $row 'Description') + $details | Where-Object { $_ }) -join [Environment]::NewLine
 		if (-not $description -and $namedFromDetails) { $description = $name }
+		$result.Description = $description
 		if (-not $name -or -not $description) {
 			if ($isWorkbook) { throw 'Access Package Name and description text (Description or details) are required.' }
 			throw 'A name (Name, or both Application and Role) and description text (Description or details) are required.'
@@ -891,6 +893,8 @@ foreach ($row in $rows) {
 				if ($hasManagerStage) { $result.ManualAction = $manualAction }
 				$processedNames[$name] = $true
 				Write-Host "$($result.Status): $name"
+				Write-Host 'Description:'
+				Write-Host $result.Description
 				Write-Host 'Approval for new and extension requests for directory members (excluding guests):'
 				Write-Host $result.ApprovalStageDetails
 			}

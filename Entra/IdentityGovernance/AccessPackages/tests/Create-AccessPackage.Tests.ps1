@@ -751,12 +751,19 @@ Finance reporting - Read reports,View financial reports.,$script:groupId,$script
 		}
 
 		It 'prints the two planned approvers and manager fallback in WhatIf without writing' {
-			$script:csvPath = New-WorkbookFixture @{ GroupId = $script:groupId; 'Approver 2' = 'owner-mail@example.test'; 'Approver 3' = 'NA' }
+			$description = "Read financial reports.`nMembership in the reporting root group only."
+			$script:csvPath = New-WorkbookFixture @{
+				GroupId = $script:groupId; 'Approver 2' = 'owner-mail@example.test'; 'Approver 3' = 'NA'
+				Description = $description; Role = 'Reader'; Region = 'EMEA'; Brand = 'Finance'; 'Potential Teams' = 'Reporting'
+			}
 			$output = @(Invoke-Creation -Preview 6>&1)
 			$result = @($output | Where-Object { $_ -isnot [System.Management.Automation.InformationRecord] })
 			$console = @($output | Where-Object { $_ -is [System.Management.Automation.InformationRecord] }) -join "`n"
 			$result | Should -HaveCount 1
 			$result[0].Status | Should -Be 'Would be created'
+			$expectedDescription = @($description, 'Role: Reader', 'Region: EMEA', 'Brand: Finance', 'Potential Teams: Reporting') -join [Environment]::NewLine
+			$result[0].Description | Should -Be $expectedDescription
+			$console | Should -Match ([regex]::Escape("Description:`n$expectedDescription"))
 			$expected = @(
 				"Stage 1: Recipient's direct manager (if no manager: Approver <$script:fallbackId>)"
 				'Stage 2: Application Owner <owner@example.test>'
