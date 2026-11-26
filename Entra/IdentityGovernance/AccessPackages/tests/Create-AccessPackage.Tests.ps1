@@ -78,7 +78,7 @@ BeforeAll {
 		}
 		@'
 [CmdletBinding(SupportsShouldProcess)]
-param([guid]$ServicePrincipalId, [string]$ReviewerType, [string]$DiscoveryOutputPath)
+param([guid]$ServicePrincipalId, [string]$ReviewerType, [string]$DiscoveryOutputPath, [switch]$QuietDiscovery)
 if (-not $WhatIfPreference) { throw 'Discovery requires WhatIf.' }
 $snapshot = if ("$ServicePrincipalId" -eq 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb') { 'snapshot-2.json' } else { 'snapshot.json' }
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot $snapshot) -Destination $DiscoveryOutputPath -WhatIf:$false
@@ -507,10 +507,12 @@ Finance reporting - Read reports,View financial reports.,$script:groupId,$script
 			$sheet = $excel.Workbook.Worksheets['Packages']
 			$sheet.Cells[2, 7].Value = 'Finance reports'
 			$sheet.Cells[2, 8].Value = '<Employee Manager>'
+			$sheet.Cells[2, 6].Value = 'Rewritten business description for finance reporting.'
 			Close-ExcelPackage -ExcelPackage $excel
 			$result = & $path -InputPath $script:csvPath -CatalogName $script:graphFixture.CatalogName `
 				-FallbackApproverIds $script:fallbackId -WhatIf -WarningAction SilentlyContinue
 			$result.Status | Should -Be 'Would be created'
+			$result.GroupIds | Should -Be @($script:groupId)
 			$script:graphFixture.Writes | Should -HaveCount 0
 		}
 
@@ -559,16 +561,15 @@ Finance reporting - Read reports,View financial reports.,$script:groupId,$script
 			$script:graphFixture.Writes | Should -HaveCount 0
 		}
 
-		It 'blocks a single-group workbook when the group name changes' {
+		It 'allows a renamed group when its original single-group resource ID is unchanged' {
 			$path = New-SingleGroupDiscoveryWorkbook
 			$reviews = Join-Path (Split-Path (Split-Path $path -Parent) -Parent) 'AccessReviews'
 			$data = Get-Content -LiteralPath (Join-Path $reviews 'snapshot.json') -Raw | ConvertFrom-Json
 			$data.Groups[0].DisplayName = 'Renamed group'
 			$data | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $reviews 'snapshot.json')
 			$result = & $path -InputPath $script:csvPath -CatalogName $script:graphFixture.CatalogName `
-				-FallbackApproverIds $script:fallbackId -Confirm:$false -WarningAction SilentlyContinue
-			$result.Status | Should -Be 'Manual review'
-			$result.Reason | Should -Match 'group name.*changed'
+				-FallbackApproverIds $script:fallbackId -WhatIf -WarningAction SilentlyContinue
+			$result.Status | Should -Be 'Would be created'
 			$script:graphFixture.Writes | Should -HaveCount 0
 		}
 
@@ -600,25 +601,24 @@ Finance reporting - Read reports,View financial reports.,$script:groupId,$script
 			$created[1].Body.description | Should -Match 'Second app; Shared app'
 		}
 
-		It 'blocks a discovery package when its application assignments change after export' {
+		It 'does not use application descriptions as a resource safety check' {
 			$path = New-DiscoveryWorkbookFixture -Current
 			$script:graphFixture.AppAssignments[$script:groupId] += @{
 				resourceId = 'cccccccc-cccc-cccc-cccc-cccccccccccc'; resourceDisplayName = 'New app'
 			}
 			$result = & $path -InputPath $script:csvPath -CatalogName $script:graphFixture.CatalogName `
-				-FallbackApproverIds $script:fallbackId -Confirm:$false -WarningAction SilentlyContinue
-			$result.Status | Should -Be 'Manual review'
-			$result.Reason | Should -Match 'assignments in the description have changed'
+				-FallbackApproverIds $script:fallbackId -WhatIf -WarningAction SilentlyContinue
+			$result.Status | Should -Be 'Would be created'
 			$script:graphFixture.Writes | Should -HaveCount 0
 		}
 
-		It 'blocks a discovery package when its application assignments cannot be read' {
+		It 'does not request group application assignments when validating editable descriptions' {
 			$path = New-DiscoveryWorkbookFixture -Current
 			$script:graphFixture.RequestFailurePattern = '/appRoleAssignments$'
 			$result = & $path -InputPath $script:csvPath -CatalogName $script:graphFixture.CatalogName `
-				-FallbackApproverIds $script:fallbackId -Confirm:$false -WarningAction SilentlyContinue
-			$result.Status | Should -Be 'Manual review'
-			$result.Reason | Should -Match 'Unable to verify group application assignments'
+				-FallbackApproverIds $script:fallbackId -WhatIf -WarningAction SilentlyContinue
+			$result.Status | Should -Be 'Would be created'
+			Should -Invoke Invoke-MgGraphRequest -Times 0 -ParameterFilter { "$Uri" -match '/appRoleAssignments$' }
 			$script:graphFixture.Writes | Should -HaveCount 0
 		}
 
@@ -672,6 +672,23 @@ Finance reporting - Read reports,View financial reports.,$script:groupId,$script
 		}
 
 		BeforeAll { Import-Module ImportExcel -WarningAction SilentlyContinue }
+
+		It 'creates a manager stage without fallback users and warns about missing managers' -TestCases @(
+			@{ Workbook = $false },
+			@{ Workbook = $true }
+		) {
+			param($Workbook)
+			if ($Workbook) { $script:csvPath = New-WorkbookFixture @{ 'Approver 1 List' = '<Employee Manager>' } }
+			$warnings = @()
+			$result = & $script:noBackfillScriptPath -InputPath $script:csvPath -CatalogName $script:graphFixture.CatalogName `
+				-Confirm:$false -WarningAction SilentlyContinue -WarningVariable warnings
+			$result.Status | Should -Be 'Created'
+			$stages = (Get-PostedBody '/assignmentPolicies').requestApprovalSettings.stages
+			$stages[0].primaryApprovers[0].'@odata.type' | Should -Be '#microsoft.graph.targetManager'
+			$stages[0].fallbackPrimaryApprovers | Should -HaveCount 0
+			($warnings -join ' ') | Should -Match 'without fallback approvers.*Users without a manager'
+			Should -Invoke Invoke-MgGraphRequest -Times 0 -ParameterFilter { "$Uri" -like "/v1.0/users/$script:fallbackId`?*" }
+		}
 
 		It 'identifies a group in the workbook that was removed from the existing package' {
 			$removed = '77777777-7777-7777-7777-777777777777'
@@ -1299,7 +1316,7 @@ $script:groupId,$script:ownerId,SG Finance,Reader
 		$script:graphFixture.Writes.Count | Should -Be 0
 	}
 
-	It 'stops when the mandatory fallback user cannot be read' {
+	It 'stops when a supplied fallback user cannot be read' {
 		$script:graphFixture.DeniedUserId = $script:fallbackId
 		{ Invoke-Creation } | Should -Throw '*User not found*'
 		$script:graphFixture.Writes.Count | Should -Be 0

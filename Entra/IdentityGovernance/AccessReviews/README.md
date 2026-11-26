@@ -209,6 +209,11 @@ $results | Export-Csv '.\results.csv' -NoTypeInformation
 
 ### Status report
 
+When package creation refreshes discovery, it uses `-QuietDiscovery` with
+`-DiscoveryOutputPath` and `-WhatIf`. This suppresses routine discovery output
+and review-creation preview messages, while keeping warnings and errors visible.
+It never creates access reviews.
+
 [Get-AccessReviewStatusReport.ps1](./Get-AccessReviewStatusReport.ps1) reads
 existing reviews and **all historical instances** matching literal name prefixes.
 It requires the `Microsoft.Graph.Authentication` and `Microsoft.Graph.Users`

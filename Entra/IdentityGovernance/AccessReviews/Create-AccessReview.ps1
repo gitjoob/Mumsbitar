@@ -31,6 +31,9 @@ emails remain enabled. Existing reviews are never modified.
 Optional new JSON file containing complete application group discovery. Use with
 -WhatIf and either application mode or CSV containing service-principal rows.
 CSV exports use a combined multi-application format; no user membership lists.
+.PARAMETER QuietDiscovery
+Suppress routine discovery output and review WhatIf messages. Requires
+DiscoveryOutputPath and WhatIf. Warnings and errors remain visible.
 .EXAMPLE
 .\Create-AccessReview.ps1 -GroupId '<group Object ID>' -ReviewerType ResourceOwner -WhatIf
 .EXAMPLE
@@ -56,6 +59,9 @@ param(
 	[Parameter(ParameterSetName = 'Csv')]
 	[ValidateNotNullOrEmpty()]
 	[string]$DiscoveryOutputPath,
+	[Parameter(ParameterSetName = 'Application')]
+	[Parameter(ParameterSetName = 'Csv')]
+	[switch]$QuietDiscovery,
 	[Parameter(Mandatory, ParameterSetName = 'Application')]
 	[guid]$ServicePrincipalId,
 	[Alias('ReviewType')]
@@ -93,6 +99,10 @@ $AdditionalNotificationRecipients = @(
 $DecisionsThatMoveToNextStage = @('Approve', 'NotReviewed')
 
 $ErrorActionPreference = 'Stop'
+if ($QuietDiscovery -and (-not $DiscoveryOutputPath -or -not $WhatIfPreference)) {
+	throw 'QuietDiscovery requires DiscoveryOutputPath and -WhatIf.'
+}
+if ($QuietDiscovery) { $InformationPreference = 'Ignore' }
 if ($DiscoveryOutputPath -and -not $WhatIfPreference) {
 	throw 'DiscoveryOutputPath is only supported with -WhatIf; no reviews or logs may be created by a discovery export.'
 }
@@ -1280,7 +1290,7 @@ foreach ($target in $targets) {
 				continue
 			}
 		}
-		if ($PSCmdlet.ShouldProcess(
+		if (-not $QuietDiscovery -and $PSCmdlet.ShouldProcess(
 			"$resourceDescription ($(if ($isApplicationReview) { $ServicePrincipalId } else { $GroupId }), $countDescription)",
 			"Create $stageCount-stage access review '$reviewDisplayName' ($stageDescription) with notifications and $decisionHandling"
 		)) {
@@ -1356,7 +1366,7 @@ foreach ($batch in @($groupPlans | Group-Object -Property Policy -CaseSensitive 
 			$plan.Result.ReviewConfiguration.DescriptionForAdmins = $body.descriptionForAdmins
 		}
 		$decisionHandling = if ($first.Result.IsSyncedGroup) { 'recorded decisions only (group synchronized from on-premises)' } else { 'automatic removal of denied access' }
-		if ($PSCmdlet.ShouldProcess($description, "Create $($first.Result.Stages)-stage access review '$($body.displayName)' ($($first.Result.StageNames)) with notifications and $decisionHandling")) {
+		if (-not $QuietDiscovery -and $PSCmdlet.ShouldProcess($description, "Create $($first.Result.Stages)-stage access review '$($body.displayName)' ($($first.Result.StageNames)) with notifications and $decisionHandling")) {
 			$createdId = (New-MgIdentityGovernanceAccessReviewDefinition -BodyParameter $body -ErrorAction Stop).Id
 			$status = 'Created'
 		}

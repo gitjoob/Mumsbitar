@@ -148,7 +148,7 @@ have effective application access. The description identifies the group but
 does not list its applications. This mode does not request group application
 assignments and does not require `Directory.Read.All` for that lookup. Other
 discovery, package-creation and backfill permissions still apply. Before
-creation, the source application's discovery and group name are rechecked.
+creation, the group's presence in the source application's discovery is rechecked.
 
 The `Topology` sheet shows each discovered application-assigned root and its
 nested descendants, including candidates that are not ready. A group can appear
@@ -162,9 +162,10 @@ does not verify privileges or detect every privileged group. Review and edit the
 suggestion: the `Role` value is included in the published description. Unknown
 values are left blank. Blocked rows are not imported; resolve them and
 regenerate the workbook. Retain the discovery ID columns and `Discovery metadata`
-sheet. Before creation, the script rechecks the generated description; changed
-group names or, in the default mode, application assignments require a
-regenerated workbook.
+sheet. Descriptions in version 3, 4 and 5 workbooks may be rewritten freely;
+creation validates group IDs and package resources independently of the prose.
+It does not verify that edited descriptions reflect current group names or
+application assignments. Review those claims before publishing.
 
 The export and creation recheck enumerate packages across catalogs and compare
 their complete resource roles and scopes. A confirmed active exact match is
@@ -190,7 +191,10 @@ access-review permissions needed by the creation and discovery steps.
 
 On each package run the script refreshes discovery once, compares each row with
 the current root and descendants, and rechecks package coverage before creating
-that row. It does not backfill a skipped existing package in this workflow.
+that row. The refresh is read-only: it suppresses review-creation previews and
+routine nested output, but retains warnings and errors. No access reviews are
+created, including during a live package run.
+It does not backfill a skipped existing package in this workflow.
 Default backfill still applies to newly created packages, and only direct members
 of **every** included group qualify. The checks cannot prevent simultaneous
 creation by another administrator; avoid concurrent runs. Large tenants may
@@ -273,8 +277,10 @@ owner, and use consistent terms for equivalent access. For example:
 are rejected. Business meaning, owner names and consistent terminology require
 human review; the script does not guess names from groups.
 
-`-FallbackApproverIds` is mandatory and accepts one or more user IDs. These
+`-FallbackApproverIds` is optional and accepts one or more user IDs. These
 users receive manager-stage requests when the recipient has no manager.
+When omitted, manager stages have no fallback approvers and the script warns
+that users without a manager may be unable to get approval.
 Explicit `AppOwnerIds` replaces, rather than supplements, the default owners.
 For CSV, supplied owners create an optional second approval stage at any group
 size. Without either, the CSV policy has only the manager stage.
@@ -288,7 +294,7 @@ size. Without either, the CSV policy has only the manager stage.
 | Requesters | Self, authorized administrators, and the recipient's direct manager. |
 | Request justification | Required. |
 | Approval | Required for new assignments and extensions/updates. |
-| CSV approval stages | Direct manager with fallback users, followed by application-owner users if supplied, regardless of group size. |
+| CSV approval stages | Direct manager with optional fallback users, followed by application-owner users if supplied, regardless of group size. |
 | XLSX approval stages | Exactly the populated approval-stage columns, regardless of group size. |
 | Approval deadline | 14 days per stage; no escalation. |
 | Approver justification | Not required; requester justification is required. |
@@ -356,7 +362,7 @@ $results | Where-Object Status -eq 'Failed' | Format-List Name, GroupId, Reason
 ```
 
 Row failures do not stop subsequent rows. Authentication, missing columns,
-missing fallback users and catalog ambiguity fail before provisioning. Catalogs
+unreadable supplied fallback users and catalog ambiguity fail before provisioning. Catalogs
 are created lazily after the first valid row is approved. Resource import
 readiness is checked with a bounded retry before package creation.
 

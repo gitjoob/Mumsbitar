@@ -136,14 +136,18 @@ Describe 'Unified access review creation and local logging' {
 		}.GetNewClosure())
 	}
 
-	It 'exports complete application discovery without creating reviews or exposing user lists' {
+	It 'exports complete application discovery without creating reviews or exposing user lists' -TestCases @(
+		@{ Quiet = $false },
+		@{ Quiet = $true }
+	) {
+		param($Quiet)
 		Set-NestedGroupFixture
 		$script:fixture.Children['44444444-4444-4444-4444-444444444444'] = @($script:groupId)
 		$script:fixture.ExistingReviews = @(New-ExistingResourceReview)
 		$path = Join-Path $script:testScriptRoot 'discovery.json'
 		$applicationId = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
 		$null = @(& $script:testScript -ServicePrincipalId $applicationId -ReviewerType ResourceOwner `
-			-DiscoveryOutputPath $path -WhatIf -WarningAction SilentlyContinue)
+			-DiscoveryOutputPath $path -WhatIf -QuietDiscovery:$Quiet -WarningAction SilentlyContinue)
 		$data = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
 		$data.ServicePrincipalId | Should -Be $applicationId
 		$data.Applications[0].GroupIds | Should -Contain $script:groupId
@@ -152,6 +156,11 @@ Describe 'Unified access review creation and local logging' {
 		@($data.Groups | Where-Object Id -eq '44444444-4444-4444-4444-444444444444')[0].ChildIds | Should -Contain $script:groupId
 		(Get-Content -LiteralPath $path -Raw) | Should -Not -Match '00000000-0000-0000-0001-'
 		$script:fixture.Bodies | Should -HaveCount 0
+	}
+
+	It 'rejects quiet discovery without an explicit read-only discovery export' {
+		{ & $script:testScript -ServicePrincipalId 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa' -QuietDiscovery -WhatIf } |
+			Should -Throw '*QuietDiscovery requires DiscoveryOutputPath and -WhatIf*'
 	}
 
 	It 'exports combined discovery for CSV service principals without creating reviews' {

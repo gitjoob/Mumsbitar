@@ -15,7 +15,8 @@ Otherwise Name is required. Description plus all details not already in the name
 (Application/Role when not both given, Region, Comments) form the package
 description. Blank optional values are omitted.
 DefaultAppOwnerIds supplies owners when a row's AppOwnerIds is empty.
-FallbackApproverIds is mandatory and is used when a recipient has no manager.
+FallbackApproverIds is optional and is used when a recipient has no manager.
+Manager stages without fallback users produce a warning.
 For XLSX, install ImportExcel and use the first worksheet. Access Package Name
 sets the name; GroupId accepts one or more Entra group object IDs separated
 by commas, semicolons, or line breaks. When GroupId is present, Access Group
@@ -60,9 +61,7 @@ param(
 	[Parameter(Mandatory)]
 	[ValidateNotNullOrEmpty()]
 	[string]$CatalogName,
-	[Parameter(Mandatory)]
-	[ValidateNotNullOrEmpty()]
-	[guid[]]$FallbackApproverIds,
+	[guid[]]$FallbackApproverIds = @(),
 	[guid[]]$DefaultAppOwnerIds = @()
 )
 
@@ -603,15 +602,15 @@ if ($isDiscoveryWorkbook) {
 	$currentDiscoveries = @{}
 	foreach ($applicationId in $discoveryApplicationIds) {
 		try {
+			Write-Host "Refreshing group discovery for application '$applicationId' (read-only; no access reviews will be created)."
 			$currentDiscoveries["$applicationId"] = Get-CurrentPackageDiscovery -ServicePrincipalId ([guid]$applicationId) `
 				-ReviewScriptPath $reviewScript -TemporaryParent ([IO.Path]::GetDirectoryName($workbookPath)) `
 				-AllowSharedGroups:($metadataVersion -in '3', '4', '5')
 		}
 		catch { throw "Unable to refresh application '$applicationId' group discovery; no packages were created. $($_.Exception.Message)" }
 	}
-	$discoveryApplicationCache = @{}
 }
-$fallbackApprovers = @(ConvertTo-UserApprovers -Ids $FallbackApproverIds)
+$fallbackApprovers = @(if ($FallbackApproverIds.Count) { ConvertTo-UserApprovers -Ids $FallbackApproverIds })
 $catalogs = @(Get-GraphCollection -Uri "$baseUri/catalogs" -Filter "displayName eq '$($CatalogName.Replace("'", "''"))'")
 if ($catalogs.Count -gt 1) {
 	throw "Multiple catalogs have the name '$CatalogName'. Use a unique catalog name."
@@ -776,6 +775,9 @@ foreach ($row in $rows) {
 			}
 			$result.ApprovalStages = $stages.Count
 			$hasManagerStage = @($stages | Where-Object { @($_.primaryApprovers | Where-Object { $_.'@odata.type' -eq '#microsoft.graph.targetManager' }).Count }).Count -gt 0
+			if ($hasManagerStage -and -not $fallbackApprovers.Count) {
+				Write-Warning "Package '$name' has a manager approval stage without fallback approvers. Users without a manager may be unable to get approval."
+			}
 			$result.ApprovalStageDetails = @(for ($i = 0; $i -lt $stages.Count; $i++) {
 				$stage = $stages[$i]
 				$approvers = @($stage.primaryApprovers | ForEach-Object { Get-PackageApproverLabel $_ }) -join '; '
@@ -803,52 +805,6 @@ foreach ($row in $rows) {
 						-ServicePrincipalId $rowApplication -AllowSharedGroups:($metadataVersion -in '3', '4', '5') `
 						-SingleGroup:($metadataVersion -eq '4') -RootOnly:($metadataVersion -eq '5')
 					if ($coverage.Status -ne 'Ready') { $result.Status = $coverage.Status; $result.Reason = $coverage.Reason }
-					elseif ($metadataVersion -eq '3') {
-						try {
-							$currentDescription = Get-DiscoveryPackageDescription -GroupIds $result.GroupIds `
-								-Groups $currentDiscovery.Groups -ApplicationCache $discoveryApplicationCache
-							if (-not $description.Contains($currentDescription)) {
-								$result.Status = 'Manual review'
-								$result.Reason = 'The group or application assignments in the description have changed. Regenerate the workbook.'
-							}
-						}
-						catch {
-							$result.Status = 'Manual review'
-							$result.Reason = "Unable to verify group application assignments: $($_.Exception.Message)"
-						}
-					}
-					elseif ($metadataVersion -eq '5') {
-						try {
-							$rootCandidate = @($currentDiscovery.Candidates | Where-Object {
-								$_.Root -eq (Get-InputText $row 'Discovery RootGroupId') -and $_.ServicePrincipalId -eq "$rowApplication"
-							})
-							if ($rootCandidate.Count -ne 1) { throw 'The discovered root is no longer unique.' }
-							$currentDescription = Get-DiscoveryPackageDescription -GroupIds $rootCandidate[0].GroupIds `
-								-Groups $currentDiscovery.Groups -ApplicationCache $discoveryApplicationCache `
-								-RootGroupId ([string](Get-InputText $row 'Discovery RootGroupId'))
-							if (-not $description.Contains($currentDescription)) {
-								$result.Status = 'Manual review'
-								$result.Reason = 'The root or nested groups or their application assignments in the description have changed. Regenerate the workbook.'
-							}
-						}
-						catch {
-							$result.Status = 'Manual review'
-							$result.Reason = "Unable to verify root and nested group details: $($_.Exception.Message)"
-						}
-					}
-					elseif ($metadataVersion -eq '4') {
-						try {
-							$currentDescription = Get-DiscoverySingleGroupDescription -GroupId $result.GroupIds[0] -Groups $currentDiscovery.Groups
-							if (-not $description.Contains($currentDescription)) {
-								$result.Status = 'Manual review'
-								$result.Reason = 'The group name in the description has changed. Regenerate the workbook.'
-							}
-						}
-						catch {
-							$result.Status = 'Manual review'
-							$result.Reason = "Unable to verify the group description: $($_.Exception.Message)"
-						}
-					}
 				}
 			}
 			if (-not $result.Status -and $PSCmdlet.ShouldProcess(

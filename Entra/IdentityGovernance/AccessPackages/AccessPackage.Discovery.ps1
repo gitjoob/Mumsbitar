@@ -198,7 +198,7 @@ function Get-CurrentPackageDiscovery {
 		$null = New-Item -ItemType Directory -Path $directory -WhatIf:$false -ErrorAction Stop
 		$createdDirectory = $true
 		$null = @(& $ReviewScriptPath -ServicePrincipalId $ServicePrincipalId -ReviewerType ResourceOwner `
-			-DiscoveryOutputPath $path -WhatIf -ErrorAction Stop)
+			-DiscoveryOutputPath $path -WhatIf -QuietDiscovery -ErrorAction Stop 6>$null)
 		if (-not [IO.File]::Exists($path)) { throw 'The review preview did not produce complete discovery data.' }
 		$data = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
 		$discovery = Get-PackageDiscoveryCandidates -Data $data -AllowSharedGroups:$AllowSharedGroups

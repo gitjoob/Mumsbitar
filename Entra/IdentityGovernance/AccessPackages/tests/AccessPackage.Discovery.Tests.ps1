@@ -118,14 +118,20 @@ Describe 'Discovery package creation safeguards' {
 		$json = $script:data | ConvertTo-Json -Depth 10 -Compress
 		@"
 [CmdletBinding(SupportsShouldProcess)]
-param([guid]`$ServicePrincipalId, [string]`$ReviewerType, [string]`$DiscoveryOutputPath)
+param([guid]`$ServicePrincipalId, [string]`$ReviewerType, [string]`$DiscoveryOutputPath, [switch]`$QuietDiscovery)
 if (-not `$WhatIfPreference) { throw 'Preview was not requested.' }
+if (-not `$QuietDiscovery) { throw 'Quiet discovery was not requested.' }
+Write-Host 'Nested review output'
+Write-Warning 'Discovery warning'
 @'
 $json
 '@ | Set-Content -LiteralPath `$DiscoveryOutputPath -WhatIf:`$false
 "@ | Set-Content -LiteralPath $fixture
 		$WhatIfPreference = $true
-		$discovery = Get-CurrentPackageDiscovery -ServicePrincipalId $script:app -ReviewScriptPath $fixture -TemporaryParent $TestDrive
+		$output = @(Get-CurrentPackageDiscovery -ServicePrincipalId $script:app -ReviewScriptPath $fixture -TemporaryParent $TestDrive 3>&1 6>&1)
+		$output | Should -HaveCount 2
+		@($output | Where-Object { $_ -is [System.Management.Automation.WarningRecord] })[0].Message | Should -Be 'Discovery warning'
+		$discovery = @($output | Where-Object { $_ -isnot [System.Management.Automation.WarningRecord] })[0]
 		$discovery.Candidates[0].GroupIds | Should -Contain $script:child
 		@(Get-ChildItem -LiteralPath $TestDrive -Filter '.package-discovery-*' -Force) | Should -HaveCount 0
 	}
