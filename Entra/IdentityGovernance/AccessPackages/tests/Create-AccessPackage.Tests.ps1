@@ -469,6 +469,37 @@ Finance reporting - Read reports,View financial reports.,$script:groupId,$script
 		}
 	}
 
+	It 'reports row progress and ETA and clears it after processing' {
+		@"
+Name,Description,GroupId,AppOwnerIds
+Finance reporting - Read reports,View financial reports.,$script:groupId,$script:ownerId
+Finance reporting - Edit reports,Edit financial reports.,$script:groupId,$script:ownerId
+"@ | Set-Content -LiteralPath $script:csvPath
+		$progress = [System.Collections.Generic.List[object]]::new()
+		Mock Write-Progress {
+			$progress.Add(@{ Status = $Status; Percent = $PercentComplete; Remaining = $SecondsRemaining; Completed = $Completed.IsPresent })
+		}
+		$results = @(Invoke-Creation -Preview)
+		$results | Should -HaveCount 2
+		@($progress | Where-Object { $_.Status -match '0 of 2 rows completed.*Processing row 1' }).Count | Should -Be 1
+		$half = @($progress | Where-Object { $_.Status -match '1 of 2 rows completed.*Finished' })[0]
+		$half.Percent | Should -Be 50
+		$half.Remaining | Should -BeGreaterOrEqual 0
+		$half.Status | Should -Match 'Last update: \d\d:\d\d:\d\d'
+		$progress[-1].Completed | Should -BeTrue
+		$script:graphFixture.Writes | Should -HaveCount 0
+	}
+
+	It 'clears progress if discovery refresh fails' {
+		$path = New-DiscoveryWorkbookFixture
+		$reviews = Join-Path (Split-Path (Split-Path $path -Parent) -Parent) 'AccessReviews'
+		Remove-Item -LiteralPath (Join-Path $reviews 'snapshot.json')
+		Mock Write-Progress {}
+		{ & $path -InputPath $script:csvPath -CatalogName $script:graphFixture.CatalogName -WhatIf -WarningAction SilentlyContinue } |
+			Should -Throw '*Unable to refresh application*'
+		Should -Invoke Write-Progress -ParameterFilter { $Completed } -Exactly -Times 1
+	}
+
 	Context 'Excel workbook' -Skip:(-not (Get-Module -ListAvailable -Name ImportExcel)) {
 		It 'rechecks discovery and previews a safe discovery workbook without Graph writes' {
 			$path = New-DiscoveryWorkbookFixture

@@ -492,6 +492,7 @@ function Get-MemberRoleScope {
 function Invoke-PackageAssignmentBackfill {
 	param([System.Collections.IDictionary]$Result, [System.Management.Automation.PSCmdlet]$Caller)
 
+	Update-PackageProgress "Checking existing package and assignments for '$($Result.Name)'"
 	$coveredUsers = @{}
 	$policyId = $null
 	$packageId = $Result.AccessPackageId
@@ -546,6 +547,7 @@ function Invoke-PackageAssignmentBackfill {
 
 	$memberCounts = @{}
 	foreach ($groupId in $Result.GroupIds) {
+		Update-PackageProgress "Reading direct members for '$($Result.Name)'"
 		$groupUsers = @{}
 		foreach ($user in @(Get-MgGroupMemberAsUser -GroupId $groupId -All -Property id, userType -ConsistencyLevel eventual -CountVariable groupMemberCount -ErrorAction Stop)) {
 			if ($user.UserType -eq 'Guest') { continue }
@@ -559,7 +561,10 @@ function Invoke-PackageAssignmentBackfill {
 			$memberCounts[$userId] = 1 + [int]$memberCounts[$userId]
 		}
 	}
+	$memberIndex = 0
 	foreach ($userId in @($memberCounts.Keys | Sort-Object)) {
+		$memberIndex++
+		Update-PackageProgress "Checking backfill users for '$($Result.Name)' ($memberIndex/$($memberCounts.Count))"
 		if ($memberCounts[$userId] -ne $Result.GroupIds.Count) { $Result.AssignmentPartialMembership++; continue }
 		if ($coveredUsers.ContainsKey($userId)) { $Result.AssignmentsAlreadyCovered++; continue }
 		if ($Caller.ShouldProcess("$userId on '$($Result.Name)'", 'Submit access package assignment under the 365-day Requests policy')) {
@@ -582,6 +587,30 @@ function Invoke-PackageAssignmentBackfill {
 	}
 }
 
+function Update-PackageProgress {
+	param([Parameter(Mandatory)][string]$Phase)
+	$completed = $progressState.Completed
+	$total = $progressState.Total
+	$status = "$completed of $total rows completed. $Phase. Last update: $(Get-Date -Format 'HH:mm:ss')"
+	$parameters = @{
+		Activity = 'Processing access packages'
+		Status = $status
+		PercentComplete = [int][math]::Floor(100.0 * $completed / $total)
+	}
+	if ($completed -gt 0 -and $completed -lt $total) {
+		$seconds = $progressState.RowTimer.Elapsed.TotalSeconds / $completed * ($total - $completed)
+		$parameters.SecondsRemaining = [int][math]::Min([int]::MaxValue, [math]::Ceiling($seconds))
+	}
+	Write-Progress @parameters
+}
+
+$progressState = @{
+	Completed = 0
+	Total = $rows.Count
+	RowTimer = [System.Diagnostics.Stopwatch]::new()
+}
+try {
+Update-PackageProgress 'Preparing and validating input'
 $discoveryOverlaps = @{}
 if ($isDiscoveryWorkbook) {
 	$groupOwners = @{}
@@ -602,6 +631,7 @@ if ($isDiscoveryWorkbook) {
 	$currentDiscoveries = @{}
 	foreach ($applicationId in $discoveryApplicationIds) {
 		try {
+			Update-PackageProgress "Refreshing discovery for application '$applicationId'"
 			Write-Host "Refreshing group discovery for application '$applicationId' (read-only; no access reviews will be created)."
 			$currentDiscoveries["$applicationId"] = Get-CurrentPackageDiscovery -ServicePrincipalId ([guid]$applicationId) `
 				-ReviewScriptPath $reviewScript -TemporaryParent ([IO.Path]::GetDirectoryName($workbookPath)) `
@@ -624,9 +654,11 @@ Write-Warning "Manual step required for new policies with a manager approval sta
 $results = [System.Collections.Generic.List[object]]::new()
 $processedNames = @{}
 $backfillNames = @{}
+$progressState.RowTimer.Start()
 
 foreach ($row in $rows) {
 	$nameColumn = if ($isWorkbook) { 'Access Package Name' } else { 'Name' }
+	Update-PackageProgress "Processing row $($progressState.Completed + 1): $(Get-InputText $row $nameColumn)"
 	$result = [ordered]@{
 		Name = Get-InputText $row $nameColumn
 		Description = $null
@@ -794,6 +826,7 @@ foreach ($row in $rows) {
 
 			$groupLabels = @($groupPlans | ForEach-Object { "$($_.Group.DisplayName) [$($_.Group.Id)]" }) -join '; '
 			if ($isDiscoveryWorkbook) {
+				Update-PackageProgress "Checking current discovery and package coverage for '$name'"
 				$overlappingIds = @($result.GroupIds | Where-Object { $discoveryOverlaps.ContainsKey($_) })
 				if ($overlappingIds.Count) {
 					$result.Status = 'Manual review'
@@ -813,6 +846,7 @@ foreach ($row in $rows) {
 				"$name (groups: $groupLabels; catalog '$CatalogName')",
 				"Create missing catalog/resource, access package and $($result.ApprovalStages)-stage policy"
 			)) {
+				Update-PackageProgress "Creating resources, package and policy for '$name'"
 				if (-not $catalog) {
 					$catalog = Send-GraphBody -Uri "$baseUri/catalogs" -Body @{
 						displayName = $CatalogName
@@ -933,6 +967,8 @@ foreach ($row in $rows) {
 	}
 	$resultObject = [pscustomobject]$result
 	$results.Add($resultObject)
+	$progressState.Completed++
+	Update-PackageProgress "Finished '$($result.Name)' ($($result.Status))"
 	$resultObject
 }
 
@@ -952,3 +988,7 @@ $declinedCount = @($results | Where-Object { $_.Status -eq 'Not created' }).Coun
 $manualCount = @($results | Where-Object { $_.Status -eq 'Manual review' }).Count
 $manualSummary = if ($isDiscoveryWorkbook) { ", $manualCount require manual review" } else { '' }
 Write-Host "$($results.Count) package(s): $createdCount $($createdStatus.ToLower()), $skippedCount skipped, $failedCount failed, $declinedCount not created$manualSummary."
+}
+finally {
+	Write-Progress -Activity 'Processing access packages' -Completed
+}
