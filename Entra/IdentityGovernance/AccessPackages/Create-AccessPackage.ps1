@@ -506,6 +506,10 @@ function Invoke-PackageAssignmentBackfill {
 		if ($package.'resourceRoleScopes@odata.nextLink' -or $package.'assignmentPolicies@odata.nextLink') {
 			throw 'The package resources or policies were returned only partially; no assignments submitted.'
 		}
+		if ($package -isnot [System.Collections.IDictionary] -or -not $package.Contains('resourceRoleScopes') -or
+			$null -eq $package.resourceRoleScopes) {
+			throw 'Graph did not return the package resource roles and scopes; no assignments submitted.'
+		}
 		# A package assignment grants every role, not just the groups named in the input.
 		$actualGroups = @{}
 		foreach ($binding in $package.resourceRoleScopes) {
@@ -517,7 +521,8 @@ function Invoke-PackageAssignmentBackfill {
 			$actualGroups[$originId] = $true
 		}
 		if ($actualGroups.Count -ne $Result.GroupIds.Count) {
-			throw 'The actual package group Member roles do not match the input; no assignments submitted.'
+			$missingGroups = @($Result.GroupIds | Where-Object { -not $actualGroups.ContainsKey($_) })
+			throw "The actual package group Member roles do not match the input. Group IDs in the input but not in the package: $($missingGroups -join ', '). Update the input after verifying the package resources; no assignments submitted."
 		}
 		$policies = @($package.assignmentPolicies | Where-Object { $_.displayName -eq "$($Result.Name) - Requests" })
 		if ($policies.Count -ne 1 -or -not $policies[0].id -or $policies[0].expiration.type -ne 'afterDuration' -or
@@ -974,6 +979,10 @@ foreach ($row in $rows) {
 $notCreated = @($results | Where-Object { $_.Status -in 'Skipped', 'Failed', 'Manual review' })
 if ($notCreated.Count) {
 	Write-Host ($notCreated | Select-Object Name, Status, Reason | Format-Table -AutoSize -Wrap | Out-String -Width 200)
+}
+$backfillFailures = @($results | Where-Object { $_.AssignmentBackfill -eq 'Failed' })
+if ($backfillFailures.Count) {
+	Write-Host ($backfillFailures | Select-Object Name, AccessPackageId, AssignmentBackfillError | Format-List | Out-String -Width 200)
 }
 $createdStatus = if ($WhatIfPreference) { 'Would be created' } else { 'Created' }
 $createdCount = @($results | Where-Object { $_.Status -eq $createdStatus }).Count

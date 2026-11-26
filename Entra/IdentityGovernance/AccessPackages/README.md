@@ -70,6 +70,10 @@ policy with a 365-day lifecycle. It submits one administrative request per
 eligible user, skipping users with an existing non-expired assignment or a
 pending add request. `Submitted` is not confirmation of delivery.
 
+If a group has been removed from the package, backfill stops and reports the
+package name and the group ID still present in the input. Verify the package's
+resources, update the corresponding input row, and rerun with `-WhatIf`.
+
 Only direct directory member users are eligible. For packages with multiple
 groups, a user must already be a direct member of every group, since an
 assignment grants all the package's roles. The backfill does not change group

@@ -176,6 +176,7 @@ Finance reporting - Read reports,View financial reports.,$script:groupId,$script
 			DirectMembers = @{}
 			AppAssignments = @{}
 			PackageGroups = @($script:groupId)
+			OmitPackageResourceRoles = $false
 			PolicyDuration = 'P365D'
 			Assignments = @()
 			AssignmentRequests = @()
@@ -319,7 +320,7 @@ Finance reporting - Read reports,View financial reports.,$script:groupId,$script
 						$packageGroups = @($fixture.Writes | Where-Object Uri -Like '*/resourceRoleScopes' | ForEach-Object { $_.Body.scope.originId })
 						$policyId = 'new-policy-id'
 					}
-					return @{
+					$package = @{
 						id = $packageId; displayName = 'Finance reporting - Read reports'; catalogId = 'catalog-id'
 						assignmentPolicies = @(@{
 							id = $policyId; displayName = 'Finance reporting - Read reports - Requests'
@@ -329,6 +330,8 @@ Finance reporting - Read reports,View financial reports.,$script:groupId,$script
 							@{ role = @{ originSystem = 'AadGroup'; originId = "Member_$groupId" }; scope = @{ originSystem = 'AadGroup'; originId = $groupId; isRootScope = $true } }
 						})
 					}
+					if ($fixture.OmitPackageResourceRoles) { $package.Remove('resourceRoleScopes') }
+					return $package
 				}
 				if ($decodedUri -match "/assignments\?\`$filter=accessPackage/id eq '(existing|new)-package-id'&") { return @{ value = $fixture.Assignments } }
 				if ($decodedUri -match "/assignmentRequests\?\`$filter=accessPackage/id eq '(existing|new)-package-id'&") { return @{ value = $fixture.AssignmentRequests } }
@@ -445,6 +448,14 @@ Finance reporting - Read reports,View financial reports.,$script:groupId,$script
 			$result = Invoke-Creation -Backfill
 			$result.AssignmentBackfill | Should -Be 'Failed'
 			$result.AssignmentBackfillError | Should -Match 'role outside'
+			$script:graphFixture.Writes | Should -HaveCount 0
+		}
+
+		It 'reports missing expanded resource roles rather than a group mismatch' {
+			$script:graphFixture.OmitPackageResourceRoles = $true
+			$result = Invoke-Creation -Backfill
+			$result.AssignmentBackfill | Should -Be 'Failed'
+			$result.AssignmentBackfillError | Should -Match 'Graph did not return the package resource roles'
 			$script:graphFixture.Writes | Should -HaveCount 0
 		}
 
@@ -661,6 +672,18 @@ Finance reporting - Read reports,View financial reports.,$script:groupId,$script
 		}
 
 		BeforeAll { Import-Module ImportExcel -WarningAction SilentlyContinue }
+
+		It 'identifies a group in the workbook that was removed from the existing package' {
+			$removed = '77777777-7777-7777-7777-777777777777'
+			$script:csvPath = New-WorkbookFixture @{ GroupId = "$script:groupId;$removed" }
+			$script:graphFixture.ExistingPackage = $true
+			$result = Invoke-Creation -Backfill
+			$result.AssignmentBackfill | Should -Be 'Failed'
+			$result.Name | Should -Be 'Finance reporting - Read reports'
+			$result.AssignmentBackfillError | Should -Match $removed
+			$result.AssignmentBackfillError | Should -Match 'Update the input'
+			$script:graphFixture.Writes | Should -HaveCount 0
+		}
 
 		It 'backfills a user in both groups once and does not grant extra group access' {
 			$otherGroup = '77777777-7777-7777-7777-777777777777'
