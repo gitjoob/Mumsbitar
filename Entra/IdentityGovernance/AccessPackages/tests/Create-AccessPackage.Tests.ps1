@@ -9,6 +9,13 @@ BeforeAll {
 	$script:groupId = '11111111-1111-1111-1111-111111111111'
 	$script:ownerId = '22222222-2222-2222-2222-222222222222'
 	$script:fallbackId = '33333333-3333-3333-3333-333333333333'
+	$tokens = $null
+	$parseErrors = $null
+	$ast = [System.Management.Automation.Language.Parser]::ParseFile($script:scriptPath, [ref]$tokens, [ref]$parseErrors)
+	$formatFunction = $ast.Find({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Format-PackageDuration' }, $true)
+	$progressFunction = $ast.Find({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Update-PackageProgress' }, $true)
+	$script:formatDuration = $formatFunction.Body.GetScriptBlock()
+	$script:updateProgress = $progressFunction.Body.GetScriptBlock()
 
 	function Invoke-Creation {
 		param([switch]$Preview, [guid[]]$DefaultOwners = @(), [switch]$Backfill)
@@ -477,17 +484,47 @@ Finance reporting - Edit reports,Edit financial reports.,$script:groupId,$script
 "@ | Set-Content -LiteralPath $script:csvPath
 		$progress = [System.Collections.Generic.List[object]]::new()
 		Mock Write-Progress {
-			$progress.Add(@{ Status = $Status; Percent = $PercentComplete; Remaining = $SecondsRemaining; Completed = $Completed.IsPresent })
+			$progress.Add(@{ Status = $Status; Percent = $PercentComplete; HasSecondsRemaining = $PSBoundParameters.ContainsKey('SecondsRemaining'); Completed = $Completed.IsPresent })
 		}
 		$results = @(Invoke-Creation -Preview)
 		$results | Should -HaveCount 2
 		@($progress | Where-Object { $_.Status -match '0 of 2 rows completed.*Processing row 1' }).Count | Should -Be 1
 		$half = @($progress | Where-Object { $_.Status -match '1 of 2 rows completed.*Finished' })[0]
 		$half.Percent | Should -Be 50
-		$half.Remaining | Should -BeGreaterOrEqual 0
+		$half.Status | Should -Match 'ETA: ~\d+'
+		$half.HasSecondsRemaining | Should -BeFalse
 		$half.Status | Should -Match 'Last update: \d\d:\d\d:\d\d'
 		$progress[-1].Completed | Should -BeTrue
 		$script:graphFixture.Writes | Should -HaveCount 0
+	}
+
+	It 'formats <Seconds> seconds as <Expected>' -TestCases @(
+		@{ Seconds = 0.1; Expected = '1s' }
+		@{ Seconds = 59; Expected = '59s' }
+		@{ Seconds = 60; Expected = '1m 0s' }
+		@{ Seconds = 3599; Expected = '59m 59s' }
+		@{ Seconds = 3600; Expected = '1h 0m 0s' }
+		@{ Seconds = 86400; Expected = '1d 0h 0m 0s' }
+		@{ Seconds = 150000; Expected = '1d 17h 40m 0s' }
+		@{ Seconds = 1e15; Expected = '24855d 3h 14m 7s' }
+	) {
+		param($Seconds, $Expected)
+		(& $script:formatDuration $Seconds) | Should -Be $Expected
+	}
+
+	It 'counts down from completed rows and reports an overdue estimate' {
+		Set-Item -Path Function:Format-PackageDuration -Value $script:formatDuration
+		$progressState = @{
+			Completed = 1; Total = 2; CompletedElapsedSeconds = 100
+			RowTimer = @{ Elapsed = @{ TotalSeconds = 110 } }
+		}
+		$statuses = [System.Collections.Generic.List[string]]::new()
+		Mock Write-Progress { $statuses.Add([string]$Status) }
+		& $script:updateProgress 'Checking current row'
+		$progressState.RowTimer.Elapsed.TotalSeconds = 201
+		& $script:updateProgress 'Checking current row'
+		$statuses[0] | Should -Match 'ETA: ~1m 30s'
+		$statuses[1] | Should -Match 'ETA: overdue'
 	}
 
 	It 'clears progress if discovery refresh fails' {

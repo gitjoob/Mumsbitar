@@ -338,10 +338,12 @@ by disabling manager approval for everyone.
 
 The PowerShell progress display shows the current phase, completed input rows,
 and the time of its last update. After the first row it estimates time remaining
-from the average completed-row time; discovery preparation is excluded and
-different package sizes, Graph delays and backfill can make the estimate
-inaccurate. A stale update does not prove a hang: a Graph request may still be
-waiting. Progress is cleared on completion or error and does not change results.
+in seconds, minutes, hours or days from the average completed-row time, excluding
+discovery preparation. The estimate counts down during the current row and
+shows `overdue` if it runs past the prediction. Different package sizes, Graph
+delays and backfill can make it inaccurate. A stale update does not prove a
+hang: a Graph request may still be waiting. Progress is cleared on completion
+or error and does not change results.
 
 Each row emits an object with package/policy/catalog IDs, user count, stage
 count, status, reason and the required manual action. Skipped/failed rows

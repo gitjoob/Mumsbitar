@@ -587,19 +587,34 @@ function Invoke-PackageAssignmentBackfill {
 	}
 }
 
+function Format-PackageDuration {
+	param([double]$Seconds)
+	$duration = [timespan]::FromSeconds([math]::Min([double][int]::MaxValue, [math]::Ceiling($Seconds)))
+	$parts = @()
+	if ($duration.Days) { $parts += "$($duration.Days)d" }
+	if ($duration.Days -or $duration.Hours) { $parts += "$($duration.Hours)h" }
+	if ($duration.Days -or $duration.Hours -or $duration.Minutes) { $parts += "$($duration.Minutes)m" }
+	$parts += "$($duration.Seconds)s"
+	$parts -join ' '
+}
+
 function Update-PackageProgress {
 	param([Parameter(Mandatory)][string]$Phase)
 	$completed = $progressState.Completed
 	$total = $progressState.Total
-	$status = "$completed of $total rows completed. $Phase. Last update: $(Get-Date -Format 'HH:mm:ss')"
+	$eta = 'estimating'
+	if ($completed -gt 0 -and $completed -lt $total) {
+		$average = $progressState.CompletedElapsedSeconds / $completed
+		$currentRowElapsed = $progressState.RowTimer.Elapsed.TotalSeconds - $progressState.CompletedElapsedSeconds
+		$seconds = $average * ($total - $completed) - $currentRowElapsed
+		$eta = if ($seconds -le 0) { 'overdue' } else { "~$(Format-PackageDuration $seconds)" }
+	}
+	elseif ($completed -eq $total) { $eta = 'complete' }
+	$status = "ETA: $eta. $completed of $total rows completed. $Phase. Last update: $(Get-Date -Format 'HH:mm:ss')"
 	$parameters = @{
 		Activity = 'Processing access packages'
 		Status = $status
 		PercentComplete = [int][math]::Floor(100.0 * $completed / $total)
-	}
-	if ($completed -gt 0 -and $completed -lt $total) {
-		$seconds = $progressState.RowTimer.Elapsed.TotalSeconds / $completed * ($total - $completed)
-		$parameters.SecondsRemaining = [int][math]::Min([int]::MaxValue, [math]::Ceiling($seconds))
 	}
 	Write-Progress @parameters
 }
@@ -607,6 +622,7 @@ function Update-PackageProgress {
 $progressState = @{
 	Completed = 0
 	Total = $rows.Count
+	CompletedElapsedSeconds = 0
 	RowTimer = [System.Diagnostics.Stopwatch]::new()
 }
 try {
@@ -968,6 +984,7 @@ foreach ($row in $rows) {
 	$resultObject = [pscustomobject]$result
 	$results.Add($resultObject)
 	$progressState.Completed++
+	$progressState.CompletedElapsedSeconds = $progressState.RowTimer.Elapsed.TotalSeconds
 	Update-PackageProgress "Finished '$($result.Name)' ($($result.Status))"
 	$resultObject
 }
