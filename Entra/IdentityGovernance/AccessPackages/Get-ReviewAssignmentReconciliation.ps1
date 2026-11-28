@@ -4,16 +4,18 @@ Investigate and optionally remediate access review and package assignment confli
 .DESCRIPTION
 Preview finds successfully applied Deny decisions for users with assignments
 to packages granting the reviewed group. Every package in the specified
-catalog is checked, regardless of creation date. Review the JSON report and
-candidate CSV, and remove CSV rows you do not want to remediate. Run again
-with -ApprovalCsvPath and -Remediate to submit the remaining removals in bulk.
-Use -WhatIf to simulate remediation. Packages with multiple resources and
-uncertain or conflicting cases are reported for manual review.
+catalog is checked, regardless of creation date. By default the script only
+reports matches. Add -Remediate to find and submit eligible removals in the
+same run, or -Remediate -WhatIf to simulate the entire operation. The report
+and candidate CSV are outputs; no approval file is needed. Packages with
+multiple resources and uncertain or conflicting cases are reported for manual
+review and not removed automatically.
 
 Pause backfill, reviews and other changes until remediation finishes, and run
 only one remediation at a time. Graph cannot lock these objects against
-concurrent changes. The script rechecks the
-evidence but cannot detect every out-of-band change. A submitted request is not
+concurrent changes. Review and package data is reused during a run to avoid
+repeated scans; each decision and assignment is re-read before removal. The
+script cannot detect every out-of-band change. A submitted request is not
 confirmation of removal; verify requests and group membership afterwards.
 Never retry an uncertain request without checking Entra and the audit first.
 
@@ -29,11 +31,8 @@ AccessReview.Read.All and EntitlementManagement.ReadWrite.All application
 permissions for remediation. Preview accepts EntitlementManagement.Read.All.
 .EXAMPLE
 Connect-MgGraph -Scopes 'AccessReview.Read.All','EntitlementManagement.ReadWrite.All','RoleManagement.Read.Directory'
-.\Get-ReviewAssignmentReconciliation.ps1 -CatalogId '<catalog ID>' -ReportPath '.\private\inventory.json'
-# Review the report and inventory.json.candidates.csv; remove unwanted CSV rows.
-.\Get-ReviewAssignmentReconciliation.ps1 -CatalogId '<catalog ID>' `
-    -ApprovalCsvPath '.\private\inventory.json.candidates.csv' -Remediate -WhatIf
-# After reviewing and pausing other changes, repeat without -WhatIf.
+.\Get-ReviewAssignmentReconciliation.ps1 -CatalogId '<catalog ID>' -Remediate
+# Add -WhatIf to preview without submitting removals.
 #>
 [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'Medium')]
 param(
@@ -43,7 +42,6 @@ param(
 	[datetimeoffset]$ReviewStartedFrom,
 	[datetimeoffset]$ReviewStartedBefore,
 	[ValidateNotNullOrEmpty()][string]$ReportPath = (Join-Path (Get-Location).Path "reconciliation-$([datetime]::UtcNow.ToString('yyyyMMddTHHmmssfff'))-$([guid]::NewGuid().ToString('N')).json"),
-	[string]$ApprovalCsvPath,
 	[string]$AuditPath,
 	[switch]$Remediate
 )
@@ -61,10 +59,7 @@ if ($CatalogId -eq [guid]::Empty -or $ReviewStartedFrom -ge $ReviewStartedBefore
 	throw 'Supply a non-empty catalog ID and valid start/end windows.'
 }
 if (Test-Path -LiteralPath $ReportPath) { throw 'The report path already exists; choose a new file.' }
-if ($Remediate -and -not $ApprovalCsvPath) {
-	throw 'Remediation requires a reviewed candidate CSV via -ApprovalCsvPath. Pause concurrent changes first.'
-}
-if ($ApprovalCsvPath -and -not $AuditPath) {
+if ($Remediate -and -not $AuditPath) {
 	$AuditPath = Join-Path (Get-Location).Path "reconciliation-audit-$([datetime]::UtcNow.ToString('yyyyMMddTHHmmssfff'))-$([guid]::NewGuid().ToString('N')).jsonl"
 }
 if ($AuditPath -and (Test-Path -LiteralPath $AuditPath)) { throw 'The audit path already exists; choose a new file.' }
@@ -80,27 +75,6 @@ if ($AuditPath -and
 	$ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($AuditPath)) {
 	throw 'The report and audit must use different output paths.'
 }
-$approvedIds = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
-$approvedEvidence = @{}
-if ($ApprovalCsvPath) {
-	$selectionFullPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($ApprovalCsvPath)
-	$selectionBytes = [System.IO.File]::ReadAllBytes($selectionFullPath)
-	$selectionText = [System.Text.Encoding]::UTF8.GetString($selectionBytes).TrimStart([char]0xFEFF)
-	$selection = @($selectionText | ConvertFrom-Csv)
-	if (-not $selection.Count) { throw 'The approval CSV is empty.' }
-	foreach ($entry in $selection) {
-		$id = [string]$entry.AssignmentId
-		if (-not $id -or $id -ne $id.Trim()) { throw 'Every approval CSV row must have a non-empty AssignmentId without surrounding whitespace.' }
-		if (-not $approvedIds.Add($id)) { throw "Duplicate assignment ID in the approval CSV: '$id'." }
-		foreach ($field in @('TenantId', 'PackageId', 'UserId', 'GroupId', 'ReviewId', 'InstanceId', 'DecisionId', 'ReviewedAt')) {
-			$value = [string]$entry.$field
-			if (-not $value -or $value -ne $value.Trim()) { throw "Every approval CSV row must retain a non-empty $field without surrounding whitespace." }
-		}
-		if ($entry.PSObject.Properties.Name -notcontains 'AppliedAt') { throw 'Every approval CSV row must retain the AppliedAt column, even when it is empty.' }
-		$approvedEvidence[$id] = $entry
-	}
-}
-
 $progress = @{ LastMessage = [datetime]::MinValue; Phase = 'Starting'; Current = 0; Total = 0 }
 function Show-ReconciliationProgress {
 	param([string]$Phase, [int]$Current = 0, [int]$Total = 0, [switch]$Force)
@@ -136,6 +110,29 @@ function Get-ReconciliationCollection {
 		}
 		$Uri = [string]$page.'@odata.nextLink'
 	}
+}
+
+$reviewSnapshot = @{}
+$verificationDetails = @{}
+$verificationCollections = @{}
+function Get-ReconciliationReviewSnapshot {
+	param([string]$Uri)
+	if (-not $reviewSnapshot.ContainsKey($Uri)) { $reviewSnapshot[$Uri] = @(Get-ReconciliationCollection $Uri) }
+	$reviewSnapshot[$Uri]
+}
+
+function Get-ReconciliationVerificationDetail {
+	param([string]$Uri)
+	if (-not $verificationDetails.ContainsKey($Uri)) {
+		$verificationDetails[$Uri] = Invoke-MgGraphRequest -Method GET -Uri $Uri -OutputType Hashtable -ErrorAction Stop
+	}
+	$verificationDetails[$Uri]
+}
+
+function Get-ReconciliationVerificationCollection {
+	param([string]$Uri)
+	if (-not $verificationCollections.ContainsKey($Uri)) { $verificationCollections[$Uri] = @(Get-ReconciliationCollection $Uri) }
+	$verificationCollections[$Uri]
 }
 
 function Get-ReconciliationTime {
@@ -217,14 +214,14 @@ function Get-ReconciliationReviewConflicts {
 	$records = @{}
 	$uncertainGroups = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
 	Show-ReconciliationProgress 'Scanning all reviews for conflicting decisions' -Force
-	$allDefinitions = @(Get-ReconciliationCollection $reviews)
+	$allDefinitions = @(Get-ReconciliationReviewSnapshot $reviews)
 	$index = 0
 	foreach ($definition in $allDefinitions) {
 		$index++
 		Show-ReconciliationProgress 'Scanning all reviews for conflicting decisions' $index $allDefinitions.Count
 		if (-not $definition.id) { throw 'A review definition has no ID; conflict checking is incomplete.' }
 		$definitionUri = "$reviews/$([uri]::EscapeDataString([string]$definition.id))"
-		foreach ($instance in @(Get-ReconciliationCollection "$definitionUri/instances")) {
+		foreach ($instance in @(Get-ReconciliationReviewSnapshot "$definitionUri/instances")) {
 			if (-not $instance.id -or -not $instance.status) { throw 'A review instance has no ID or status; conflict checking is incomplete.' }
 			$scopeQuery = [string]$instance.scope.query
 			$scopeGroup = $null
@@ -240,7 +237,7 @@ function Get-ReconciliationReviewConflicts {
 				}
 			}
 			$instanceUri = "$definitionUri/instances/$([uri]::EscapeDataString([string]$instance.id))"
-			foreach ($decision in @(Get-ReconciliationCollection "$instanceUri/decisions")) {
+			foreach ($decision in @(Get-ReconciliationReviewSnapshot "$instanceUri/decisions")) {
 				if (-not $decision.id) { throw 'A review decision has no ID; conflict checking is incomplete.' }
 				$ids = Get-ReconciliationDecisionIds $decision $instance.scope
 				$groupId = $ids.GroupId
@@ -287,10 +284,6 @@ function Get-ReconciliationEvidenceIssue {
 	if (-not (Test-ReconciliationDirectScope $review.InstanceScope $review.GroupId)) {
 		return 'The review is not an identifiable direct group membership review.'
 	}
-	$reviewed = [datetimeoffset]::MinValue
-	if (-not [datetimeoffset]::TryParse([string]$review.ReviewedAt, [ref]$reviewed)) {
-		return 'The decision has no usable review time for conflict checking.'
-	}
 	$roles = @($Row.ResourceRoles)
 	if ($roles.Count -ne 1 -or $roles[0].role.originSystem -ne 'AadGroup' -or
 		$roles[0].scope.originSystem -ne 'AadGroup' -or $roles[0].scope.isRootScope -ne $true -or
@@ -303,14 +296,14 @@ function Get-ReconciliationEvidenceIssue {
 	}
 }
 
-function Get-ReconciliationLiveIssue {
+function Get-ReconciliationConflictIssue {
 	param($Row, $Conflicts)
 	$review = $Row.Review
 	if ($Conflicts.UncertainGroups.Contains([string]$review.GroupId)) {
 		return 'A review decision for this group could not be identified; conflict checking is incomplete.'
 	}
 	$reviewed = [datetimeoffset]::MinValue
-	if (-not [datetimeoffset]::TryParse([string]$review.ReviewedAt, [ref]$reviewed)) { return 'Decision review time is unavailable.' }
+	$hasReviewedTime = [datetimeoffset]::TryParse([string]$review.ReviewedAt, [ref]$reviewed)
 	$applied = [datetimeoffset]::MinValue
 	$hasAppliedTime = [datetimeoffset]::TryParse([string]$review.AppliedAt, [ref]$applied)
 	foreach ($other in @($Conflicts.Records["$($review.GroupId)/$($review.UserId)"])) {
@@ -319,16 +312,27 @@ function Get-ReconciliationLiveIssue {
 		if ($other.InstanceStatus -eq 'Completed' -and $other.Decision -eq 'Deny' -and $other.ApplyResult -eq 'AppliedSuccessfully') { continue }
 		$otherTime = [datetimeoffset]::MinValue
 		$otherApplied = [datetimeoffset]::MinValue
-		if ($other.InstanceStatus -ne 'Completed' -or
+		if ($other.InstanceStatus -ne 'Completed' -or -not $hasReviewedTime -or
 			-not [datetimeoffset]::TryParse($other.ReviewedAt, [ref]$otherTime) -or $otherTime -ge $reviewed -or
 			-not $hasAppliedTime -or -not [datetimeoffset]::TryParse($other.AppliedAt, [ref]$otherApplied) -or $otherApplied -ge $applied) {
 			return 'Another review has a conflicting, later or unresolved decision for this user and group.'
 		}
 	}
+}
+
+function Get-ReconciliationLiveIssue {
+	param($Row, $Conflicts)
+	$review = $Row.Review
+	$issue = Get-ReconciliationConflictIssue $Row $Conflicts
+	if ($issue) { return $issue }
+	$reviewed = [datetimeoffset]::MinValue
+	$hasReviewedTime = [datetimeoffset]::TryParse([string]$review.ReviewedAt, [ref]$reviewed)
+	$applied = [datetimeoffset]::MinValue
+	$hasAppliedTime = [datetimeoffset]::TryParse([string]$review.AppliedAt, [ref]$applied)
 	$definitionUri = "$reviews/$([uri]::EscapeDataString([string]$review.ReviewId))"
 	$instanceUri = "$definitionUri/instances/$([uri]::EscapeDataString([string]$review.InstanceId))"
-	$definition = Invoke-MgGraphRequest -Method GET -Uri $definitionUri -OutputType Hashtable -ErrorAction Stop
-	$instance = Invoke-MgGraphRequest -Method GET -Uri $instanceUri -OutputType Hashtable -ErrorAction Stop
+	$definition = Get-ReconciliationVerificationDetail $definitionUri
+	$instance = Get-ReconciliationVerificationDetail $instanceUri
 	$decision = Invoke-MgGraphRequest -Method GET -Uri "$instanceUri/decisions/$([uri]::EscapeDataString([string]$review.DecisionId))" -OutputType Hashtable -ErrorAction Stop
 	if ($definition.id -ne $review.ReviewId -or -not $definition.displayName -or
 		-not $definition.displayName.StartsWith($ReviewPrefix, [StringComparison]::OrdinalIgnoreCase) -or
@@ -349,35 +353,40 @@ function Get-ReconciliationLiveIssue {
 	$liveGroup = $liveIds.GroupId
 	$liveReviewed = [datetimeoffset]::MinValue
 	$liveApplied = [datetimeoffset]::MinValue
+	$hasLiveReviewedTime = [datetimeoffset]::TryParse([string]$decision.reviewedDateTime, [ref]$liveReviewed)
 	$hasLiveAppliedTime = [datetimeoffset]::TryParse([string]$decision.appliedDateTime, [ref]$liveApplied)
 	if ($liveUser -ne $review.UserId -or $liveGroup -ne $review.GroupId -or
 		($decision.principal.id -and [string]$decision.principal.id -ne $liveUser) -or
-		-not [datetimeoffset]::TryParse([string]$decision.reviewedDateTime, [ref]$liveReviewed) -or $liveReviewed -ne $reviewed -or
+		$hasReviewedTime -ne $hasLiveReviewedTime -or ($hasReviewedTime -and $liveReviewed -ne $reviewed) -or
+		(-not $hasReviewedTime -and [string]$review.ReviewedAt -ne [string]$decision.reviewedDateTime) -or
 		$hasAppliedTime -ne $hasLiveAppliedTime -or ($hasAppliedTime -and $applied -ne $liveApplied) -or
 		(-not $hasAppliedTime -and [string]$review.AppliedAt -ne [string]$decision.appliedDateTime)) {
 		return 'The review decision or its user, group or review time changed.'
 	}
 	$packageId = [string]$Row.PackageId
 	$packageUri = "$em/accessPackages/$([uri]::EscapeDataString($packageId))"
-	$package = Invoke-MgGraphRequest -Method GET -Uri "$packageUri`?`$expand=catalog,resourceRoleScopes(`$expand=role,scope)" -OutputType Hashtable -ErrorAction Stop
+	$package = Get-ReconciliationVerificationDetail "$packageUri`?`$expand=catalog,resourceRoleScopes(`$expand=role,scope)"
 	$catalog = if ($package.catalog.id) { $package.catalog.id } else { $package.catalogId }
 	if ($package.id -ne $packageId -or $catalog -ne $CatalogId.ToString() -or
 		$package -isnot [System.Collections.IDictionary] -or -not $package.Contains('resourceRoleScopes') -or
 		$null -eq $package.resourceRoleScopes) { return 'The package identity, catalog or resource roles could not be verified.' }
 	$roles = @($package.resourceRoleScopes)
-	if ($package.'resourceRoleScopes@odata.nextLink') { $roles += @(Get-ReconciliationCollection $package.'resourceRoleScopes@odata.nextLink') }
+	if ($package.'resourceRoleScopes@odata.nextLink') { $roles += @(Get-ReconciliationVerificationCollection $package.'resourceRoleScopes@odata.nextLink') }
 	$filter = [uri]::EscapeDataString("accessPackage/id eq '$($packageId.Replace("'", "''"))'")
-	$assignments = @(Get-ReconciliationCollection "$em/assignments?`$filter=$filter&`$expand=target")
+	$assignments = @(Get-ReconciliationVerificationCollection "$em/assignments?`$filter=$filter&`$expand=target")
 	$assignmentMatches = @($assignments | Where-Object { $_.id -eq $Row.Assignment.Id })
 	if ($assignmentMatches.Count -ne 1) { return 'The assignment was not found uniquely in the package.' }
-	$assignment = $assignmentMatches[0]
+	$assignment = Invoke-MgGraphRequest -Method GET -Uri "$em/assignments/$([uri]::EscapeDataString([string]$Row.Assignment.Id))?`$expand=target,accessPackage" -OutputType Hashtable -ErrorAction Stop
+	if ($assignment.id -ne $Row.Assignment.Id -or $assignment.accessPackage.id -ne $packageId) {
+		return 'The assignment identity or package changed.'
+	}
 	if (@($assignments | Where-Object { $_.state -ne 'expired' -and -not $_.target.objectId }).Count) {
 		return 'An active assignment has an unknown target; duplicate assignment checking is incomplete.'
 	}
 	if (@($assignments | Where-Object { $_.id -ne $assignment.id -and $_.state -ne 'expired' -and $_.target.objectId -eq $review.UserId }).Count) {
 		return 'Another active assignment exists for this user in the package.'
 	}
-	$requests = @(Get-ReconciliationCollection "$em/assignmentRequests?`$filter=$filter&`$expand=assignment(`$expand=target)")
+	$requests = @(Get-ReconciliationVerificationCollection "$em/assignmentRequests?`$filter=$filter&`$expand=assignment(`$expand=target)")
 	$live = [pscustomobject]@{
 		Review = [pscustomobject]@{ Decision = $decision.decision; ApplyResult = $decision.applyResult; InstanceStatus = $instance.status
 			InstanceScope = $instance.scope; ReviewedAt = $decision.reviewedDateTime; GroupId = $liveGroup; UserId = $liveUser }
@@ -398,6 +407,8 @@ function Get-ReconciliationLiveIssue {
 		}
 		if ($request.state -in @('denied', 'canceled', 'deliveryFailed')) { continue }
 		if ($sameAssignment -and $request.requestType -in @('adminAdd', 'userAdd')) { continue }
+		if ($target -and -not $sameAssignment -and -not $sameUser) { continue }
+		if (-not $hasReviewedTime) { return 'A request may affect this user or assignment, but the decision review time is unavailable.' }
 		$requestTime = Get-ReconciliationTime $request.createdDateTime 'request creation time'
 		if ($requestTime -ge $reviewed) {
 			if (-not $target -and -not $sameAssignment) { return 'A later assignment request has an unknown target; request checking is incomplete.' }
@@ -424,11 +435,6 @@ if (-not $environment.GraphEndpoint) { throw 'Unable to determine the connected 
 $script:graphBase = "$($environment.GraphEndpoint.TrimEnd('/'))/v1.0"
 $em = "$script:graphBase/identityGovernance/entitlementManagement"
 $reviews = "$script:graphBase/identityGovernance/accessReviews/definitions"
-if ($ApprovalCsvPath) {
-	foreach ($entry in $selection) {
-		if ($entry.TenantId -ne $context.TenantId) { throw 'The candidate CSV belongs to a different tenant.' }
-	}
-}
 Show-ReconciliationProgress 'Checking tenant-wide visibility' -Force
 Assert-ReconciliationVisibility $context
 Write-Host "Catalog: $CatalogId (all packages). Reviews overlapping $($ReviewStartedFrom.ToString('o')) through $($ReviewStartedBefore.ToString('o'))."
@@ -438,7 +444,7 @@ $issues = [System.Collections.Generic.List[object]]::new()
 $packageIssues = [System.Collections.Generic.List[object]]::new()
 $decisionsByGroup = @{}
 $matchedGroupIds = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
-$definitions = @(Get-ReconciliationCollection $reviews)
+$definitions = @(Get-ReconciliationReviewSnapshot $reviews)
 $matchingDefinitions = 0
 $definitionIndex = 0
 foreach ($definition in $definitions) {
@@ -448,7 +454,7 @@ foreach ($definition in $definitions) {
 	if (-not $definition.displayName.StartsWith($ReviewPrefix, [StringComparison]::OrdinalIgnoreCase)) { continue }
 	$matchingDefinitions++
 	$definitionUri = "$reviews/$([uri]::EscapeDataString([string]$definition.id))"
-	foreach ($instance in @(Get-ReconciliationCollection "$definitionUri/instances")) {
+	foreach ($instance in @(Get-ReconciliationReviewSnapshot "$definitionUri/instances")) {
 		if (-not $instance.id) { throw 'A review instance has no ID; no report was produced.' }
 		$instanceStart = Get-ReconciliationTime $instance.startDateTime 'review instance start'
 		if ($instanceStart -ge $ReviewStartedBefore) { continue }
@@ -460,7 +466,7 @@ foreach ($definition in $definitions) {
 			if ($instanceEnd -lt $ReviewStartedFrom) { continue }
 		}
 		$instanceUri = "$definitionUri/instances/$([uri]::EscapeDataString([string]$instance.id))"
-		foreach ($decision in @(Get-ReconciliationCollection "$instanceUri/decisions")) {
+		foreach ($decision in @(Get-ReconciliationReviewSnapshot "$instanceUri/decisions")) {
 			if (-not $decision.id -or -not $decision.decision) { throw 'A review decision has no ID or decision; no report was produced.' }
 			if ($decision.decision -notin @('Deny', 'NotReviewed', 'DontKnow')) { continue }
 			$ids = Get-ReconciliationDecisionIds $decision $instance.scope
@@ -568,6 +574,7 @@ foreach ($row in $rows) {
 	$rowsByAssignment[$id].Add($row)
 }
 $preliminary = [System.Collections.Generic.List[object]]::new()
+$candidates = [System.Collections.Generic.List[object]]::new()
 $eligibleRows = [System.Collections.Generic.List[object]]::new()
 foreach ($id in @($rowsByAssignment.Keys | Sort-Object)) {
 	$matchingRows = @($rowsByAssignment[$id])
@@ -581,19 +588,30 @@ foreach ($id in @($rowsByAssignment.Keys | Sort-Object)) {
 			foreach ($row in $validRows) { $row.Reason = 'Multiple different review matches require manual review.' }
 			continue
 		}
-		$row = @($validRows | Sort-Object { [datetimeoffset]$_.Review.ReviewedAt } -Descending)[0]
+		$row = @($validRows | Sort-Object {
+			$time = [datetimeoffset]::MinValue
+			$null = [datetimeoffset]::TryParse([string]$_.Review.ReviewedAt, [ref]$time)
+			$time
+		} -Descending)[0]
 		$eligibleRows.Add($row)
 	}
 }
-if (-not $ApprovalCsvPath -and $eligibleRows.Count) {
+if ($eligibleRows.Count) {
 	$conflicts = Get-ReconciliationReviewConflicts $eligibleRows.ToArray()
 	$index = 0
 	foreach ($row in $eligibleRows) {
 		$index++
 		Show-ReconciliationProgress 'Checking candidates for conflicts' $index $eligibleRows.Count
-		$reason = Get-ReconciliationLiveIssue $row $conflicts
-		if ($reason) { $row.Reason = $reason; continue }
-		$row.Reason = 'Candidate for removal; review before submitting.'
+		$reason = if ($Remediate) { Get-ReconciliationConflictIssue $row $conflicts }
+			else { Get-ReconciliationLiveIssue $row $conflicts }
+		if ($reason) {
+			foreach ($match in $rowsByAssignment[[string]$row.Assignment.Id]) {
+				if ($match.Reason -eq 'Not yet checked for conflicting reviews or pending requests.') { $match.Reason = $reason }
+			}
+			continue
+		}
+		$row.Reason = if ($Remediate) { 'Preliminary candidate; rechecked before removal.' }
+			else { 'Candidate for removal; review before submitting.' }
 		$packageName = [string]$row.PackageName
 		$userName = [string]$row.Review.UserName
 		if ($packageName -match '^\s*[=+\-@]') { $packageName = "'$packageName" }
@@ -605,16 +623,19 @@ if (-not $ApprovalCsvPath -and $eligibleRows.Count) {
 			InstanceId = [string]$row.Review.InstanceId; DecisionId = [string]$row.Review.DecisionId
 			ReviewedAt = [string]$row.Review.ReviewedAt; AppliedAt = [string]$row.Review.AppliedAt
 		}
-		if (@($item.PSObject.Properties | Where-Object { [string]$_.Value -match '^[\s]*[=+\-@]' }).Count) {
-			Write-Warning 'An identifier is unsafe for a spreadsheet CSV and was excluded from the preliminary selection; inspect the JSON report.'
-			continue
+		foreach ($property in $item.PSObject.Properties) {
+			if ([string]$property.Value -match '^\s*[=+\-@]') { $property.Value = "'$($property.Value)" }
 		}
 		$preliminary.Add($item)
+		$candidates.Add($row)
+		foreach ($match in $rowsByAssignment[[string]$row.Assignment.Id]) {
+			if ($match.Reason -eq 'Not yet checked for conflicting reviews or pending requests.') { $match.Reason = $row.Reason }
+		}
 	}
 }
 $fullPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($ReportPath)
-$selectionPath = if (-not $ApprovalCsvPath) { "$fullPath.candidates.csv" } else { $null }
-if ($selectionPath -and (Test-Path -LiteralPath $selectionPath)) { throw 'The preliminary candidates CSV path already exists; choose a different report path.' }
+$selectionPath = "$fullPath.candidates.csv"
+if (Test-Path -LiteralPath $selectionPath) { throw 'The candidates CSV path already exists; choose a different report path.' }
 $report = [ordered]@{
 	SchemaVersion = 1; TenantId = [string]$context.TenantId; StartedAt = $started.ToString('o'); FinishedAt = [datetimeoffset]::UtcNow.ToString('o')
 	CatalogId = $CatalogId.ToString()
@@ -622,7 +643,7 @@ $report = [ordered]@{
 	ReviewWindowBasis = if ($explicitReviewWindow) { 'InstanceStart' } else { 'ScheduledPeriodOverlap' }
 	MatchingDefinitions = $matchingDefinitions; PackagesInWindow = $packagesInWindow
 	PreliminaryCandidateCount = $preliminary.Count; PreliminarySelectionPath = $selectionPath
-	Limitations = @('All packages in the specified catalog are checked, regardless of creation date.', 'Review instances outside the selected review window may be missed.', 'Concurrent or out-of-band changes may not be detected.', 'Results depend on Graph permissions and visibility.')
+	Limitations = @('All packages in the specified catalog are checked, regardless of creation date.', 'Review instances outside the selected review window may be missed.', 'Concurrent or out-of-band changes may not be detected.', 'Results depend on Graph permissions and visibility.', 'For remediation, candidates are preliminary; consult the audit for revalidation and request outcomes.')
 	UnmatchedDecisions = @($issues.ToArray()); PackageIssues = @($packageIssues.ToArray())
 	DecisionsWithoutMatchingPackage = $noPackageMatches; Results = @($rows.ToArray())
 }
@@ -641,20 +662,40 @@ if ($selectionPath) {
 		try { foreach ($line in $csvLines) { $selectionWriter.WriteLine($line) } } finally { $selectionWriter.Dispose() }
 	}
 	finally { $selectionStream.Dispose() }
-	Write-Host "$($preliminary.Count) candidate(s) saved to $selectionPath. Review the report and CSV before remediation."
+	Write-Host "$($preliminary.Count) candidate(s) saved to $selectionPath."
+	if ($Remediate -and $preliminary.Count) {
+		Write-Host 'These candidates are preliminary; the audit records the final checks and request outcomes.'
+	}
 	$candidateIds = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
-	foreach ($item in $preliminary) { $null = $candidateIds.Add([string]$item.AssignmentId) }
-	$manualCount = @($rows | Where-Object { $_.Assignment.Id -and -not $candidateIds.Contains([string]$_.Assignment.Id) } |
-		ForEach-Object { $_.Assignment.Id } | Select-Object -Unique).Count
-	if ($manualCount) { Write-Warning "$manualCount assignment match(es) need manual review; see the reasons in the JSON report." }
+	foreach ($candidate in $candidates) { $null = $candidateIds.Add([string]$candidate.Assignment.Id) }
+	$manualRows = @($rows | Where-Object {
+		$_.Assignment.Id -and $_.Review.Decision -eq 'Deny' -and $_.Review.ApplyResult -eq 'AppliedSuccessfully' -and
+			-not $candidateIds.Contains([string]$_.Assignment.Id)
+	})
+	$manualCount = @($manualRows | ForEach-Object { $_.Assignment.Id } | Select-Object -Unique).Count
+	if ($manualCount) {
+		Write-Warning "$manualCount assignment(s) with an applied Deny were not eligible for automatic removal."
+		foreach ($group in @($manualRows | Group-Object Reason | Sort-Object Count -Descending)) {
+			$reasonCount = @($group.Group | ForEach-Object { $_.Assignment.Id } | Select-Object -Unique).Count
+			Write-Host "  ${reasonCount}: $($group.Name)"
+		}
+		Write-Host 'Counts by reason can overlap; see the JSON report for details.'
+	}
+	$otherCount = @($rows | Where-Object {
+		$_.Assignment.Id -and ($_.Review.Decision -ne 'Deny' -or $_.Review.ApplyResult -ne 'AppliedSuccessfully') -and
+			-not $candidateIds.Contains([string]$_.Assignment.Id)
+	} | ForEach-Object { $_.Assignment.Id } | Select-Object -Unique).Count
+	if ($otherCount) {
+		Write-Host "$otherCount assignment(s) also matched decisions that were not confirmed applied Deny; these are not automatic removal candidates."
+	}
 }
-if (-not $preliminary.Count -and -not $ApprovalCsvPath) {
+if (-not $preliminary.Count) {
 	Write-Warning 'No automatic candidates were found. Check the report for manual-review issues and scope limitations; an empty CSV does not prove there are no affected assignments.'
 }
 if (-not $matchingDefinitions -or -not $packagesInWindow) {
 	Write-Warning "Scope returned $matchingDefinitions matching review definition(s) and $packagesInWindow package(s). Check the scope and Graph visibility; an empty report does not prove there are no affected assignments."
 }
-if ($ApprovalCsvPath) {
+if ($Remediate) {
 	$auditFullPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($AuditPath)
 	$auditStream = [System.IO.File]::Open($auditFullPath, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::Read)
 	try {
@@ -663,55 +704,27 @@ if ($ApprovalCsvPath) {
 		try {
 			$baseAudit = @{ Timestamp = [datetimeoffset]::UtcNow.ToString('o'); Type = 'Started'
 				TenantId = [string]$context.TenantId; ReportPath = $fullPath; Mode = if ($Remediate -and -not $WhatIfPreference) { 'Remediate' } else { 'Preview' }
-				SelectionCount = $approvedIds.Count }
+				CandidateCount = $candidates.Count }
 			Write-ReconciliationAudit $auditWriter $auditStream $baseAudit
-			$candidates = [System.Collections.Generic.List[object]]::new()
 			$skipped = 0
-			foreach ($id in @($approvedIds | Sort-Object)) {
-				$matches = if ($rowsByAssignment.ContainsKey($id)) { @($rowsByAssignment[$id]) } else { @() }
-				$approval = $approvedEvidence[$id]
-				$matches = @($matches | Where-Object { $_.Review.ReviewId -eq $approval.ReviewId -and $_.Review.InstanceId -eq $approval.InstanceId -and $_.Review.DecisionId -eq $approval.DecisionId })
-				$reason = if ($matches.Count -ne 1) { 'The assignment has no unique matching review and package in the current inventory.' }
-					else { Get-ReconciliationEvidenceIssue $matches[0] }
-				if (-not $reason) {
-					$row = $matches[0]
-					$approvedTime = [datetimeoffset]::MinValue
-					$currentTime = [datetimeoffset]::MinValue
-					$approvedAppliedTime = [datetimeoffset]::MinValue
-					$currentAppliedTime = [datetimeoffset]::MinValue
-					$hasApprovedAppliedTime = [datetimeoffset]::TryParse([string]$approval.AppliedAt, [ref]$approvedAppliedTime)
-					$hasCurrentAppliedTime = [datetimeoffset]::TryParse([string]$row.Review.AppliedAt, [ref]$currentAppliedTime)
-					if ($approval.PackageId -ne $row.PackageId -or $approval.UserId -ne $row.Review.UserId -or
-						$approval.GroupId -ne $row.Review.GroupId -or $approval.ReviewId -ne $row.Review.ReviewId -or
-						$approval.InstanceId -ne $row.Review.InstanceId -or $approval.DecisionId -ne $row.Review.DecisionId -or
-						-not [datetimeoffset]::TryParse([string]$approval.ReviewedAt, [ref]$approvedTime) -or
-						-not [datetimeoffset]::TryParse([string]$row.Review.ReviewedAt, [ref]$currentTime) -or $approvedTime -ne $currentTime -or
-						$hasApprovedAppliedTime -ne $hasCurrentAppliedTime -or
-						($hasApprovedAppliedTime -and $approvedAppliedTime -ne $currentAppliedTime) -or
-						(-not $hasApprovedAppliedTime -and [string]$approval.AppliedAt -ne [string]$row.Review.AppliedAt)) {
-						$reason = 'The current assignment or review evidence differs from the approved selection.'
-					}
-				}
-				if ($reason) {
-					Write-ReconciliationAudit $auditWriter $auditStream @{ Timestamp = [datetimeoffset]::UtcNow.ToString('o'); Type = 'Skipped'; AssignmentId = $id; Reason = $reason }
-					$skipped++
-				}
-				else { $candidates.Add($matches[0]) }
+			$skipReasons = @{}
+			foreach ($id in @($rowsByAssignment.Keys | Sort-Object)) {
+				if ($candidateIds.Contains($id)) { continue }
+				$denials = @($rowsByAssignment[$id] | Where-Object { $_.Review.Decision -eq 'Deny' } |
+					Sort-Object { $_.Review.ApplyResult -ne 'AppliedSuccessfully' })
+				if (-not $denials.Count) { continue }
+				Write-ReconciliationAudit $auditWriter $auditStream @{ Timestamp = [datetimeoffset]::UtcNow.ToString('o'); Type = 'Skipped'; AssignmentId = $id; Reason = $denials[0].Reason }
+				$skipReasons[$denials[0].Reason]++
+				$skipped++
 			}
 			$submitted = 0
 			$previewed = 0
 			if ($candidates.Count) {
-				try {
-					$conflicts = Get-ReconciliationReviewConflicts $candidates.ToArray()
-				}
-				catch {
-					Write-ReconciliationAudit $auditWriter $auditStream @{ Timestamp = [datetimeoffset]::UtcNow.ToString('o'); Type = 'Error'; Reason = $_.Exception.Message }
-					throw
-				}
+				$proceed = $PSCmdlet.ShouldProcess("up to $($candidates.Count) assignments in catalog $CatalogId", 'Submit administrative removal requests')
 				$index = 0
-				foreach ($candidate in $candidates) {
+				foreach ($candidate in @($candidates | Sort-Object PackageId)) {
 					$index++
-					Show-ReconciliationProgress 'Revalidating approved assignments' $index $candidates.Count
+					Show-ReconciliationProgress 'Checking and processing assignments' $index $candidates.Count
 					$id = [string]$candidate.Assignment.Id
 					try { $reason = Get-ReconciliationLiveIssue $candidate $conflicts }
 					catch {
@@ -720,17 +733,13 @@ if ($ApprovalCsvPath) {
 					}
 					if ($reason) {
 						Write-ReconciliationAudit $auditWriter $auditStream @{ Timestamp = [datetimeoffset]::UtcNow.ToString('o'); Type = 'Skipped'; AssignmentId = $id; Reason = $reason }
+						$skipReasons[$reason]++
 						$skipped++
 						continue
 					}
-					if (-not $Remediate) {
-						Write-ReconciliationAudit $auditWriter $auditStream @{ Timestamp = [datetimeoffset]::UtcNow.ToString('o'); Type = 'Preview'; AssignmentId = $id; PackageId = $candidate.PackageId; UserId = $candidate.Review.UserId; GroupId = $candidate.Review.GroupId }
-						$previewed++
-						continue
-					}
-					if (-not $PSCmdlet.ShouldProcess("assignment $id", 'Submit administrative removal request')) {
+					if (-not $proceed) {
 						$type = if ($WhatIfPreference) { 'Preview' } else { 'Declined' }
-						Write-ReconciliationAudit $auditWriter $auditStream @{ Timestamp = [datetimeoffset]::UtcNow.ToString('o'); Type = $type; AssignmentId = $id }
+						Write-ReconciliationAudit $auditWriter $auditStream @{ Timestamp = [datetimeoffset]::UtcNow.ToString('o'); Type = $type; AssignmentId = $id; PackageId = $candidate.PackageId; UserId = $candidate.Review.UserId; GroupId = $candidate.Review.GroupId }
 						if ($WhatIfPreference) { $previewed++ } else { $skipped++ }
 						continue
 					}
@@ -762,7 +771,8 @@ if ($ApprovalCsvPath) {
 				}
 			}
 			Write-ReconciliationAudit $auditWriter $auditStream @{ Timestamp = [datetimeoffset]::UtcNow.ToString('o'); Type = 'Finished'; Submitted = $submitted; Previewed = $previewed; Skipped = $skipped }
-			Write-Host "Approval processing complete: $submitted request(s) submitted, $previewed previewed, $skipped skipped. Audit: $auditFullPath"
+			Write-Host "Processing complete: $submitted request(s) submitted, $previewed previewed, $skipped skipped. Audit: $auditFullPath"
+			foreach ($reason in @($skipReasons.Keys | Sort-Object)) { Write-Host "  $($skipReasons[$reason]): $reason" }
 			if ($submitted) { Write-Warning 'Submitted requests are not confirmation of removal. Verify each request and group membership in Entra.' }
 		}
 		finally { $auditWriter.Dispose() }
